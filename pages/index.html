@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>suspenders — the governor for agent fleets</title>
+    <link rel="icon" type="image/svg+xml" href="icon.svg" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <meta
       name="description"
       content="A SQLite control plane for multi-agent Claude Code fleets: capability-aware dispatch, zombie detection, decision forks with LLM advice, and a live fleet board."
@@ -12,7 +14,9 @@
       :root { color-scheme: light; }
       * { box-sizing: border-box; margin: 0; }
       body {
-        background: #e9e9e7 url("suspenders.jpg") center 20% / cover no-repeat fixed;
+        /* 2x-viewport-height image, top-anchored + fixed: the window shows
+           the top ~50% of the photo; scrolling reveals the rest (parallax) */
+        background: #e9e9e7 url("suspenders.jpg") center top / auto 200vh no-repeat fixed;
         color: #666;
         font: 14px/1.65 "Lucida Grande", Geneva, Verdana, Arial, sans-serif;
         padding: 0 24px;
@@ -131,7 +135,7 @@
       }
       .threads-badge b { font-weight: bold; color: #333; }
       .threads-badge:hover b { color: #000; }
-      threads-mark { vertical-align: middle; margin-right: 1px; }
+      threads-mark { vertical-align: middle; margin: 0 3px 0 2px; }
     </style>
   </head>
   <body>
@@ -294,7 +298,7 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
 
       <footer>
         <a class="threads-badge" href="https://www.threads.dk" title="Threads — strategic design firm">
-          <threads-mark size="26"></threads-mark> a <b>Threads</b> thing
+          a <threads-mark size="20"></threads-mark><b>Threads</b> thing
         </a>
         <span>
           <a href="https://github.com/klh/suspenders/blob/main/LICENSE">BSL 1.1</a> — free non-production,
