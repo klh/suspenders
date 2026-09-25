@@ -3,12 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>suspenders — the governor for agent fleets</title>
+    <title>suspenders — the control plane for agent fleets</title>
     <link rel="icon" type="image/svg+xml" href="icon.svg" />
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <meta
       name="description"
-      content="A SQLite control plane for multi-agent Claude Code fleets: capability-aware dispatch, zombie detection, decision forks with LLM advice, and a live fleet board."
+      content="A SQLite control plane for multi-agent Claude Code fleets: capability-aware dispatch, zombie detection, decisions with LLM recommendations, and a live fleet board."
     />
     <style>
       :root { color-scheme: light; }
@@ -144,13 +144,13 @@
         <div class="kicker">suspenders</div>
         <h1>Your agent fleet,<br />with <span class="accent">suspenders</span>.</h1>
         <p class="tagline">
-          Five parallel Claude Code sessions. A usage cliff freezes three mid-edit. The survivors keep claiming scopes;
-          nobody notices for six hours.
+          Five parallel Claude Code sessions. A usage cliff freezes three mid-edit. The survivors keep editing the same
+          files; nobody notices for six hours.
           <b>Suspenders is the control plane that notices — and the board where you decide what happens next.</b>
         </p>
         <div class="cta">
           <a class="btn" href="https://github.com/klh/suspenders">GitHub</a>
-          <a class="btn ghost" href="https://github.com/klh/suspenders#what-you-get">Features</a>
+          <a class="btn ghost" href="https://github.com/klh/suspenders#what-problem-does-it-solve">Features</a>
           <code class="install"><span class="p">$</span> ./install.sh --wire</code>
         </div>
       </header>
@@ -160,37 +160,37 @@
         <div class="shot">
           <img
             src="screenshot.png"
-            alt="suspenders fleet board: decision fork with LLM advice, lanes, task columns, event stream"
+            alt="suspenders fleet board: an open decision with LLM recommendation, lanes, task columns, event stream"
           />
         </div>
         <p class="caption">
-          Decision forks surface as red cards. <b>Advice me!</b> has an LLM analyze the fork in control-plane context; you
-          edit or send. Lanes, completion stats, and the event stream stay live at 1s.
+          Open decisions surface as red cards. <b>Get recommendation</b> has an LLM analyze the decision in
+          control-plane context; you edit or send. Lanes, completion stats, and the event stream stay live at 1s.
         </p>
       </section>
 
       <section>
-        <h2>How a fork resolves</h2>
+        <h2>How a decision resolves</h2>
         <div class="flow">
           <div class="step">
             <span class="n">01</span>
             <div class="t">
-              A lane hits a fork mid-flight <span class="who">— it emits</span> <code>NEED_DECISION</code>
+              A lane needs a call made mid-flight <span class="who">— it emits</span> <code>NEED_DECISION</code>
               <span class="who">instead of blocking silently</span>
             </div>
           </div>
           <div class="step">
             <span class="n">02</span>
             <div class="t">
-              The board surfaces it <span class="who">— red card, asker, age; nothing decision-shaped stays buried in a
-              transcript</span>
+              The board surfaces it <span class="who">— red card, asker, age; the question becomes visible to you, not
+              just the lane</span>
             </div>
           </div>
           <div class="step">
             <span class="n">03</span>
             <div class="t">
-              You press <b>Advice me!</b> <span class="who">— the advise worker gathers claims, recent events, work-graph
-              shape and asks your configured LLM</span>
+              You press <b>Get recommendation</b> <span class="who">— the advise worker gathers claims, recent events,
+              work-graph shape and asks your configured LLM</span>
             </div>
           </div>
           <div class="step">
@@ -203,19 +203,19 @@
           <div class="step">
             <span class="n">05</span>
             <div class="t">
-              You edit, then send <span class="who">— the answer rides the bus back to the lane as</span>
-              <code>ANSWER</code><span class="who">. The LLM advises; the human decides.</span>
+              You edit, then send <span class="who">— the answer goes back to the lane as</span>
+              <code>ANSWER</code><span class="who">. Recommendations are suggestions; only you send.</span>
             </div>
           </div>
         </div>
       </section>
 
       <section>
-        <h2>What the harness enforces</h2>
+        <h2>What it enforces</h2>
         <p style="font-size: 13px">
-          secrets-gate before every Bash call &nbsp;·&nbsp; file-lease governor on edits &nbsp;·&nbsp; capability-aware
-          dispatch &nbsp;·&nbsp; plan-gated fan-out &nbsp;·&nbsp; zombie detection that never equates a lookup failure with
-          death &nbsp;·&nbsp; auto-reclaim? never — the human decides
+          secrets-gate before every Bash call &nbsp;·&nbsp; file leases on edits &nbsp;·&nbsp; capability-aware
+          dispatch &nbsp;·&nbsp; plan-gated fan-out &nbsp;·&nbsp; zombie detection that never mistakes a failed lookup for
+          death &nbsp;·&nbsp; no auto-reclaim — reclaiming a lane is your call
         </p>
       </section>
 
@@ -232,35 +232,35 @@ sequenceDiagram
     participant A as advise.ts (LLM worker)
     participant H as Human operator
 
-    Note over L,G: work and checkpoints ride the bus — never prose
+    Note over L,G: work and checkpoints are structured events in the database
     L->>G: work take W7 (CAS claim, capability-checked)
     L->>G: emit checkpoint --sha (milestone)
-    L->>G: emit NEED_DECISION (fork raised)
+    L->>G: emit NEED_DECISION (decision raised)
 
-    G->>B: 1s poll — fork card (red, asker, age)
-    B->>H: "2 forks need you"
+    G->>B: 1s poll — decision card (red, asker, age)
+    B->>H: "2 decisions need you"
 
     alt human wants machine advice
-        H->>B: click "Advice me!"
+        H->>B: click "Get recommendation"
         B->>A: POST /api/advise (spawn, detached)
         A->>G: read claims, recent events, graph shape
         A->>A: LLM call (OpenAI-compatible, autodiscovered)
         A->>G: fact advice.#id + ADVICE event
-        G->>B: advice inline (rec / rationale / risk / model)
-        B->>H: "use this" fills the answer box
+        G->>B: recommendation inline (rec / rationale / risk / model)
+        B->>H: "use" fills the answer field
     end
 
     H->>B: edit decision, send
-    B->>G: emit ANSWER --to lane (auto-acks the fork)
+    B->>G: emit ANSWER --to lane (auto-acks the decision)
     G->>L: lane inbox sees ANSWER on next poll
 
-    Note over L,C: consults — questions, never ownership
+    Note over L,C: consults — one agent asks another a question
     L->>G: coord who-knows "retry contracts?"
     G->>C: consult C## in expert inbox
     C->>G: coord consult-reply C## answer
     G->>L: answer lands in lane inbox
 
-    Note over G,H: zombies — 2 stale signals alert, never auto-reclaim
+    Note over G,H: zombie detection — two stale signals alert; reclaim is human
     G->>B: zombie chip (lane frozen by usage cliff)
     H->>G: work reclaim W4 — re-dispatch at frozen transcript
 </pre
@@ -268,9 +268,8 @@ sequenceDiagram
         </div>
         <p class="caption">
           Rendered with mermaid — the same diagram lives in the
-          <a href="https://github.com/klh/suspenders#messaging-consults-and-the-human-in-the-loop">README</a>. The
-          invariants: the bus is the transport, consults never move ownership, and the human is the only one who answers
-          forks or reclaims lanes.
+          <a href="https://github.com/klh/suspenders#messaging-and-consults">README</a>. The database is the transport,
+          consults only carry answers between agents, and only you answer decisions or reclaim lanes.
         </p>
       </section>
 
@@ -283,16 +282,16 @@ sequenceDiagram
   ▼
 <b>governor.db</b> (SQLite/WAL) — sessions · claims · work graph · events · facts
   ▲ 1s poll (WAL = concurrent readers)
-fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
+fleet board — decisions · lanes · tasks · stream   ← you, deciding</pre>
         </div>
       </section>
 
       <section>
         <h2>Why "suspenders"</h2>
         <p class="tagline" style="margin-top: 0">
-          Belt <em>and</em> suspenders: the harness trusts the graph, verifies with two independent liveness signals, and
-          never lets one failure mode be fatal.
-          <b>The Work Graph is authoritative; everything else — prose, transcripts, memory — is reconstruction.</b>
+          Belt <em>and</em> suspenders: the graph is the record, and a lane is only flagged dead after two independent
+          signals — heartbeat and transcript — both go stale.
+          <b>Task state lives in the database, so any session — restarted, compacted, or brand new — sees the same queue.</b>
         </p>
       </section>
 
