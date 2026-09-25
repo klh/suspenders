@@ -60,6 +60,9 @@
         color: #555;
       }
       .install .p { color: #af2f12; }
+      .why { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 36px; align-items: center; }
+      .why img { width: 100%; display: block; border: 1px solid #ddd; }
+      @media (max-width: 640px) { .why { grid-template-columns: 1fr; } }
       section { margin-top: 84px; }
       h2 {
         font-size: 12px;
@@ -273,11 +276,14 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
 
       <section>
         <h2>Why "suspenders"</h2>
-        <p class="tagline" style="margin-top: 0">
-          Belt <em>and</em> suspenders: the harness trusts the graph, verifies with two independent liveness signals, and
-          never lets one failure mode be fatal.
-          <b>The Work Graph is authoritative; everything else — prose, transcripts, memory — is reconstruction.</b>
-        </p>
+        <div class="why">
+          <img src="suspenders.jpg" alt="Black leather suspenders on a light background — the namesake" />
+          <p class="tagline" style="margin-top: 0">
+            Belt <em>and</em> suspenders: the harness trusts the graph, verifies with two independent liveness signals, and
+            never lets one failure mode be fatal.
+            <b>The Work Graph is authoritative; everything else — prose, transcripts, memory — is reconstruction.</b>
+          </p>
+        </div>
       </section>
 
       <footer>
