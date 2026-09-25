@@ -100,6 +100,26 @@ if (mine.length || inbox > 0 || readyN > 0 || head) {
 	out.push(RULES);
 }
 
+// fleet notices: inject unseen `coord broadcast` notes — each session sees
+// each notice exactly once (per-session watermark in facts)
+{
+	const bl = db.query("SELECT value FROM facts WHERE key = 'broadcast.latest'").get() as { value: string } | null;
+	if (bl) {
+		try {
+			const b = JSON.parse(bl.value) as { id: string; ts: number; note: string };
+			const seen = db.query("SELECT value FROM facts WHERE key = ?").get(`broadcast.seen.${sid}`) as { value: string } | null;
+			if (b.ts > Number(seen?.value ?? 0)) {
+				out.push(`FLEET NOTICE (${new Date(b.ts).toISOString().slice(0, 16).replace("T", " ")} UTC): ${b.note}`);
+				db.query("INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts").run(
+					`broadcast.seen.${sid}`,
+					String(b.ts),
+					now,
+				);
+			}
+		} catch {}
+	}
+}
+
 // legacy-ledger notice: known operational-ledger names, unmarked = old habit
 // may still treat them as live. One terse line, first match only. Deterministic
 // filename check only — no content classification, no auto-migration.

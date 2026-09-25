@@ -83,6 +83,22 @@ if (cmd === "emit") {
 		to,
 	);
 	console.log(`${green("✓")} ${dim(`event queued #${(db.query("SELECT last_insert_rowid() AS id").get() as { id: number }).id} → ${to ? `@${to.slice(0, 8)}` : "bus"}`)}`);
+} else if (cmd === "broadcast") {
+	// fleet-wide rules notice: live lanes receive it in their inbox on the
+	// next poll; future sessions get it injected once at SessionStart
+	// (facts broadcast.latest + broadcast.seen.<sid> watermark)
+	const note = arg("--note");
+	if (!note) die('usage: broadcast --note "..." [--as sid]');
+	const source = arg("--as") ?? "owner";
+	const ts = Date.now();
+	const bid = `b${ts}`;
+	const targets = db.query("SELECT sid FROM sessions WHERE state = 'RUNNING'").all() as { sid: string }[];
+	const insB = db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'BROADCAST', NULL, ?, ?)");
+	for (const t of targets) insB.run(ts, source, JSON.stringify({ id: bid, note }), t.sid);
+	const upF = db.query("INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts");
+	upF.run(`broadcast.${bid}`, note, ts);
+	upF.run("broadcast.latest", JSON.stringify({ id: bid, ts, note }), ts);
+	console.log(`${green("✓")} broadcast ${bid} → ${targets.length} running session(s) + SessionStart tail for future ones`);
 } else if (cmd === "state") {
 	// between-rounds check for a lane: canonical state + inbox + current HEAD
 	const as = arg("--as") ?? die("usage: state --as <sid>");
