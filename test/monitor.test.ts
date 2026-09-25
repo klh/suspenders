@@ -119,6 +119,24 @@ describe("waiting for you", () => {
 		d.close();
 	});
 
+	test("decision-gated item without an OPEN decision is surfaced; --fix emits the NEED_DECISION once", () => {
+		const db0 = new Database(DB);
+		db0.query("INSERT INTO work_items (project, id, title, state, owner_sid, created_at, updated_at) VALUES (?, 'W-DEC', 'W-DEC seam ruling (DECISION, no code)', 'READY', NULL, ?, ?)").run(REPO, OLD, OLD);
+		db0.query("INSERT INTO facts (key, value, ts) VALUES ('coordinator.sid', 'coord-sess-cccccc', ?)").run(Date.now());
+		db0.close();
+		const r = run(); // read-only: alert only, no emission
+		expect(r.err).toContain("W-DEC is decision-gated");
+		const r2 = run(["--fix"]); // emits at the coordinator, exactly once
+		expect(r2.out).toContain("emitted NEED_DECISION for W-DEC");
+		const d = new Database(DB, { readonly: true });
+		const ev = one(d, "SELECT payload, target FROM events WHERE kind = 'NEED_DECISION' AND payload LIKE '%W-DEC%'") as { payload: string; target: string };
+		expect(JSON.parse(ev.payload).work).toBe("W-DEC");
+		expect(ev.target).toBe("coord-sess-cccccc");
+		d.close();
+		const r3 = run(); // idempotent: no re-alert, no re-emit
+		expect(r3.err).not.toContain("W-DEC");
+	});
+
 	test("answered decision returns the lane to normal zombie rules", () => {
 		const d0 = new Database(DB);
 		d0.query("UPDATE decisions SET state = 'ANSWERED' WHERE answer_to = ?").run(WAIT_SID);

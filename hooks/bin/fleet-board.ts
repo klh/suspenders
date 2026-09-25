@@ -68,10 +68,19 @@ const projOf = (sid: string): string | null =>
 
 // delivery: DELIVERED once the target lane shows life or its cursor reads
 // past the fork; FAILED when the session is unknown/dead and never picked
-// the decision up (UI: "delivery failed — retry")
+// the decision up (UI: "delivery failed — retry"). Coordinator role is alive
+// unconditionally: coordinators sleep between waves (monitor exempts them
+// from sweeps) — hb staleness there is not death (2026-09-25: the gaps
+// coordinator idled ~8h waiting on work and the board declared its decision
+// undeliverable).
 const targetAlive = (sid: string, now: number): boolean => {
-	const s = db.query("SELECT hb FROM sessions WHERE sid = ?").get(sid) as { hb: number } | null;
-	return !!s && now - s.hb <= deadAfterMs();
+	const s = db.query("SELECT hb, role FROM sessions WHERE sid = ?").get(sid) as { hb: number; role: string | null } | null;
+	if (!s) return false;
+	if (s.role === "coordinator") return true;
+	// the published coordinator identity is authoritative (coord fact set
+	// coordinator.sid) — a misrecorded role must not unpublish its liveness
+	if (sid === (db.query("SELECT value FROM facts WHERE key = 'coordinator.sid'").get() as { value: string } | null)?.value) return true;
+	return now - s.hb <= deadAfterMs();
 };
 const pickedUp = (eventId: number, sid: string): boolean =>
 	((db.query("SELECT event_id FROM cursors WHERE sid = ?").get(sid) as { event_id: number } | null)?.event_id ?? 0) >= eventId;
@@ -84,6 +93,11 @@ function normOptions(v: unknown): string {
 		try {
 			v = JSON.parse(v);
 		} catch {}
+	}
+	if (typeof v === "string") {
+		// CLI ergonomics: --options="a | b" — a bare string splits into labels
+		const labels = v.split(/\s*\|\s*/).filter(Boolean);
+		if (labels.length > 1) v = labels;
 	}
 	if (!Array.isArray(v) || !v.length) return "";
 	return JSON.stringify(
@@ -140,9 +154,13 @@ function syncDecisions(): void {
 		enrich(d, db.query("SELECT source, payload FROM events WHERE id = ?").get(d.event_id));
 	}
 	// a decision addressed to a lane that died before pickup reads as FAILED
-	// instead of silently waiting forever; cursor past the fork = picked up
-	for (const d of db.query("SELECT event_id, target FROM decisions WHERE state = 'OPEN' AND delivery != 'FAILED'").all() as any[])
-		if (!targetAlive(d.target, now) && !pickedUp(d.event_id, d.target)) db.query("UPDATE decisions SET delivery = 'FAILED' WHERE event_id = ?").run(d.event_id);
+	// instead of silently waiting forever; cursor past the fork = picked up.
+	// Truth-sync, not one-way degradation: a wrongly-FAILED row (target alive
+	// all along — see targetAlive) repairs itself when the target shows life.
+	for (const d of db.query("SELECT event_id, target FROM decisions WHERE state = 'OPEN'").all() as any[])
+		db
+			.query("UPDATE decisions SET delivery = ? WHERE event_id = ?")
+			.run(targetAlive(d.target, now) || pickedUp(d.event_id, d.target) ? "DELIVERED" : "FAILED", d.event_id);
 	// OPEN → CANCELLED: the asking lane superseded/cancelled the linked work
 	for (const d of db
 		.query(`SELECT d.event_id AS id FROM decisions d WHERE d.state = 'OPEN' AND d.task_id IS NOT NULL AND EXISTS (SELECT 1 FROM events e

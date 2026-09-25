@@ -14,6 +14,10 @@ import { openGovernorDb } from "../lib/govdb.ts";
 const db = openGovernorDb();
 const now = Date.now();
 const fix = process.argv.includes("--fix");
+// published coordinator identity (coord fact set coordinator.sid) — the
+// authority for coordinator exemptions, above the misrecordable role column
+const coordinatorSid =
+	(db.query("SELECT value FROM facts WHERE key = 'coordinator.sid'").get() as { value: string } | null)?.value ?? null;
 const issues: string[] = [];
 const fixed: string[] = [];
 
@@ -51,7 +55,7 @@ for (const s of db.query("SELECT sid, role, hb FROM sessions WHERE state = 'RUNN
 			// waiting on a human, not dead — surfaced, never swept
 			const n = waiting.get(s.sid) ?? 0;
 			console.log(`WAITING session ${s.sid.slice(0, 8)} — ${n} open decision${n === 1 ? "" : "s"}, stale hb (not swept)`);
-		} else if (s.role === "coordinator") {
+		} else if (s.role === "coordinator" || s.sid === coordinatorSid) {
 			// the coordinator sleeps between waves — a stale hb is not death;
 			// state stays RUNNING so broadcasts and bus targeting keep working
 			console.log(`COORDINATOR ${s.sid.slice(0, 8)} hb stale — left RUNNING`);
@@ -67,6 +71,43 @@ for (const w of db.query("SELECT project, id, owner_sid FROM work_items WHERE st
 	project: string; id: string; owner_sid: string;
 }[]) {
 	issues.push(`${w.project.split("/").pop()?.replace(".git", "")}/${w.id} DONE but still owned by ${w.owner_sid.slice(0, 8)}`);
+}
+
+// 2b. decision-gated work items with no OPEN decision on the board — the
+// NEED_DECISION was never emitted, or died with the lane that promised it
+// (2026-09-25: W133 "ratify split or fold" sat in a session's chat for hours
+// while the owner waited to rule; a chat ask is invisible to the board).
+// Detector: title says DECISION. --fix emits the missing NEED_DECISION at
+// the project coordinator (fact coordinator.sid).
+let decisionGated: { project: string; id: string; title: string; owner_sid: string | null; scope: string | null }[] = [];
+try {
+	decisionGated = db
+		.query(
+			`SELECT project, id, title, owner_sid, scope FROM work_items
+			 WHERE state IN ('READY','CLAIMED','RUNNING') AND title LIKE '%DECISION%'
+			 AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.task_id = work_items.id AND d.state = 'OPEN')
+			 AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'NEED_DECISION' AND json_extract(e.payload, '$.work') = work_items.id)`,
+		)
+		.all() as typeof decisionGated;
+} catch {} // no decisions table yet — board never ran, nothing to surface
+for (const w of decisionGated) {
+	const label = `${w.project.split("/").pop()?.replace(".git", "")}/${w.id} is decision-gated but has no OPEN decision on the board`;
+	if (fix) {
+		const coord = (db.query("SELECT value FROM facts WHERE key = 'coordinator.sid'").get() as { value: string } | null)?.value;
+		if (coord) {
+			db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'monitor', 'NEED_DECISION', ?, ?, ?)").run(
+				now,
+				w.scope,
+				JSON.stringify({ work: w.id, project: w.project, note: `${w.title} — surfaced by monitor: the NEED_DECISION for this item was never emitted` }),
+				coord,
+			);
+			fixed.push(`emitted NEED_DECISION for ${w.id} → coordinator`);
+		} else {
+			issues.push(`${label} (no coordinator.sid fact — set it: coord fact set coordinator.sid <sid>)`);
+		}
+	} else {
+		issues.push(label);
+	}
 }
 
 // 3. expired locks (ts-based, safe to sweep)
