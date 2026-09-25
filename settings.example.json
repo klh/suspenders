@@ -1,0 +1,34 @@
+{
+  "_comment": "suspenders hook wiring — merge the 'hooks' object into ~/.claude/settings.json (install.sh --wire does this safely). Paths assume the default prefix ~/.claude/hooks/suspenders. Every registration is `bun gate.ts <event>` — one entrypoint, dispatch in gate.ts.",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "bun $HOME/.claude/hooks/suspenders/session-start.ts" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "bun $HOME/.claude/hooks/suspenders/session-end.ts" } ] }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [ { "type": "command", "command": "bun $HOME/.claude/hooks/suspenders/gate.ts pre-bash", "timeout": 10 } ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|MultiEdit",
+        "hooks": [ { "type": "command", "command": "bun $HOME/.claude/hooks/suspenders/gate.ts governor", "timeout": 10 } ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [ { "type": "command", "command": "bun $HOME/.claude/hooks/suspenders/gate.ts pre-files", "timeout": 10 } ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [ { "type": "command", "command": "bun $HOME/.claude/hooks/suspenders/gate.ts post-files", "timeout": 10 } ]
+      }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "bun $HOME/.claude/hooks/suspenders/gate.ts stop" } ] }
+    ]
+  }
+}
