@@ -119,7 +119,7 @@
       }
       .threads-badge b { font-weight: bold; color: #333; }
       .threads-badge:hover b { color: #000; }
-      .tmark { width: 9px; height: 9px; display: inline-block; background: #af2f12; transition: background 0.35s; }
+      canvas.tweave { display: inline-block; width: 120px; height: 30px; vertical-align: middle; }
     </style>
   </head>
   <body>
@@ -282,7 +282,7 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
 
       <footer>
         <a class="threads-badge" href="https://www.threads.dk" title="Threads — strategic design firm">
-          <span class="tmark" id="tmark"></span> a <b>Threads</b> thing
+          <canvas class="tweave" id="tweave" aria-hidden="true"></canvas> a <b>Threads</b> thing
         </a>
         <span>
           <a href="https://github.com/klh/suspenders/blob/main/LICENSE">BSL 1.1</a> — free non-production,
@@ -300,16 +300,52 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
       mermaid.initialize({ startOnLoad: true, theme: "neutral", fontFamily: "Geneva, Verdana, sans-serif" });
     </script>
     <script>
-      // the Threads mark changes every second — same rhythm as threads.dk
+      // the Threads weave — threads.dk's own component (site.js Dl()), scaled
+      // to badge size: swaying stitched lines, every ~5th in brand rust,
+      // pointer-reactive, rAF-driven, static under prefers-reduced-motion
       (function () {
-        var colors = ["#af2f12", "#19f", "#d8900f", "#5c7a35", "#c96a4f", "#79a8a8", "#333333", "#8a6db0", "#b06a3b", "#19f"];
-        var i = 0;
-        var el = document.getElementById("tmark");
-        if (!el) return;
-        setInterval(function () {
-          i = (i + 1) % colors.length;
-          el.style.background = colors[i];
-        }, 1000);
+        var cv = document.getElementById("tweave");
+        if (!cv || !cv.getContext) return;
+        var t2 = cv.getContext("2d");
+        var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        var dark = window.matchMedia("(prefers-color-scheme: dark)");
+        var W = 0, H = 0, tt = 0, px = -9999, py = -9999, seed = Math.floor(Math.random() * 1e6), rows = [];
+        function rnd(g) { var y = Math.sin(seed + g * 127.1) * 43758.5453; return y - Math.floor(y); }
+        function size() {
+          var d = Math.min(window.devicePixelRatio || 1, 2);
+          W = cv.clientWidth; H = cv.clientHeight;
+          cv.width = W * d; cv.height = H * d;
+          t2.setTransform(d, 0, 0, d, 0, 0);
+          rows = [];
+          var n = Math.max(5, Math.floor(H / 6));
+          for (var b = 0; b < n; b++)
+            rows.push({ y: (b + 0.5) * (H / n), amp: 1.5 + rnd(b) * 3.5, f: 0.008 + rnd(b + 40) * 0.012, ph: rnd(b + 80) * 6.28, sp: 0.4 + rnd(b + 120) * 0.6, rust: rnd(b + 160) > 0.82, w: rnd(b + 200) > 0.5 ? 1.4 : 0.7 });
+        }
+        function hair() { return dark.matches ? "rgba(236, 230, 220, 0.5)" : "rgba(32, 29, 26, 0.5)"; }
+        function rust() { return dark.matches ? "rgba(216, 81, 44, 0.9)" : "rgba(175, 47, 18, 0.9)"; }
+        cv.addEventListener("pointermove", function (g) { var r = cv.getBoundingClientRect(); px = g.clientX - r.left; py = g.clientY - r.top; });
+        cv.addEventListener("pointerleave", function () { px = -9999; py = -9999; });
+        function frame() {
+          t2.clearRect(0, 0, W, H);
+          for (var g = 0; g < rows.length; g++) {
+            var r = rows[g], yy = 0, ix = 0;
+            t2.beginPath();
+            t2.strokeStyle = r.rust ? rust() : hair();
+            t2.lineWidth = r.w;
+            for (var N = 0; N <= W; N += 6) {
+              yy = r.y + Math.sin(N * r.f + r.ph + tt * r.sp) * r.amp;
+              var dx = N - px, dy = r.y - py, dd = dx * dx + dy * dy;
+              if (dd < 400) { var s = (1 - dd / 400) * 4; ix += (dx > 0 ? 1 : -1) * s * Math.abs(dx) * 0.08; yy += (dy > 0 ? 1 : -1) * s; }
+              t2.lineTo(N, yy + ix * 0);
+            }
+            t2.stroke();
+          }
+          tt++;
+          if (!reduced) requestAnimationFrame(frame);
+        }
+        size();
+        window.addEventListener("resize", size);
+        frame();
       })();
     </script>
   </body>
