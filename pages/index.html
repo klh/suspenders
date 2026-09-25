@@ -1,94 +1,212 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>suspenders — the governor for agent fleets</title>
-<meta name="description" content="A SQLite control plane for multi-agent Claude Code fleets: capability-aware dispatch, zombie detection, decision forks with LLM advice, and a live fleet board.">
-<style>
-:root { color-scheme: dark; }
-* { box-sizing: border-box; margin: 0; }
-body { background:#141413; color:#e8e6e1; font:15px/1.6 ui-monospace, Menlo, monospace; padding: 0 24px; }
-a { color:#d8900f; text-decoration:none; }
-a:hover { text-decoration:underline; text-underline-offset:3px; }
-.wrap { max-width: 980px; margin: 0 auto; padding: 72px 0 48px; }
-.kicker { font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:#8a8781; margin-bottom:14px; }
-h1 { font-size: clamp(34px, 6vw, 56px); letter-spacing:.02em; line-height:1.05; font-weight:600; }
-h1 .accent { color:#d8900f; }
-.tagline { margin: 18px 0 30px; max-width: 640px; color:#b8b5ae; }
-.tagline b { color:#e8e6e1; font-weight:500; }
-.cta { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
-.btn { border:1px solid #d8900f; color:#d8900f; padding:9px 18px; font:12px ui-monospace, Menlo, monospace; letter-spacing:.08em; text-transform:uppercase; }
-.btn.ghost { border-color:rgba(255,255,255,.2); color:#e8e6e1; }
-.btn:hover { background:#d8900f; color:#141413; text-decoration:none; }
-.btn.ghost:hover { background:#25231f; color:#e8e6e1; }
-.install { display:inline-block; background:#1c1b19; border:1px solid rgba(255,255,255,.14); padding:9px 16px; font-size:12px; color:#e8e6e1; }
-.install .p { color:#8a8781; }
-section { margin-top: 84px; }
-h2 { font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:#8a8781; margin-bottom:22px; font-weight:600; }
-.shot { border:1px solid rgba(255,255,255,.14); }
-.shot img { display:block; width:100%; height:auto; }
-.caption { font-size:11px; color:#8a8781; margin-top:8px; }
-.grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:14px; }
-.f { background:#1c1b19; border:1px solid rgba(255,255,255,.12); padding:18px 20px; }
-.f:hover { border-color:rgba(255,255,255,.26); }
-.f h3 { font-size:13px; color:#d8900f; font-weight:600; margin-bottom:8px; letter-spacing:.04em; }
-.f p { font-size:12.5px; color:#b8b5ae; }
-.f p b { color:#e8e6e1; font-weight:500; }
-.flow { border:1px solid rgba(255,255,255,.12); background:#1c1b19; padding:22px 24px; display:grid; gap:14px; }
-.step { display:grid; grid-template-columns: 30px 1fr; gap:12px; align-items:baseline; }
-.step .n { color:#af2f12; font-weight:600; font-size:12px; }
-.step .t { font-size:13px; color:#e8e6e1; }
-.step .t .who { color:#8a8781; font-size:11px; }
-.step .t code { background:#141413; border:1px solid rgba(255,255,255,.1); padding:1px 6px; font-size:11px; color:#d8900f; }
-.arch { background:#1c1b19; border:1px solid rgba(255,255,255,.12); padding:22px 24px; font-size:12px; color:#b8b5ae; overflow-x:auto; }
-.arch pre { white-space:pre; line-height:1.5; }
-.arch b { color:#d8900f; font-weight:500; }
-footer { margin-top:96px; padding:26px 0 40px; border-top:1px solid rgba(255,255,255,.1); display:flex; gap:18px; flex-wrap:wrap; font-size:11px; color:#8a8781; }
-footer .r { margin-left:auto; }
-</style>
-</head>
-<body>
-<div class="wrap">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>suspenders — the governor for agent fleets</title>
+    <meta
+      name="description"
+      content="A SQLite control plane for multi-agent Claude Code fleets: capability-aware dispatch, zombie detection, decision forks with LLM advice, and a live fleet board."
+    />
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; margin: 0; }
+      body {
+        background: #fff;
+        color: #666;
+        font: 14px/1.65 "Lucida Grande", Geneva, Verdana, Arial, sans-serif;
+        padding: 0 24px;
+      }
+      a { color: #af2f12; text-decoration: none; }
+      a:hover { text-decoration: underline; text-underline-offset: 3px; }
+      .wrap { max-width: 980px; margin: 0 auto; padding: 72px 0 48px; }
+      .kicker {
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: #999;
+        margin-bottom: 14px;
+      }
+      h1 {
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: clamp(32px, 5.5vw, 52px);
+        letter-spacing: 0.02em;
+        line-height: 1.08;
+        font-weight: 700;
+        color: #333;
+      }
+      h1 .accent { color: #af2f12; }
+      .tagline { margin: 18px 0 30px; max-width: 640px; color: #777; }
+      .tagline b { color: #444; font-weight: bold; }
+      .cta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+      .btn {
+        border: 1px solid #af2f12;
+        color: #af2f12;
+        padding: 9px 18px;
+        font: 12px ui-monospace, Menlo, monospace;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .btn.ghost { border-color: #ccc; color: #666; }
+      .btn:hover { background: #af2f12; color: #fff; text-decoration: none; }
+      .btn.ghost:hover { background: #f2f2ef; color: #444; }
+      .install {
+        display: inline-block;
+        background: #f7f7f5;
+        border: 1px solid #ddd;
+        padding: 9px 16px;
+        font-size: 12px;
+        font-family: ui-monospace, Menlo, monospace;
+        color: #555;
+      }
+      .install .p { color: #af2f12; }
+      section { margin-top: 84px; }
+      h2 {
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #999;
+        margin-bottom: 22px;
+        font-weight: bold;
+      }
+      .shot { border: 1px solid #ddd; }
+      .shot img { display: block; width: 100%; height: auto; }
+      .caption { font-size: 12px; color: #999; margin-top: 8px; }
+      .caption b { color: #af2f12; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+      .f { background: #fafaf8; border: 1px solid #e2e2de; padding: 18px 20px; }
+      .f:hover { border-color: #c9c9c2; }
+      .f h3 { font-size: 13px; color: #af2f12; font-weight: bold; margin-bottom: 8px; letter-spacing: 0.04em; }
+      .f p { font-size: 13px; color: #777; }
+      .f p b { color: #444; }
+      .flow { border: 1px solid #e2e2de; background: #fafaf8; padding: 22px 24px; display: grid; gap: 14px; }
+      .step { display: grid; grid-template-columns: 30px 1fr; gap: 12px; align-items: baseline; }
+      .step .n { color: #af2f12; font-weight: bold; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+      .step .t { font-size: 13px; color: #444; }
+      .step .t .who { color: #999; font-size: 12px; }
+      .step .t code {
+        background: #f2f2ef;
+        border: 1px solid #e0e0da;
+        padding: 1px 6px;
+        font-size: 11px;
+        font-family: ui-monospace, Menlo, monospace;
+        color: #af2f12;
+      }
+      .step .t b { color: #19f; font-weight: normal; }
+      .arch { background: #fafaf8; border: 1px solid #e2e2de; padding: 22px 24px; font-size: 12px; color: #777; overflow-x: auto; }
+      .arch pre { white-space: pre; line-height: 1.5; font-family: ui-monospace, Menlo, monospace; }
+      .arch b { color: #af2f12; font-weight: normal; }
+      footer {
+        margin-top: 96px;
+        padding: 26px 0 40px;
+        border-top: 1px solid #e5e5e5;
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+        align-items: center;
+        font-size: 11px;
+        color: #999;
+      }
+      footer .r { margin-left: auto; }
+      .threads-badge {
+        font-family: "Lucida Grande", Geneva, Verdana, Arial, sans-serif;
+        font-size: 11px;
+        color: #999;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .threads-badge b { font-weight: bold; color: #333; }
+      .threads-badge:hover b { color: #000; }
+      .tmark { width: 9px; height: 9px; display: inline-block; background: #af2f12; transition: background 0.35s; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="kicker">suspenders</div>
+        <h1>Your agent fleet,<br />with <span class="accent">suspenders</span>.</h1>
+        <p class="tagline">
+          Five parallel Claude Code sessions. A usage cliff freezes three mid-edit. The survivors keep claiming scopes;
+          nobody notices for six hours.
+          <b>Suspenders is the control plane that notices — and the board where you decide what happens next.</b>
+        </p>
+        <div class="cta">
+          <a class="btn" href="https://github.com/klh/suspenders">GitHub</a>
+          <a class="btn ghost" href="https://github.com/klh/suspenders#what-you-get">Features</a>
+          <code class="install"><span class="p">$</span> ./install.sh --wire</code>
+        </div>
+      </header>
 
-<header>
-  <div class="kicker">suspenders</div>
-  <h1>Your agent fleet,<br>with <span class="accent">suspenders</span>.</h1>
-  <p class="tagline">Five parallel Claude Code sessions. A usage cliff freezes three mid-edit. The survivors keep claiming scopes; nobody notices for six hours. <b>Suspenders is the control plane that notices — and the board where you decide what happens next.</b></p>
-  <div class="cta">
-    <a class="btn" href="https://github.com/klh/suspenders">GitHub</a>
-    <a class="btn ghost" href="https://github.com/klh/suspenders#what-you-get">Features</a>
-    <code class="install"><span class="p">$</span> ./install.sh --wire</code>
-  </code>
-  </div>
-</header>
+      <section>
+        <h2>The board — monitoring and task completion in one surface</h2>
+        <div class="shot">
+          <img
+            src="screenshot.png"
+            alt="suspenders fleet board: decision fork with LLM advice, lanes, task columns, event stream"
+          />
+        </div>
+        <p class="caption">
+          Decision forks surface as red cards. <b>Advice me!</b> has an LLM analyze the fork in control-plane context; you
+          edit or send. Lanes, completion stats, and the event stream stay live at 1s.
+        </p>
+      </section>
 
-<section>
-  <h2>The board — monitoring and task completion in one surface</h2>
-  <div class="shot"><img src="screenshot.png" alt="suspenders fleet board: decision fork with LLM advice, lanes, task columns, event stream"></div>
-  <p class="caption">Decision forks surface as red cards. <b style="color:#d8900f">Advice me!</b> has an LLM analyze the fork in control-plane context; you edit or send. Lanes, completion stats, and the event stream stay live at 1s.</p>
-</section>
+      <section>
+        <h2>How a fork resolves</h2>
+        <div class="flow">
+          <div class="step">
+            <span class="n">01</span>
+            <div class="t">
+              A lane hits a fork mid-flight <span class="who">— it emits</span> <code>NEED_DECISION</code>
+              <span class="who">instead of blocking silently</span>
+            </div>
+          </div>
+          <div class="step">
+            <span class="n">02</span>
+            <div class="t">
+              The board surfaces it <span class="who">— red card, asker, age; nothing decision-shaped stays buried in a
+              transcript</span>
+            </div>
+          </div>
+          <div class="step">
+            <span class="n">03</span>
+            <div class="t">
+              You press <b>Advice me!</b> <span class="who">— the advise worker gathers claims, recent events, work-graph
+              shape and asks your configured LLM</span>
+            </div>
+          </div>
+          <div class="step">
+            <span class="n">04</span>
+            <div class="t">
+              Recommendation lands inline <span class="who">— recommendation, rationale, risk, model; one click fills your
+              answer box</span>
+            </div>
+          </div>
+          <div class="step">
+            <span class="n">05</span>
+            <div class="t">
+              You edit, then send <span class="who">— the answer rides the bus back to the lane as</span>
+              <code>ANSWER</code><span class="who">. The LLM advises; the human decides.</span>
+            </div>
+          </div>
+        </div>
+      </section>
 
-<section>
-  <h2>How a fork resolves</h2>
-  <div class="flow">
-    <div class="step"><span class="n">01</span><div class="t">A lane hits a fork mid-flight <span class="who">— it emits</span> <code>NEED_DECISION</code> <span class="who">instead of blocking silently</span></div></div>
-    <div class="step"><span class="n">02</span><div class="t">The board surfaces it <span class="who">— red card, asker, age; nothing decision-shaped stays buried in a transcript</span></div></div>
-    <div class="step"><span class="n">03</span><div class="t">You press <b style="color:#8cb">Advice me!</b> <span class="who">— the advise worker gathers claims, recent events, work-graph shape and asks your configured LLM</span></div></div>
-    <div class="step"><span class="n">04</span><div class="t">Recommendation lands inline <span class="who">— recommendation, rationale, risk, model; one click fills your answer box</span></div></div>
-    <div class="step"><span class="n">05</span><div class="t">You edit, then send <span class="who">— the answer rides the bus back to the lane as</span> <code>ANSWER</code><span class="who">. The LLM advises; the human decides.</span></div></div>
-  </div>
-</section>
+      <section>
+        <h2>What the harness enforces</h2>
+        <p style="font-size: 13px">
+          secrets-gate before every Bash call &nbsp;·&nbsp; file-lease governor on edits &nbsp;·&nbsp; capability-aware
+          dispatch &nbsp;·&nbsp; plan-gated fan-out &nbsp;·&nbsp; zombie detection that never equates a lookup failure with
+          death &nbsp;·&nbsp; auto-reclaim? never — the human decides
+        </p>
+      </section>
 
-<section>
-  <h2>What the harness enforces</h2>
-  secrets-gate before every Bash call &nbsp;·&nbsp; file-lease governor on edits &nbsp;·&nbsp; capability-aware dispatch &nbsp;·&nbsp; plan-gated fan-out &nbsp;·&nbsp; zombie detection that never equates a lookup failure with death &nbsp;·&nbsp; auto-reclaim? never — the human decides
-</section>
-
-<section>
-  <h2>Messaging, consults, and the human in the loop</h2>
-  <div class="arch">
-<pre class="mermaid">
+      <section>
+        <h2>Messaging, consults, and the human in the loop</h2>
+        <div class="arch">
+          <pre class="mermaid">
 sequenceDiagram
     autonumber
     participant L as Lane (worker session)
@@ -129,35 +247,70 @@ sequenceDiagram
     Note over G,H: zombies — 2 stale signals alert, never auto-reclaim
     G->>B: zombie chip (lane frozen by usage cliff)
     H->>G: work reclaim W4 — re-dispatch at frozen transcript
-</pre>
-  </div>
-  <p class="caption">Rendered with mermaid — the same diagram lives in the <a href="https://github.com/klh/suspenders#messaging-consults-and-the-human-in-the-loop">README</a>. The invariants: the bus is the transport, consults never move ownership, and the human is the only one who answers forks or reclaims lanes.</p>
-</section>
+</pre
+          >
+        </div>
+        <p class="caption">
+          Rendered with mermaid — the same diagram lives in the
+          <a href="https://github.com/klh/suspenders#messaging-consults-and-the-human-in-the-loop">README</a>. The
+          invariants: the bus is the transport, consults never move ownership, and the human is the only one who answers
+          forks or reclaims lanes.
+        </p>
+      </section>
 
-<section>
-  <h2>Architecture</h2>
-  <div class="arch"><pre>bun CLIs + hook gates
+      <section>
+        <h2>Architecture</h2>
+        <div class="arch">
+          <pre>bun CLIs + hook gates
   │ SessionStart → bootstrap session, caps, transcript_path
   │ PreToolUse   → secrets / edit-enforce / governor lease
   ▼
 <b>governor.db</b> (SQLite/WAL) — sessions · claims · work graph · events · facts
   ▲ 1s poll (WAL = concurrent readers)
-fleet board — forks · lanes · tasks · stream   ← you, deciding</pre></div>
-</section>
+fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
+        </div>
+      </section>
 
-<section>
-  <h2>Why "suspenders"</h2>
-  <p class="tagline" style="margin-top:0">Belt <em>and</em> suspenders: the harness trusts the graph, verifies with two independent liveness signals, and never lets one failure mode be fatal. <b>The Work Graph is authoritative; everything else — prose, transcripts, memory — is reconstruction.</b></p>
-</section>
+      <section>
+        <h2>Why "suspenders"</h2>
+        <p class="tagline" style="margin-top: 0">
+          Belt <em>and</em> suspenders: the harness trusts the graph, verifies with two independent liveness signals, and
+          never lets one failure mode be fatal.
+          <b>The Work Graph is authoritative; everything else — prose, transcripts, memory — is reconstruction.</b>
+        </p>
+      </section>
 
-<footer>
-  <span>MIT — <a href="https://github.com/klh">klh</a></span>
-  <span class="r"><a href="https://github.com/klh/suspenders">github.com/klh/suspenders</a> · extracted from the <a href="https://github.com/klh/speedy-claude">speedy-claude</a> setup</span>
-</footer>
+      <footer>
+        <a class="threads-badge" href="https://www.threads.dk" title="Threads — strategic design firm">
+          <span class="tmark" id="tmark"></span> a <b>Threads</b> thing
+        </a>
+        <span>
+          <a href="https://github.com/klh/suspenders/blob/main/LICENSE">BSL 1.1</a> — free non-production,
+          <a href="https://github.com/klh/suspenders#licensing">commercial license</a>
+        </span>
+        <span class="r">
+          <a href="https://github.com/klh/suspenders">github.com/klh/suspenders</a> · extracted from the
+          <a href="https://github.com/klh/speedy-claude">speedy-claude</a> setup
+        </span>
+      </footer>
+    </div>
 
-<script type="module">
-  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-  mermaid.initialize({ startOnLoad: true, theme: "dark", fontFamily: "ui-monospace, Menlo, monospace" });
-</script>
-</body>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", fontFamily: "Geneva, Verdana, sans-serif" });
+    </script>
+    <script>
+      // the Threads mark changes every second — same rhythm as threads.dk
+      (function () {
+        var colors = ["#af2f12", "#19f", "#d8900f", "#5c7a35", "#c96a4f", "#79a8a8", "#333333", "#8a6db0", "#b06a3b", "#19f"];
+        var i = 0;
+        var el = document.getElementById("tmark");
+        if (!el) return;
+        setInterval(function () {
+          i = (i + 1) % colors.length;
+          el.style.background = colors[i];
+        }, 1000);
+      })();
+    </script>
+  </body>
 </html>

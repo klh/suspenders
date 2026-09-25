@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "A governor for agent fleets — SQLite control plane, capability-aware dispatch, zombie lanes, decision forks with LLM advice, live fleet board",
   "type": "module",
+  "license": "BUSL-1.1",
   "scripts": {
     "test": "bun test test/",
     "ci": "bun install && bun test test/"

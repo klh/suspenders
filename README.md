@@ -135,4 +135,14 @@ A full worked session — bootstrap, register work, capability-gated dispatch, c
 
 ## Status
 
-Battle-tested on a months-long multi-repo fleet (macOS + Bun + Claude Code); schema v2. Extracted as suspenders 2026-09-25. MIT.
+Battle-tested on a months-long multi-repo fleet (macOS + Bun + Claude Code); schema v2. Extracted as suspenders 2026-09-25.
+
+## Licensing
+
+suspenders is source-available under the **Business Source License 1.1** (see [LICENSE](LICENSE)):
+
+- **Free** for personal projects, education, research, and internal evaluation — including internal use at your company for evaluation.
+- **Production / commercial use requires a commercial license** — running it in a product or service, in paid client work, or as part of business operations. Contact the Licensor (see LICENSE) for terms.
+- On **2029-09-25** (or 4 years after first public distribution of a given version) each version converts to Apache-2.0.
+
+A Threads thing — [threads.dk](https://www.threads.dk).
