@@ -5,6 +5,10 @@
 // focusing a session shows its project's TODO / IN-FLIGHT / DONE board,
 // its claims, inbox, lane state, and the event tail.
 import { openGovernorDb } from "../lib/govdb.ts";
+import { HTML } from "./fleet-board-html.ts";
+
+// sibling CLIs resolve relative to this file — the board is relocatable
+const CLI = (f: string) => new URL(f, import.meta.url).pathname;
 
 const db = openGovernorDb();
 const PORT = Number(process.argv[process.argv.indexOf("--port") + 1] ?? 7799) || 7799;
@@ -71,6 +75,9 @@ function board(): Record<string, unknown>[] {
 		return {
 			project,
 			name: project.split("/").pop()?.replace(/\.git$/, "") || project.split("/").slice(-2, -1).pop() || project,
+			doneN: doneIds.size,
+			total: items.length,
+			pct: items.length ? Math.round((doneIds.size / items.length) * 100) : 0,
 			todo: items.filter((w) => w.state === "READY" && !blocked.has(w.id)).map(shape),
 			gated: items.filter((w) => (w.state === "READY" && blocked.has(w.id)) || w.state === "BLOCKED" || w.state === "PAUSED").map(shape),
 			inflight: items.filter((w) => w.state === "CLAIMED" || w.state === "RUNNING").map(shape),
@@ -89,7 +96,7 @@ function claims(): unknown[] {
 
 function events(): unknown[] {
 	return db
-		.query("SELECT id, ts, source, kind, scope, payload, target FROM events ORDER BY id DESC LIMIT 25")
+		.query("SELECT id, ts, source, kind, scope, payload, target FROM events ORDER BY id DESC LIMIT 50")
 		.all()
 		.map((e: any) => {
 			let note = "";
@@ -117,8 +124,11 @@ function inbox(sid: string): unknown[] {
 		.map((e: any) => ({ id: e.id, tsAgo: ago(e.ts), source: e.source, kind: e.kind, note: e.payload }));
 }
 
-function needsMap(): Record<string, { id: number; tsAgo: number; source: string; note: string }[]> {
-	const out: Record<string, { id: number; tsAgo: number; source: string; note: string }[]> = {};
+function needsMap(): Record<
+	string,
+	{ id: number; tsAgo: number; source: string; note: string; options?: string[]; advice?: any; adviceError?: string }[]
+> {
+	const out: Record<string, { id: number; tsAgo: number; source: string; note: string; options?: string[]; advice?: any; adviceError?: string }[]> = {};
 	// every distinct NEED% target surfaces — including alias targets with no
 	// sessions row (dead-letter inboxes are exactly where decisions pile up)
 	const targets = db.query("SELECT DISTINCT target AS sid FROM events WHERE kind LIKE 'NEED%' AND target IS NOT NULL").all() as { sid: string }[];
@@ -128,13 +138,28 @@ function needsMap(): Record<string, { id: number; tsAgo: number; source: string;
 			.query("SELECT id, ts, source, payload FROM events WHERE target = ? AND id > ? AND kind LIKE 'NEED%' AND id NOT IN (SELECT CAST(substr(key, 11) AS INTEGER) FROM facts WHERE key LIKE 'board.ack.%') ORDER BY id")
 			.all(sid, cur) as any[]) {
 			let note = "";
+			let options: string[] | undefined;
 			try {
 				const p = e.payload ? JSON.parse(e.payload) : {};
 				note = String(p.note ?? p.question ?? e.payload ?? "");
+				if (Array.isArray(p.options) && p.options.length) options = p.options.map(String).slice(0, 8);
 			} catch {
 				note = String(e.payload ?? "");
 			}
-			(out[sid] ??= []).push({ id: e.id, tsAgo: ago(e.ts), source: e.source, note });
+			// advice from hooks/bin/advise.ts (fact advice.<id>; error variant if
+			// the LLM call failed) — the human still decides
+			let advice: any;
+			let adviceError: string | undefined;
+			const a = db.query("SELECT value FROM facts WHERE key = ?").get("advice." + e.id) as { value: string } | null;
+			if (a) {
+				try {
+					advice = JSON.parse(a.value);
+				} catch {}
+			} else {
+				const err = db.query("SELECT value FROM facts WHERE key = ?").get(`advice.${e.id}.error`) as { value: string } | null;
+				if (err) adviceError = err.value.slice(0, 200);
+			}
+			(out[sid] ??= []).push({ id: e.id, tsAgo: ago(e.ts), source: e.source, note, options, advice, adviceError });
 		}
 	}
 	return out;
@@ -147,6 +172,10 @@ function payload(): unknown {
 	for (const c of db.query("SELECT DISTINCT sid FROM claims").all() as { sid: string }[]) {
 		if (!labels[c.sid]) labels[c.sid] = label(c.sid, "worker");
 	}
+	const zombies = (db.query("SELECT key, value FROM facts WHERE key LIKE 'zombie.%'").all() as { key: string; value: string }[]).map((z) => ({
+		item: z.key.slice("zombie.".length),
+		label: z.value,
+	}));
 	return {
 		ts: Date.now(),
 		sessions: ss,
@@ -155,6 +184,7 @@ function payload(): unknown {
 		claims: claims(),
 		events: events(),
 		needs: needsMap(),
+		zombies,
 	};
 }
 
@@ -170,191 +200,7 @@ function payloadFor(sid: string): unknown {
 	};
 }
 
-const HTML = String.raw`<!doctype html>
-<html><head><meta charset="utf-8"><title>FLEET BOARD</title>
-<style>
-:root { color-scheme: dark; }
-* { box-sizing: border-box; }
-body { background:#141413; color:#e8e6e1; font:13px/1.4 ui-monospace,Menlo,monospace; margin:0; padding:16px 20px 20px; }
-header { display:flex; align-items:baseline; gap:16px; margin-bottom:20px; }
-header .mark { font-size:13px; font-weight:600; letter-spacing:.08em; }
-header .right { margin-left:auto; display:flex; align-items:center; gap:12px; }
-#stamp { font-size:11px; color:#8a8781; font-variant-numeric:tabular-nums; }
-#blockedn { color:#af2f12; font-size:11px; font-variant-numeric:tabular-nums; }
-#needsn { color:#af2f12; font-size:11px; font-weight:600; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
-.card.need { border-color:#af2f12; box-shadow:0 0 0 1px #af2f12; cursor:pointer; }
-.card.need .m { color:#c96a4f; }
-#needsPanel { display:none; position:fixed; top:64px; right:20px; width:min(520px,90vw); background:#1c1b19; border:1px solid #af2f12; border-radius:2px; padding:14px 16px; z-index:10; max-height:70vh; overflow:auto; }
-#needsPanel h2 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:#af2f12; margin:0 0 10px; display:flex; justify-content:space-between; }
-#needsPanel h2 span { cursor:pointer; color:#8a8781; }
-#needsPanel .q { margin-bottom:12px; }
-#needsPanel .q .who { font-size:11px; color:#8a8781; margin-bottom:2px; }
-#needsPanel .q .txt { font-size:12px; margin-bottom:4px; word-break:break-word; }
-#needsPanel .q .ans { display:flex; gap:6px; }
-#needsPanel .q .ans input { flex:1; background:#141413; color:#e8e6e1; border:1px solid rgba(255,255,255,.12); border-radius:2px; padding:4px 8px; font:11px ui-monospace,Menlo,monospace; }
-#needsPanel .q .ans button { background:#141413; color:#d8900f; border:1px solid #d8900f; border-radius:2px; padding:4px 10px; font:10px ui-monospace,Menlo,monospace; text-transform:uppercase; letter-spacing:.06em; cursor:pointer; }
-#needsPanel .q .ans button:disabled { opacity:.5; cursor:default; }
-#needsPanel .dismiss { color:#8a8781; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
-.rq { color:#c96a4f; }
-select { background:#1c1b19; color:#e8e6e1; border:1px solid rgba(255,255,255,.12); border-radius:2px; padding:3px 8px; font:11px ui-monospace,Menlo,monospace; max-width:380px; }
-#wrap { display:flex; gap:24px; align-items:flex-start; }
-#board { flex:1; display:grid; grid-template-columns:repeat(3,minmax(240px,1fr)); gap:12px; align-content:start; overflow-x:auto; }
-.col { min-width:0; }
-.col h2 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:#8a8781; margin:0 0 8px; }
-.card { background:#1c1b19; border:1px solid rgba(255,255,255,.12); border-radius:2px; padding:10px 12px; margin-bottom:8px; }
-.card:hover { border-color:rgba(255,255,255,.24); background:#25231f; }
-.card.mine { border-left:2px solid #d8900f; }
-.card.gated { opacity:.6; }
-.card .id { font-weight:600; font-size:13px; }
-.card .t { font-weight:500; word-break:break-word; }
-.card .m { color:#8a8781; font-size:10px; font-variant-numeric:tabular-nums; margin-top:4px; }
-.pill { display:inline-block; font-size:10px; text-transform:uppercase; letter-spacing:.06em; background:transparent; border:1px solid; border-radius:2px; padding:1px 6px; margin-left:6px; vertical-align:1px; }
-.pill.run { color:#d8900f; border-color:#d8900f; }
-.pill.done { color:#5c7a35; border-color:#5c7a35; }
-.pill.block { color:#af2f12; border-color:#af2f12; }
-.card.flash { animation: tint .3s; }
-@keyframes tint { from { background:#2a2822; } to { background:#1c1b19; } }
-#rail { width:28%; min-width:260px; display:flex; flex-direction:column; gap:24px; }
-.feed { border:1px solid rgba(255,255,255,.12); border-radius:2px; padding:10px 12px; font-size:11px; }
-.feed h2 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:#8a8781; margin:0 0 8px; }
-.feed .r { display:flex; gap:8px; padding:2px 0; }
-.feed .r .ts { width:44px; flex:none; text-align:right; color:#8a8781; font-variant-numeric:tabular-nums; }
-.feed .r.hot { border-left:2px solid #af2f12; background:#221f1c; padding-left:8px; }
-.feed b { font-weight:500; }
-</style></head><body>
-<header>
-  <span class="mark">FLEET BOARD</span>
-  <div class="right">
-    <span id="stamp"></span>
-    <span id="blockedn"></span>
-    <span id="needsn"></span>
-    <select id="sess"><option value="">— all —</option></select>
-  </div>
-</header>
-<div id="wrap">
-  <div id="board"></div>
-  <div id="rail">
-    <div class="feed"><h2>Claims</h2><div id="claims"></div></div>
-    <div class="feed"><h2>Event tail</h2><div id="events"></div></div>
-  </div>
-</div>
-<div id="needsPanel"><h2>NEEDS YOUR ANSWER <span id="nClose">&times; close</span></h2><div id="nList"></div></div>
-<script>
-var sel = document.getElementById('sess');
-var sessLoaded = false;
-var prev = {};
-var lastData = null;
-function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
-function pill(state){
-  if (state==='CLAIMED'||state==='RUNNING') return '<span class="pill run">' + state.toLowerCase() + '</span>';
-  if (state==='DONE') return '<span class="pill done">done</span>';
-  if (state==='BLOCKED'||state==='PAUSED'||state==='FAILED') return '<span class="pill block">' + state.toLowerCase() + '</span>';
-  return '';
-}
-function card(w, focus, L, N){
-  var key = w.id+'|'+w.state+'|'+(w.owner||'')+'|'+(w.sha||'');
-  var changed = prev[w.id] !== undefined && prev[w.id] !== key;
-  prev[w.id] = key;
-  var mine = focus && w.owner === focus;
-  var gated = (w.blocked && w.state==='READY') || w.state==='BLOCKED' || w.state==='PAUSED';
-  var needsIt = w.owner && N[w.owner] && N[w.owner].length;
-  var cls = 'card' + (mine?' mine':'') + (changed?' flash':'') + (gated?' gated':'') + (needsIt?' need':'');
-  var m = esc(w.owner ? (L[w.owner] || w.owner.slice(0,10)) : 'unclaimed') + ' · ' + (w.updatedAgo>=0 ? w.updatedAgo+'s' : '');
-  if (w.sha) m += ' · @' + esc(String(w.sha).slice(0,7));
-  if (w.requires) m += ' · <span class="rq">needs ' + esc(String(w.requires)) + '</span>';
-  return '<div class="' + cls + '"' + (needsIt ? ' onclick="openNeeds(\'' + w.owner + '\')"' : '') + '><span class="id">' + esc(w.id) + '</span>' + pill(w.state) + '<div class="t">' + esc(w.title).slice(0,90) + '</div><div class="m">' + m + '</div></div>';
-}
-function render(d) {
-  lastData = d;
-  if (!sessLoaded) {
-    for (var i = 0; i < d.sessions.length; i++) {
-      var s = d.sessions[i];
-      var o = document.createElement('option');
-      var flagged = d.needs && d.needs[s.sid] && d.needs[s.sid].length;
-      o.value = s.sid; o.textContent = s.label + ' · ' + s.role + ' · ' + s.state + (flagged ? '  ⚑ NEEDS ANSWER' : '');
-      sel.appendChild(o);
-    }
-    sessLoaded = true;
-  }
-  var focus = sel.value;
-  var focusProj = focus ? (d.sessions.find(function(s){return s.sid === focus;}) || {}).project : null;
-  var proj = d.projects;
-  if (focusProj) proj = d.projects.filter(function(p){return p.project === focusProj;});
-  var cols = [['01 / TODO','todo'],['02 / IN-FLIGHT','inflight'],['03 / DONE','done']];
-  var html = '';
-  var blocked = 0;
-  for (var c = 0; c < cols.length; c++) {
-    html += '<div class="col"><h2>' + cols[c][0] + '</h2>';
-    for (var p = 0; p < proj.length; p++) {
-      var list = proj[p][cols[c][1]].concat(cols[c][1] === 'todo' ? proj[p].gated : []);
-      blocked += proj[p].gated.length;
-      if (proj.length > 1) html += '<div class="m">' + esc(proj[p].name) + '</div>';
-      for (var k = 0; k < list.length; k++) html += card(list[k], focus, d.labels, d.needs || {});
-    }
-    html += '</div>';
-  }
-  document.getElementById('board').innerHTML = html;
-  document.getElementById('stamp').textContent = 'updated ' + Math.max(0, Math.round((Date.now() - d.ts)/1000)) + 's ago';
-  document.getElementById('blockedn').textContent = blocked ? blocked + ' blocked' : '';
-  var nN = 0; for (var s2 in (d.needs||{})) nN += d.needs[s2].length;
-  var nn = document.getElementById('needsn');
-  nn.textContent = nN ? nN + ' need your answer' : '';
-  nn.onclick = function(){ openNeeds(null); };
-  var cl = '';
-  for (var i = 0; i < d.claims.length; i++) {
-    var x = d.claims[i];
-    cl += '<div class="r' + (x.hot ? ' hot' : '') + '"><span class="ts">' + x.tsAgo + 's</span><span><b>' + esc(d.labels[x.sid] || x.sid.slice(0,10)) + '</b> ' + esc(x.scope) + (x.intent ? ' — ' + esc(x.intent).slice(0,44) : '') + '</span></div>';
-  }
-  document.getElementById('claims').innerHTML = cl;
-  var ev = '';
-  for (var j = d.events.length - 1; j >= 0; j--) {
-    var e = d.events[j];
-    ev += '<div class="r"><span class="ts">' + e.tsAgo + 's</span><span>#' + e.id + ' <b>' + esc(e.kind) + '</b> ' + esc(e.source).slice(0,12) + (e.target ? ' → ' + esc(e.target).slice(0,10) : '') + (e.note ? ' — ' + esc(e.note).slice(0,56) : '') + '</span></div>';
-  }
-  document.getElementById('events').innerHTML = ev;
-}
-function openNeeds(sid) {
-  var d = lastData; if (!d) return;
-  var needs = d.needs || {};
-  var rows = '';
-  for (var s in needs) {
-    if (sid && s !== sid) continue;
-    for (var i = 0; i < needs[s].length; i++) {
-      var n = needs[s][i];
-      rows += '<div class="q"><div class="who">' + esc(d.labels[s] || s.slice(0,10)) + ' · asked · ' + n.tsAgo + 's ago · event #' + n.id + ' · <span class="dismiss" onclick="ackEv(' + n.id + ', this)">dismiss</span></div><div class="txt">' + esc(n.note || '(no note)') + '</div><div class="ans"><input placeholder="type your answer…" data-to="' + esc(n.source) + '"><button onclick="sendAns(this, \'' + n.source + '\', ' + n.id + ')">send</button></div></div>';
-    }
-  }
-  document.getElementById('nList').innerHTML = rows || '<div class="q"><div class="txt">nothing waiting</div></div>';
-  document.getElementById('needsPanel').style.display = 'block';
-}
-function sendAns(btn, to, forEvent) {
-  var inp = btn.parentNode.querySelector('input');
-  var note = inp.value.trim();
-  if (!note) { inp.placeholder = 'type an answer first'; return; }
-  btn.disabled = true; btn.textContent = '…';
-  fetch('/api/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: to, note: note, forEvent: forEvent }) })
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      btn.textContent = d.ok ? '✓ sent' : '✗ failed';
-      if (d.ok) { inp.value = ''; inp.disabled = true; inp.placeholder = 'sent → ' + (d.to || to); }
-      else { btn.disabled = false; btn.title = d.output || d.error || ''; inp.placeholder = (d.output || d.error || 'failed').slice(0, 60); }
-      setTimeout(tick, 300);
-    })
-    .catch(function(){ btn.textContent = '✗ failed'; btn.disabled = false; });
-}
-function ackEv(id, el) {
-  fetch('/api/ack', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: id }) })
-    .then(function(){ if (el) { var q = el.closest('.q'); if (q) q.style.opacity = '.35'; } setTimeout(tick, 300); });
-}
-document.getElementById('nClose').onclick = function(){ document.getElementById('needsPanel').style.display = 'none'; };
-document.addEventListener('keydown', function(e){ if (e.key === 'Escape') document.getElementById('needsPanel').style.display = 'none'; });
-function tick() {
-  fetch('/api/data?session=' + encodeURIComponent(sel.value)).then(function(r){return r.json();}).then(render).catch(function(){});
-}
-setInterval(tick, 1000);
-sel.addEventListener('change', tick);
-tick();
-</script></body></html>`;
+
 
 Bun.serve({
 	port: PORT,
@@ -384,10 +230,10 @@ Bun.serve({
 					if (!alias) return json({ ok: false, error: cands.length > 1 ? "ambiguous sid: " + to : "unknown target session: " + to }, 400);
 				}
 			}
-			const p = Bun.spawnSync(
-				["bun", process.env.HOME + "/.claude/bin/coord.ts", "emit", "ANSWER", "--to", to, "--note", note, "--as", "fleet-board"],
-				{ stdout: "pipe", stderr: "pipe" },
-			);
+			const p = Bun.spawnSync(["bun", CLI("coord.ts"), "emit", "ANSWER", "--to", to, "--note", note, "--as", "fleet-board"], {
+				stdout: "pipe",
+				stderr: "pipe",
+			});
 			const out = (p.stdout.toString() + " " + p.stderr.toString()).trim();
 			if (p.exitCode === 0 && forEvent)
 				db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, '1', 'fleet-board', 1, ?)").run(
@@ -407,9 +253,19 @@ Bun.serve({
 			);
 			return json({ ok: true });
 		}
+		if (req.method === "POST" && url.pathname === "/api/advise") {
+			// fire hooks/bin/advise.ts detached — it writes fact advice.<id> when
+			// the LLM answers; the 1s poll picks it up. Human decides after.
+			const body = (await req.json().catch(() => null)) as { id?: number } | null;
+			const id = Number(body?.id ?? 0);
+			if (!id) return json({ ok: false, error: "missing event id" }, 400);
+			const child = Bun.spawn(["bun", CLI("advise.ts"), String(id)], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+			child.unref();
+			return json({ ok: true, started: true });
+		}
 		if (url.pathname === "/")
 			return new Response(HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 		return new Response("not found", { status: 404 });
 	},
 });
-console.log(`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; write endpoint: POST /api/answer)`);
+console.log(`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise)`);
