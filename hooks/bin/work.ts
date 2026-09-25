@@ -23,7 +23,7 @@
 //   work orphaned                        / work reclaim <id>
 import { existsSync, statSync } from "node:fs";
 import { Database } from "bun:sqlite";
-import { openGovernorDb, projectIdentity, CAPABILITIES } from "../hooks/lib/govdb.ts";
+import { openGovernorDb, projectIdentity, CAPABILITIES } from "../lib/govdb.ts";
 
 const die = (m: string): never => {
 	console.error(`work: ${m}`);

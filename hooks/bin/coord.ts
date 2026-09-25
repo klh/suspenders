@@ -16,7 +16,7 @@
 // with NEW information, never with history.
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
-import { openGovernorDb, projectIdentity, CAPABILITIES } from "../hooks/lib/govdb.ts";
+import { openGovernorDb, projectIdentity, CAPABILITIES } from "../lib/govdb.ts";
 
 interface Ev {
 	id: number;
