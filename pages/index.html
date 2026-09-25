@@ -119,7 +119,7 @@
       }
       .threads-badge b { font-weight: bold; color: #333; }
       .threads-badge:hover b { color: #000; }
-      canvas.ttile { display: inline-block; width: 30px; height: 30px; vertical-align: middle; }
+      dynamic-mark { vertical-align: middle; margin-right: 1px; }
     </style>
   </head>
   <body>
@@ -282,7 +282,7 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
 
       <footer>
         <a class="threads-badge" href="https://www.threads.dk" title="Threads — strategic design firm">
-          <canvas class="ttile" id="ttile" aria-hidden="true"></canvas> a <b>Threads</b> thing
+          <dynamic-mark size="22" borderless></dynamic-mark> a <b>Threads</b> thing
         </a>
         <span>
           <a href="https://github.com/klh/suspenders/blob/main/LICENSE">BSL 1.1</a> — free non-production,
@@ -299,43 +299,9 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
       import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
       mermaid.initialize({ startOnLoad: true, theme: "neutral", fontFamily: "Geneva, Verdana, sans-serif" });
     </script>
-    <script>
-      // the Threads mark — their wordmark tile (white rounded square + rust
-      // vertical zigzag stitch), re-stitched to a new variant every 500ms;
-      // static under prefers-reduced-motion
-      (function () {
-        var cv = document.getElementById("ttile");
-        if (!cv || !cv.getContext) return;
-        var c = cv.getContext("2d");
-        var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        var DPR = Math.min(window.devicePixelRatio || 1, 2);
-        function rnd(g) { var y = Math.sin(seed + g * 127.1) * 43758.5453; return y - Math.floor(y); }
-        var seed = Math.floor(Math.random() * 1e6);
-        function draw() {
-          var w = cv.clientWidth || 30, h = cv.clientHeight || 30;
-          if (cv.width !== Math.round(w * DPR)) { cv.width = Math.round(w * DPR); cv.height = Math.round(h * DPR); }
-          c.setTransform(DPR, 0, 0, DPR, 0, 0);
-          c.clearRect(0, 0, w, h);
-          c.beginPath();
-          if (c.roundRect) c.roundRect(0.5, 0.5, w - 1, h - 1, 7); else c.rect(0.5, 0.5, w - 1, h - 1);
-          c.fillStyle = "#fff"; c.fill();
-          c.strokeStyle = "#e3e3df"; c.lineWidth = 1; c.stroke();
-          // vertical zigzag stitch, jittered per variant
-          var cx = w / 2, top = h * 0.2, bot = h * 0.8, steps = 5 + Math.floor(rnd(1) * 2);
-          c.beginPath();
-          c.moveTo(cx + (rnd(2) - 0.5) * 2, top);
-          for (var i = 1; i <= steps; i++) {
-            var y = top + (bot - top) * i / steps;
-            var amp = w * 0.16 + rnd(10 + i) * w * 0.1;
-            var x = cx + (i % 2 ? -amp : amp) * (0.7 + rnd(20 + i) * 0.5);
-            c.lineTo(x, y + (rnd(30 + i) - 0.5) * 1.5);
-          }
-          c.strokeStyle = "#b8271c"; c.lineWidth = 2.6; c.lineCap = "round"; c.lineJoin = "round"; c.stroke();
-        }
-        draw();
-        if (!reduced) setInterval(function () { seed = (seed + 1) % 1e6; draw(); }, 500);
-        window.addEventListener("resize", draw);
-      })();
-    </script>
+    <!-- the real <dynamic-mark> webcomponent, copied from threads.dk's own
+         bundle (Lit, self-registering); phase constants tuned to a ~560ms
+         stitch→hold→unstitch cycle per owner directive -->
+    <script src="./threads-mark.js"></script>
   </body>
 </html>
