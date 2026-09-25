@@ -34,7 +34,11 @@ const RULES =
 	"coord consult/who-knows (questions, never ownership). Between items: " +
 	"poll coord inbox --as <sid>; if READY work matches your capabilities, " +
 	"take it yourself — don't wait for dispatch; checkpoint each landed " +
-	"milestone (work done --sha / capsule) so preemption stays possible.";
+	"milestone (work done --sha / capsule) so preemption stays possible. " +
+	"Decisions: a decision held only in your context is invisible to the " +
+	"fleet and the owner — emit it (coord emit NEED_DECISION --to " +
+	"<coordinator-or-own-sid> --note \"question + options\" --as <sid>) " +
+	"the moment you hold one; the fleet board surfaces it for the human.";
 
 // top-level sessions are full agent runtimes — advertise the complete
 // capability set so capability-gated work stays takeable by them (lanes
