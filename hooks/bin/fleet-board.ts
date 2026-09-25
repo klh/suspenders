@@ -204,7 +204,7 @@ function payloadFor(sid: string): unknown {
 
 Bun.serve({
 	port: PORT,
-	hostname: "127.0.0.1",
+	hostname: process.env.SUSPENDERS_BIND ?? "127.0.0.1",
 	async fetch(req) {
 		const url = new URL(req.url);
 		if (url.pathname === "/api/data") {

@@ -126,7 +126,7 @@ A full worked session — bootstrap, register work, capability-gated dispatch, c
 
 - The control plane never stores credentials; secrets never enter the bus.
 - The secrets gate scans every Bash call (gitleaks + inline detection) before execution; runs repo-scoped even across `cd` boundaries.
-- The board binds to 127.0.0.1 only; its write endpoints write to the bus as `fleet-board` — a human action, machine-extended.
+- The board binds to 127.0.0.1 only (LAN exposure is opt-in via `SUSPENDERS_BIND=0.0.0.0`, e.g. to reach it as `suspenders.local` from another device); its write endpoints write to the bus as `fleet-board` — a human action, machine-extended.
 - `advise.ts` sends fork text + control-plane metadata to the LLM endpoint you configure (local by default). Point `SUSPENDERS_LLM_URL` at a cloud API only if that content may leave the machine.
 
 ## Docs
