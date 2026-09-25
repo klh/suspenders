@@ -3,9 +3,10 @@
 // same mulberry32 PRNG, same generateMark, same drawing rules. Keep the
 // two files in sync if the mark's rules change.
 //
-// Usage:
-//   <script type="module" src="/embed/threads-mark.js"></script>
+// Usage (classic script — no CORS needed, works cross-origin):
+//   <script src="https://threads.dk/embed/threads-mark.js"></script>
 //   <threads-mark size="28"></threads-mark>
+// (Also valid as <script type="module"> same-origin.)
 // Attributes:
 //   size     — rendered edge in px (default 28)
 //   cadence  — ms between fresh generations (default 500)
