@@ -105,14 +105,14 @@ describe("lease enforcement (findings 1-3)", () => {
 		expect(outs.filter((o) => o.includes('"permissionDecision":"deny"')).length).toBe(lanes.length - 1);
 	});
 
-	test("sweep deletes only dead owners; quiet-but-alive renewal keeps ownership (finding 3)", () => {
+	test("sweep deletes stale leases regardless of holder liveness (per-file TTL)", () => {
 		mkdirSync(REG, { recursive: true });
 		writeFileSync(join(REPO, "dead.txt"), "d\n");
 		writeFileSync(join(REPO, "alive.txt"), "a\n");
 		writeFileSync(join(REPO, "fresh.txt"), "f\n");
 		writeFileSync(join(REPO, "sweep-probe.txt"), "s\n");
 		const liveTp = join(HOME, "tp-live.jsonl");
-		writeFileSync(liveTp, "transcript\n"); // real, fresh mtime → alive
+		writeFileSync(liveTp, "transcript\n"); // real, fresh mtime — must NOT matter anymore
 		const dead = realpathSync(join(REPO, "dead.txt"));
 		const alive = realpathSync(join(REPO, "alive.txt"));
 		const fresh = realpathSync(join(REPO, "fresh.txt"));
@@ -128,8 +128,35 @@ describe("lease enforcement (findings 1-3)", () => {
 		const paths: Record<string, string> = {};
 		for (const r of check.query("SELECT path, sid FROM locks").all() as { path: string; sid: string }[]) paths[r.path] = r.sid;
 		check.close();
-		expect(paths[dead]).toBeUndefined(); // expired + dead transcript → swept
-		expect(paths[alive]).toBe("alive-owner"); // quiet but alive → renewed, ownership kept
-		expect(paths[fresh]).toBe("fresh-owner"); // fresh → untouched
+		// owner 2026-09-25: holder liveness is irrelevant — a lease whose last
+		// governed touch is 15+ min old releases even with a live transcript
+		expect(paths[dead]).toBeUndefined(); // stale touch, dead transcript → swept
+		expect(paths[alive]).toBeUndefined(); // stale touch, LIVE transcript → swept too
+		expect(paths[fresh]).toBe("fresh-owner"); // fresh touch → kept
+	});
+
+	test("coord lease-release drops only the caller's own leases", () => {
+		writeFileSync(join(REPO, "rel-a.txt"), "a\n");
+		writeFileSync(join(REPO, "rel-b.txt"), "b\n");
+		allowed(gate("governor", writeHook("relA", join(HOME, "relA.jsonl"), "rel-a.txt")));
+		allowed(gate("governor", writeHook("relB", join(HOME, "relB.jsonl"), "rel-b.txt")));
+		const rel = (who: string, file: string) =>
+			Bun.spawnSync(["bun", join(HOOKS, "bin", "coord.ts"), "lease-release", join(REPO, file), "--as", who], {
+				cwd: REPO,
+				env,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+		const foreign = rel("relA", "rel-b.txt"); // foreign caller → no effect
+		expect(foreign.exitCode).toBe(0);
+		const own = rel("relB", "rel-b.txt"); // owner → row gone
+		expect(own.exitCode).toBe(0);
+		const check = new Database(DB);
+		const paths = new Set((check.query("SELECT path FROM locks").all() as { path: string }[]).map((r) => r.path));
+		check.close();
+		expect(paths.has(realpathSync(join(REPO, "rel-a.txt")))).toBe(true); // relA keeps its lease
+		expect(paths.has(realpathSync(join(REPO, "rel-b.txt")))).toBe(false); // released
+		// the released file is immediately claimable by a third lane
+		allowed(gate("governor", writeHook("relC", join(HOME, "relC.jsonl"), "rel-b.txt")));
 	});
 });

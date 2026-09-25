@@ -15,7 +15,7 @@
 // poll with --as auto-advances that agent's cursor: communication cost scales
 // with NEW information, never with history.
 import { Database } from "bun:sqlite";
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { openGovernorDb, projectIdentity, CAPABILITIES } from "../lib/govdb.ts";
 
 interface Ev {
@@ -36,7 +36,7 @@ const db: Database = openGovernorDb();
 const [cmd, ...rest] = process.argv.slice(2);
 // --help anywhere wins before any parsing that could create state
 if (rest.includes("--help") || rest.includes("-h")) {
-	console.log("coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | gc | fleet");
+	console.log("coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | lease-release | gc | fleet");
 	process.exit(0);
 }
 const arg = (name: string): string | null => {
@@ -102,6 +102,23 @@ if (cmd === "emit") {
 	upF.run(`broadcast.${bid}`, note, ts);
 	upF.run("broadcast.latest", JSON.stringify({ id: bid, ts, note }), ts);
 	console.log(`${green("✓")} broadcast ${bid} → ${targets.length} running session(s) + SessionStart tail for future ones`);
+} else if (cmd === "lease-release") {
+	// explicit handover: a session done with a file releases it now instead of
+	// pinning it for its remaining TTL. Owner-predicated — only the caller's
+	// own rows; taking a foreign lease is monitor --fix / arbitration work.
+	const paths = rest.filter((r) => !r.startsWith("--"));
+	const as = arg("--as");
+	if (!paths.length || !as) die("usage: lease-release <path...> --as <sid>");
+	const del = db.query("DELETE FROM locks WHERE path = ? AND sid = ?");
+	let n = 0;
+	for (const p of paths) {
+		let P = p;
+		try {
+			P = realpathSync(p); // the gate stores canonical paths
+		} catch {}
+		n += del.run(P, as).changes;
+	}
+	console.log(`${green("✓")} lease-release: ${n} lock(s) released`);
 } else if (cmd === "state") {
 	// between-rounds check for a lane: canonical state + inbox + current HEAD
 	const as = arg("--as") ?? die("usage: state --as <sid>");
@@ -567,7 +584,7 @@ if (cmd === "emit") {
 	const lk = db.query("DELETE FROM locks WHERE ts < ?").run(now - 15 * 60_000).changes;
 	console.log(`gc: ${e} events, ${s} closed sessions, ${sw} stale RUNNING sessions swept, ${lk} expired locks, ${c} stale cursors, ${f} lane facts, ${x} consults expired, ${cd} consult threads pruned (>${days}d; work ledger untouched)`);
 } else {
-	die("unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | gc | fleet");
+	die("unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | lease-release | gc | fleet");
 }
 
 function scopeCovers(a: string, b: string): boolean {

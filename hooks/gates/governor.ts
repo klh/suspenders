@@ -6,9 +6,10 @@
 //      coordinator), hard only where the coordinator marked an area hot.
 //   2. per-file LEASES (governor.db/locks) — lease-on-first-touch: the first
 //      writer CLAIMS a file for its session; any other session is DENIED with
-//      instructions to request access from the orchestrator. Leases renew on
-//      every allowed touch; a quiet-but-alive lane keeps its lease (owner
-//      transcript mtime is probed), a dead one releases.
+//      instructions to request access from the orchestrator. A lease lasts
+//      15 min from the last governed touch of THAT file — session activity
+//      elsewhere does not renew it (owner 2026-09-25: a finished-but-alive
+//      session must not pin files; "done" is `coord lease-release <path>`).
 // Everything persists in SQLite/WAL (lib/govdb.ts): concurrent gate processes
 // are arbitrated by the DB, single-statement reads are always fresh, and the
 // old lost-update dance (atomic rename + fresh-reload-before-deny) is gone.
@@ -16,7 +17,7 @@
 import { allow, deny, type HookInput } from "../lib/hookio.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
 import type { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 
@@ -61,16 +62,14 @@ export function laneId(hook: HookInput): string {
 	return m ? `${sid}#${m[1]}` : sid;
 }
 
-// Lease expiry: quiet 15 min AND owner transcript dead/silent ⇒ gone.
-// A quiet-but-alive lane keeps its lease. Shared with the Bash gate.
-export function leaseExpired(rec: { ts: number; tp?: string | null }, now = Date.now()): boolean {
-	if (now - rec.ts <= TTL_MS) return false;
-	try {
-		if (rec.tp && existsSync(rec.tp) && now - statSync(rec.tp).mtimeMs < TTL_MS) return false;
-	} catch {
-		return false; // transcript unreadable — keep the lease (fail open)
-	}
-	return true;
+// Lease expiry: 15 min since the last governed touch of THIS file. Session
+// liveness is deliberately irrelevant — an idle-but-open window used to pin
+// every lease it ever took for its lifetime, and answering a lease request
+// re-pinned them all (the www.threads.dk catch-22, owner call 2026-09-25).
+// A resumed writer is still safe: the content-hash check in the gate denies
+// once and forces a re-read. Shared with the Bash gate.
+export function leaseExpired(rec: { ts: number }, now = Date.now()): boolean {
+	return now - rec.ts > TTL_MS;
 }
 
 export function governorGate(hook: HookInput): never {
@@ -101,16 +100,16 @@ export function governorGate(hook: HookInput): never {
 		db = null;
 	}
 
-	// ---- lease sweep: dead owners release; alive-but-quiet lanes renew ----
-	// Deletes and renewals are owner-predicated: a row re-leased to someone
-	// else between the SELECT and the mutation is never touched.
+	// ---- lease sweep: stale leases release, regardless of holder liveness ----
+	// Owner-predicated: a row re-leased to someone else between the SELECT and
+	// the DELETE is never touched. No renewal here: ts advances only through
+	// real touches of that file (the acquire/upsert below), so the denial
+	// message's age reports the holder's last real touch.
 	if (db) {
-		const rows = db.query("SELECT path, sid, ts, tp FROM locks").all() as { path: string; sid: string; ts: number; tp: string | null }[];
+		const rows = db.query("SELECT path, sid, ts FROM locks").all() as { path: string; sid: string; ts: number }[];
 		const del = db.query("DELETE FROM locks WHERE path = ? AND sid = ?");
-		const renew = db.query("UPDATE locks SET ts = ? WHERE path = ? AND sid = ?");
 		for (const r of rows) {
-			if (leaseExpired(r, now)) del.run(r.path, r.sid);
-			else if (now - r.ts > TTL_MS) renew.run(now, r.path, r.sid);
+			if (now - r.ts > TTL_MS) del.run(r.path, r.sid);
 		}
 	}
 
@@ -167,14 +166,21 @@ export function governorGate(hook: HookInput): never {
 			path: string; sid: string; tool: string | null; ts: number; tp: string | null; hash: string | null; seen: string | null;
 		} | null;
 		if (row && row.sid !== lane) {
-			deny(
-				`GOVERNOR: ${P} is leased to another agent (session ${row.sid.slice(0, 8)}, ` +
-					`active ${Math.round((now - row.ts) / 60000)} min ago). Do NOT edit it in parallel. ` +
-					`Options: (1) work your owned region elsewhere; (2) if this file is essential, ` +
-					`state in one line WHY your edit matters now and SendMessage to "main" for access — ` +
-					`the governor integrates requests rather than denying them. ` +
-					`Leases expire after 15 min without renewal.` + activeRoster(),
-			);
+			if (now - row.ts > TTL_MS) {
+				// expired but not yet swept (another gate's sweep lost the race) —
+				// reclaimable right now
+				db.query("DELETE FROM locks WHERE path = ? AND sid = ?").run(P, row.sid);
+			} else {
+				deny(
+					`GOVERNOR: ${P} is leased to another agent (session ${row.sid.slice(0, 8)}, ` +
+						`last touched ${Math.max(0, Math.round((now - row.ts) / 60000))} min ago). Do NOT edit it in parallel. ` +
+						`Options: (1) work your owned region elsewhere; (2) if this file is essential, ` +
+						`state in one line WHY your edit matters now and SendMessage to "main" for access — ` +
+						`the governor integrates requests rather than denying them. ` +
+						`A lease expires 15 min after the holder's last touch of THIS file; a holder done ` +
+						`with the file releases it now: coord lease-release ${P} --as <its sid>.` + activeRoster(),
+				);
+			}
 		}
 		// content-version check: same session re-touching a file whose content
 		// changed since its last governed touch ⇒ someone wrote it outside the
