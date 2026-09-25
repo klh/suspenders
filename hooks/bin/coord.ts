@@ -92,7 +92,10 @@ if (cmd === "emit") {
 	const source = arg("--as") ?? "owner";
 	const ts = Date.now();
 	const bid = `b${ts}`;
-	const targets = db.query("SELECT sid FROM sessions WHERE state = 'RUNNING'").all() as { sid: string }[];
+	const targets = (db
+		.query("SELECT sid, state, hb FROM sessions WHERE state = 'RUNNING' OR hb > '' || (strftime('%s', 'now') * 1000 - 86400000)")
+		.all() as { sid: string; state: string; hb: number }[])
+		.filter((t) => t.state === "RUNNING" || Date.now() - t.hb < 86_400_000); // include swept-but-alive lanes
 	const insB = db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'BROADCAST', NULL, ?, ?)");
 	for (const t of targets) insB.run(ts, source, JSON.stringify({ id: bid, note }), t.sid);
 	const upF = db.query("INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts");

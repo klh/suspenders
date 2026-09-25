@@ -3,19 +3,18 @@
 [![ci](https://github.com/klh/suspenders/actions/workflows/ci.yml/badge.svg)](https://github.com/klh/suspenders/actions/workflows/ci.yml)
 [![pages](https://github.com/klh/suspenders/actions/workflows/deploy-pages.yml/badge.svg)](https://klh.github.io/suspenders/)
 
-**A governor for agent fleets.** You run five parallel Claude Code sessions; a usage cliff freezes three of them mid-edit; the survivors keep claiming their scopes; nobody notices for six hours. Suspenders is the control plane that notices — and the board where you decide what happens next.
+**A control plane and dashboard for fleets of Claude Code sessions.** Run several agents in parallel on one codebase: suspenders tracks who is working on what, refuses conflicting edits, detects dead agents, and puts every question an agent raises on a web board where you can answer it.
 
-It's the extraction of a harness that has run a real multi-agent fleet for months: a SQLite control plane (claims, locks, events, work graph, sessions) wired into Claude Code's hook system, plus a live web board that turns the bus into a monitoring and task-completion tool — **decision forks with a one-click "Advice me!" LLM recommendation**, per-lane telemetry with zombie detection, project completion stats, and a filterable event stream.
+Built on a SQLite database (sessions, claims, locks, events, work graph) wired into Claude Code's hook system, plus a live board that shows fleet state at one-second resolution.
 
 ![](pages/screenshot.png)
 
-## Why
+## What problem does it solve
 
-- **Agents die silently** (usage cliffs, crashes, compaction). Claims and wall clocks keep going. Suspenders detects zombies with two independent signals (heartbeat + transcript mtime) — a lookup failure is *never* death, and nothing is auto-reclaimed; the human decides.
-- **Agents collide** — two lanes editing the same file. File-lease governor, scope claims, and capability-aware dispatch refuse work whose requirements the session doesn't advertise.
-- **Agents wait instead of work** — a coordinator-mediated handoff costs minutes; a self-claim costs seconds. The session-start hook teaches the self-serve protocol: poll, take, checkpoint.
-- **Decisions pile up invisibly** — a lane asks, nothing surfaces. Forks surface on the board; **Advice me!** has an LLM analyze the fork in control-plane context and post a recommendation the human accepts, edits, or dismisses.
-- **Markdown ledgers rot.** Operational state lives in the Work Graph, never in Markdown — the graph partitions per project, so one governor.db serves every repo.
+- **Agents die** — usage cliffs, crashes, context compaction. Suspenders notices: a session is flagged zombie only when both its heartbeat and its transcript are stale, and nothing is reclaimed without a human decision.
+- **Agents collide** — two sessions editing the same file. File leases and scope claims make the second writer wait or get refused; work items can declare required capabilities that a session must advertise before claiming.
+- **Questions get lost** — an agent asks something and keeps waiting in the dark. Questions surface as decisions on the board with the asking agent, the task they block, and an optional LLM recommendation you can accept or edit.
+- **State lives in chat logs** — suspenders keeps task state in a per-project work graph backed by SQLite, so any session (or a restarted one) sees the same queue, claims, and history.
 
 ## Install
 
@@ -26,122 +25,119 @@ git clone https://github.com/klh/suspenders && cd suspenders
 ./install.sh --wire              # + --with-launchd for the macOS agents
 ```
 
-The installer is idempotent and namespaced (everything under `~/.claude/hooks/suspenders/`), merges the hook wiring per-event without clobbering existing registrations, and prints next steps. Restart Claude Code; then:
+The installer is idempotent and namespaced (everything under `~/.claude/hooks/suspenders/`), merges hook wiring per-event without clobbering existing registrations, and prints next steps. Restart Claude Code; then:
 
 ```bash
 bun ~/.claude/hooks/suspenders/bin/fleet-board.ts   # live board → http://127.0.0.1:7799
 bun ~/.claude/hooks/suspenders/bin/work.ts ready    # dispatchable work, per project
-bun ~/.claude/hooks/suspenders/bin/monitor.ts       # control-plane health (--fix sweeps safe repairs)
+bun ~/.claude/hooks/suspenders/bin/monitor.ts       # fleet health (--fix applies safe repairs)
 ```
 
-Every CLI is also a scriptable API — the board's fork answer box and the monitor are just CLI calls.
+Every CLI is also usable from scripts — the board's answer box and the monitor are thin wrappers over the same commands.
 
-## What you get
+## Components
 
 | Surface | What it does |
 |---|---|
-| **Control plane** (`lib/govdb.ts`) | SQLite/WAL — sessions, claims, locks, events, facts, cursors, work graph; partitions per project; opens lazily on first hook or CLI call |
-| **Hook gates** (`gate.ts`) | One entrypoint: secrets gate (gitleaks + inline secret detection, `cd`-aware), edit-enforce, config guard, file-lease governor, claim-done stop gate |
-| **Work graph** (`bin/work.ts`) | `add / split / take / done / ready / mine / orphaned / reclaim / release` — CAS claims, dependency gating, plan-gated fan-out, capability requirements |
-| **Coordination bus** (`bin/coord.ts`) | bootstrap, inbox, emit, wait (adaptive backoff), pause/resume with continuation capsules, consults, facts, who-knows |
-| **Fleet board** (`bin/fleet-board.ts`) | Live dashboard + the only write endpoints: answer a fork, dismiss, and **Advice me!** (`/api/advise` → `bin/advise.ts`) |
-| **Advice worker** (`bin/advise.ts`) | LLM analyzes an unadvised fork in control-plane context; recommendation lands as a fact + `ADVICE` event; the human always sends |
-| **Monitor** (`bin/monitor.ts`) | Read-only health; `--fix` sweeps stale sessions/locks; three-state zombie verdicts (ZOMBIE / SUSPECT / UNKNOWN); alerts only the canonical coordinator |
-| **Usage windows** (`bin/quota-window.ts`) | Remembers observed 429 resets, predicts the next 5h cliff: exit 0 safe / 1 near cliff / 2 unknown — dispatch defers around it |
-| **Progress protocol** (`bin/progress.ts`) | Tiny file-based progress bar; statusline aggregates; the lane-level heartbeat |
-| **macOS agents** (`hooks/launchd/`) | 15-min fleet monitor + LLM keepwarm (nonce pings keep MLX weights resident) |
+| **Control plane** (`lib/govdb.ts`) | SQLite/WAL — sessions, claims, locks, events, facts, cursors, work graph; one database serves every repo, partitioned per project |
+| **Hook gates** (`gate.ts`) | One entrypoint: secrets gate (gitleaks + inline detection, `cd`-aware), edit-enforce, config guard, file-lease governor, claim-done stop gate |
+| **Work graph** (`bin/work.ts`) | `add / split / take / done / ready / mine / orphaned / reclaim / release` — compare-and-swap claims, dependency gating, capability requirements |
+| **Coordination bus** (`bin/coord.ts`) | bootstrap, inbox, emit, wait, pause/resume with continuation capsules, consults, facts, broadcasts |
+| **Fleet board** (`bin/fleet-board.ts`) | Live dashboard; write endpoints for answering decisions, dismissing, and requesting recommendations (`/api/advise` → `bin/advise.ts`) |
+| **Advice worker** (`bin/advise.ts`) | An LLM (any OpenAI-compatible API; model autodiscovered from `/v1/models`) reads the decision with control-plane context and writes a recommendation the human can accept, edit, or ignore |
+| **Monitor** (`bin/monitor.ts`) | Read-only health; `--fix` sweeps stale sessions and locks; three-state verdicts (ZOMBIE / SUSPECT / UNKNOWN); alerts the coordinator |
+| **Usage windows** (`bin/quota-window.ts`) | Remembers observed 429 resets and predicts the next 5-hour cliff: exit 0 safe / 1 near cliff / 2 unknown |
+| **Progress protocol** (`bin/progress.ts`) | Small file-based progress bar; the statusline aggregates it; doubles as the lane-level heartbeat |
+| **macOS agents** (`hooks/launchd/`) | 15-min fleet monitor + LLM keepwarm |
 
 ## Architecture
 
 ```
 Claude Code sessions (n)
-  │ SessionStart → bootstrap session, caps, transcript_path, RULES
-  │ PreToolUse   → secrets / edit-enforce / governor lease gates
+  │ SessionStart → register session, capabilities, transcript_path
+  │ PreToolUse   → secrets / edit-enforce / file-lease gates
   │ PostToolUse  → syntax check, md format
   │ Stop         → claim-done gate
   ▼
 governor.db (SQLite/WAL, ~/.cache/claude-governor/)
   ├── sessions   identity, role, parent, caps, transcript_path, hb
   ├── claims     scope leases + intents
-  ├── work_items the Work Graph — per-project partition
-  ├── events     the bus — every kind, incl. NEED_DECISION / ANSWER / ADVICE
-  ├── facts      latest-value store (advice, zombie flags, coordinator.sid…)
+  ├── work_items the work graph — per-project partition
+  ├── events     every event kind, incl. NEED_DECISION / ANSWER / ADVICE
+  ├── facts      latest-value store (advice, zombie flags, coordinator id…)
   └── locks      short-lived file leases
   ▲ 1s poll (WAL = concurrent readers)
-fleet board — forks · lanes · tasks · stream   ← you, deciding
+fleet board — decisions · tasks · lanes · event stream
 ```
 
-Decision-fork flow: lane emits `NEED_DECISION` → board surfaces it (red card) → optional **Advice me!** spawns `advise.ts` → endpoint-agnostic LLM call (any OpenAI-compatible API; model autodiscovered from `/v1/models`) → recommendation as `advice.<event-id>` fact → human edits/accepts → `ANSWER` event back to the lane. **The LLM advises; the human decides.**
+Decision flow: a lane emits `NEED_DECISION` → the board lists it with the task it blocks → optionally `advise.ts` asks your configured LLM for a recommendation → the human edits and sends → the lane receives the `ANSWER` event on its next poll and continues.
 
-### Messaging, consults, and the human in the loop
+### Messaging and consults
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant L as Lane (worker session)
     participant C as Coordinator session
-    participant G as governor.db (bus + graph)
+    participant G as governor.db
     participant B as Fleet board (browser)
     participant A as advise.ts (LLM worker)
     participant H as Human operator
 
-    Note over L,G: work and checkpoints ride the bus — never prose
-    L->>G: work take W7 (CAS claim, capability-checked)
-    L->>G: emit checkpoint --sha (milestone)
-    L->>G: emit NEED_DECISION --note "queue vs stream?" (fork raised)
+    L->>G: work take W7 (claim, capability-checked)
+    L->>G: emit checkpoint --sha
+    L->>G: emit NEED_DECISION --note "queue vs stream?"
 
-    G->>B: 1s poll → fork card (red, asker, age)
-    B->>H: "2 forks need you"
+    G->>B: 1s poll → decision card
+    B->>H: "2 decisions need you"
 
-    alt human wants machine advice
-        H->>B: click "Advice me!"
+    alt human wants a recommendation
+        H->>B: click "Get recommendation"
         B->>A: POST /api/advise (spawn, detached)
-        A->>G: read claims, recent events, graph shape, zombies
+        A->>G: read claims, recent events, work items
         A->>A: LLM call (OpenAI-compatible, model autodiscovered)
         A->>G: fact advice.<id> + ADVICE event
-        G->>B: advice renders inline (rec · rationale · risk · model)
-        B->>H: "use this" → fills the answer box
+        G->>B: recommendation renders on the card
+        B->>H: "use" fills the answer field
     end
 
-    H->>B: edit decision, click send
-    B->>G: emit ANSWER --to <lane> --note "…" (auto-acks the fork)
+    H->>B: edit answer, click send
+    B->>G: emit ANSWER --to <lane> --note "…"
     G->>L: lane inbox sees ANSWER on next poll
 
-    Note over L,C: questions, never ownership
-    L->>G: coord who-knows "stitch contracts?" (discover expert)
+    L->>G: coord who-knows "retry contracts?"
     G->>C: consult C## — "? C## from <lane>"
     C->>G: coord consult-reply C## "<answer>"
-    G->>L: expert's answer lands in lane inbox
+    G->>L: answer lands in lane inbox
 
-    Note over G,H: zombies: 2 stale signals → ZOMBIE alert to the human — never auto-reclaimed
-    G->>B: zombie chip (lane frozen by usage cliff)
-    H->>G: work reclaim W7 → re-dispatch pointing at frozen transcript
+    Note over G,H: stale heartbeat + stale transcript → zombie alert; nothing is reclaimed without a human
+    G->>B: zombie chip
+    H->>G: work reclaim W7 → re-dispatch at the frozen transcript
 ```
 
 ## Examples
 
-A full worked session — bootstrap, register work, capability-gated dispatch, consult, fork with advice, human answer, zombie reclaim — lives in [examples/walkthrough.md](examples/walkthrough.md). Every command is copy-pasteable against any repo.
+A worked session — bootstrap, register work, capability-gated dispatch, consult, decision with recommendation, answer, zombie reclaim — lives in [examples/walkthrough.md](examples/walkthrough.md). Every command is copy-pasteable against any repo.
 
-## Security posture
+## Security
 
-- The control plane never stores credentials; secrets never enter the bus.
-- The secrets gate scans every Bash call (gitleaks + inline detection) before execution; runs repo-scoped even across `cd` boundaries.
-- The board binds to 127.0.0.1 only (LAN exposure is opt-in via `SUSPENDERS_BIND=0.0.0.0`, e.g. to reach it as `suspenders.local` from another device); its write endpoints write to the bus as `fleet-board` — a human action, machine-extended.
-- `advise.ts` sends fork text + control-plane metadata to the LLM endpoint you configure (local by default). Point `SUSPENDERS_LLM_URL` at a cloud API only if that content may leave the machine.
+- The database stores no credentials; the secrets gate scans every Bash call (gitleaks + inline detection) before execution, repo-scoped even across `cd` boundaries.
+- The board binds to 127.0.0.1 only. LAN exposure is opt-in via `SUSPENDERS_BIND=0.0.0.0` (for example to reach it as `suspenders.local` behind a local reverse proxy). Write endpoints require a same-origin request from a browser, or a loopback Host for CLI clients.
+- `advise.ts` sends decision text and control-plane metadata to the LLM endpoint you configure (local by default). Point `SUSPENDERS_LLM_URL` at a cloud API only if that content may leave the machine.
 
 ## Docs
 
-- [Coordination protocol](docs/coordination-protocol.md) — the full binding CLAUDE.md: delta-only output, integration ladder, cooperative preemption, capability dispatch, zombie policy, signalling discipline, usage windows.
+- [Coordination protocol](docs/coordination-protocol.md) — a copy-paste CLAUDE.md section for a multi-agent repo: reporting discipline, integration steps, pause/resume, capability dispatch, zombie policy, usage windows.
 
 ## Status
 
-Battle-tested on a months-long multi-repo fleet (macOS + Bun + Claude Code); schema v2. Extracted as suspenders 2026-09-25.
+In use for months on a multi-repo fleet (macOS + Bun + Claude Code); schema v2. Extracted as suspenders 2026-09-25.
 
 ## Licensing
 
 suspenders is source-available under the **Business Source License 1.1** (see [LICENSE](LICENSE)):
 
-- **Free** for personal projects, education, research, and internal evaluation — including internal use at your company for evaluation.
+- **Free** for personal projects, education, research, and internal evaluation.
 - **Production / commercial use requires a commercial license** — running it in a product or service, in paid client work, or as part of business operations. Contact the Licensor (see LICENSE) for terms.
 - On **2029-09-25** (or 4 years after first public distribution of a given version) each version converts to Apache-2.0.
 

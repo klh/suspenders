@@ -31,8 +31,8 @@ try {
 // 1. stale RUNNING sessions with dead transcripts (session sids ARE
 // transcript filenames — decidable for TOP-LEVEL sessions only; lanes close
 // at 24h, their real liveness is backlog W9)
-for (const s of db.query("SELECT sid, hb FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NULL AND hb < ?").all(now - 20 * 60_000) as {
-	sid: string; hb: number;
+for (const s of db.query("SELECT sid, role, hb FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NULL AND hb < ?").all(now - 20 * 60_000) as {
+	sid: string; role: string; hb: number;
 }[]) {
 	let live = false;
 	try {
@@ -51,6 +51,10 @@ for (const s of db.query("SELECT sid, hb FROM sessions WHERE state = 'RUNNING' A
 			// waiting on a human, not dead — surfaced, never swept
 			const n = waiting.get(s.sid) ?? 0;
 			console.log(`WAITING session ${s.sid.slice(0, 8)} — ${n} open decision${n === 1 ? "" : "s"}, stale hb (not swept)`);
+		} else if (s.role === "coordinator") {
+			// the coordinator sleeps between waves — a stale hb is not death;
+			// state stays RUNNING so broadcasts and bus targeting keep working
+			console.log(`COORDINATOR ${s.sid.slice(0, 8)} hb stale — left RUNNING`);
 		} else if (fix) {
 			db.query("UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'").run(s.sid);
 			fixed.push(`swept stale session ${s.sid.slice(0, 8)} → CLOSED`);

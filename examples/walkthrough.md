@@ -37,7 +37,7 @@ bun $W split W2 "parse webhook payloads" "idempotent retry table" --reason indep
 bun $W ready    # what the fleet can self-serve right now
 ```
 
-## 3. Ask the fleet a question (consult — never ownership transfer)
+## 3. Ask the fleet a question (consult)
 
 ```bash
 C=~/.claude/hooks/suspenders/bin/coord.ts
@@ -53,9 +53,9 @@ bun $C consult --best "does the retry table need a backfill?" --scope src/paymen
 bun $C emit NEED_DECISION --to "$SID" --note "retry storms: exponential backoff or token bucket? backoff is 20 lines, bucket needs a rate limiter dep" --as "$SID"
 ```
 
-On the board: **DECISION FORKS** panel, red card, your question. Press
-**Advice me!** — the advise worker reads the control plane (claims, recent
-events, graph shape) and asks your configured LLM:
+On the board, the question appears in the **Decisions needed** section. Press
+**Get recommendation** — the advise worker reads the control plane (claims,
+recent events, work items) and asks your configured LLM:
 
 ```bash
 SUSPENDERS_LLM_URL=http://127.0.0.1:8901/v1/chat/completions \
@@ -63,22 +63,22 @@ SUSPENDERS_LLM_MODEL=      # empty = autodiscover from /v1/models
 bun ~/.claude/hooks/suspenders/bin/advise.ts <event-id>
 ```
 
-Recommendation lands inline: **rec · rationale · risk · model**. "Use this"
-fills the box; you edit; **send** — the answer rides the bus back:
+The recommendation lands inline: rec, rationale, risk, model. "Use" fills the
+field; you edit; **send** — the answer rides the bus back:
 
 ```bash
 bun $C emit ANSWER --to "$SID" --note "token bucket — we already own the dep transitively" --as fleet-board
 bun $C inbox --as "$SID"   # the lane sees it on next poll
 ```
 
-**The LLM advises; the human decides.** Nothing the advise worker writes ever
-enters the bus as an instruction.
+The advise worker only writes recommendations — answers reach the bus only
+from the human.
 
-## 5. When a lane dies mid-flight (the part that used to hurt)
+## 5. When a lane dies mid-flight
 
 A lane frozen by a usage cliff stops heartbeating while its claim keeps going.
 The monitor (or launchd agent) flags it — two stale signals = ZOMBIE, one =
-SUSPECT, a lookup failure is never death:
+SUSPECT:
 
 ```bash
 bun ~/.claude/hooks/suspenders/bin/monitor.ts          # read-only health
@@ -86,12 +86,11 @@ bun $W orphaned                                        # items whose owner went 
 bun $W reclaim W4                                      # human calls this, no auto-reclaim
 ```
 
-Re-dispatch pointing at the frozen transcript — its context is the salvage,
-not the loss.
+Re-dispatch pointing at the frozen transcript so the next lane inherits its
+context.
 
-## 6. The one invariant
+## 6. The invariant
 
-Operational state lives in the graph, never in Markdown or anyone's head:
-every actionable item is a `work add`, every milestone a `work done --sha`,
-every decision a bus event. Sessions restart, contexts compact, lanes die —
-the graph doesn't care.
+Task state lives in the graph: every actionable item is a `work add`, every
+milestone a `work done --sha`, every decision a bus event. Sessions restart,
+contexts compact, lanes die — the graph keeps going.
