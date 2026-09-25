@@ -28,9 +28,10 @@ git clone https://github.com/klh/suspenders && cd suspenders
 The installer is idempotent and namespaced (everything under `~/.claude/hooks/suspenders/`), merges hook wiring per-event without clobbering existing registrations, and prints next steps. Restart Claude Code; then:
 
 ```bash
-bun ~/.claude/hooks/suspenders/bin/fleet-board.ts   # live board → http://127.0.0.1:7799
-bun ~/.claude/hooks/suspenders/bin/work.ts ready    # dispatchable work, per project
-bun ~/.claude/hooks/suspenders/bin/monitor.ts       # fleet health (--fix applies safe repairs)
+bun ~/.claude/hooks/suspenders/bin/fleet-board.ts           # live board → http://127.0.0.1:7799
+bun ~/.claude/hooks/suspenders/bin/fleet-board.ts --demo    # same board on seeded demo data — try before wiring
+bun ~/.claude/hooks/suspenders/bin/work.ts ready            # dispatchable work, per project
+bun ~/.claude/hooks/suspenders/bin/monitor.ts               # fleet health (--fix applies safe repairs)
 ```
 
 Every CLI is also usable from scripts — the board's answer box and the monitor are thin wrappers over the same commands.

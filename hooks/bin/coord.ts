@@ -36,7 +36,7 @@ const db: Database = openGovernorDb();
 const [cmd, ...rest] = process.argv.slice(2);
 // --help anywhere wins before any parsing that could create state
 if (rest.includes("--help") || rest.includes("-h")) {
-	console.log("coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | lease-release | gc | fleet");
+	console.log("coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet");
 	process.exit(0);
 }
 const arg = (name: string): string | null => {
@@ -50,6 +50,34 @@ const paint =
 	(code: string) =>
 	(s: string): string =>
 		tty ? `\x1b[${code}m${s}\x1b[0m` : s;
+
+// consult knowledge base lookup: FTS5 OR-rank fetches candidates, then a JS
+// term-overlap score (shared significant terms / question terms) gates the
+// hit — ≥0.6 overlap AND ≥2 shared terms. Pure AND breaks on rephrasing
+// (every added function word kills it), pure OR over-matches. A miss returns
+// null; an FTS syntax edge is a miss, never a crash.
+function kbLookup(question: string): { id: number; problem: string; solution: string; answered_by: string; hits: number } | null {
+	const terms = [...new Set(question.toLowerCase().split(/[^a-z0-9_.-]+/).filter((t) => t.length > 2))];
+	if (!terms.length) return null;
+	try {
+		const cands = db
+			.query(
+				`SELECT k.id, k.problem, k.solution, k.answered_by, k.hits FROM consult_kb_fts f
+				 JOIN consult_kb k ON k.id = f.rowid WHERE consult_kb_fts MATCH ? ORDER BY rank LIMIT 5`,
+			)
+			.all(terms.map((t) => `"${t}"`).join(" OR ")) as { id: number; problem: string; solution: string; answered_by: string; hits: number }[];
+		let best: (typeof cands)[number] & { overlap: number } | null = null;
+		for (const c of cands) {
+			const pt = new Set(c.problem.toLowerCase().split(/[^a-z0-9_.-]+/));
+			const shared = terms.filter((t) => pt.has(t));
+			const overlap = shared.length / terms.length;
+			if (shared.length >= 2 && overlap >= 0.6 && (!best || overlap > best.overlap)) best = { ...c, overlap };
+		}
+		return best;
+	} catch {
+		return null;
+	}
+}
 const dim = paint("2");
 const cyan = paint("36");
 const green = paint("32");
@@ -481,7 +509,7 @@ if (cmd === "emit") {
 	// native @session messaging with who-knows for discovery.
 	const as = arg("--as");
 	const scope = arg("--scope");
-	const known = new Set(["--as", "--scope", "--best"]);
+	const known = new Set(["--as", "--scope", "--best", "--no-kb"]);
 	const pos: string[] = [];
 	for (let i = 0; i < rest.length; i++) {
 		if (known.has(rest[i])) {
@@ -503,12 +531,34 @@ if (cmd === "emit") {
 		question = pos.slice(1).join(" ");
 	}
 	if (!as) die("consult requires --as <asker-sid>");
-	if (!expert || !question) die('usage: consult [--best] "<question>" | consult <sid> "<question>" [--scope s] --as <asker>');
+	if (!expert || !question) die('usage: consult [--best] "<question>" | consult <sid> <question> [--scope s] --as <asker>');
 	if (!db.query("SELECT 1 FROM sessions WHERE sid = ? AND project = ? AND state = 'RUNNING'").get(expert, projectIdentity())) die(`${expert.slice(0, 8)} is not a live session in this project`);
-	const r = db.query("INSERT INTO consults (project, asker_sid, expert_sid, question, scope, state, created_at) VALUES (?, ?, ?, ?, ?, 'OPEN', ?)").run(projectIdentity(), as, expert, question, scope, Date.now());
-	const cid = `C${r.lastInsertRowid}`;
-	db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'consult', ?, ?, ?)").run(Date.now(), as, scope, JSON.stringify({ consult: cid, q: question }), expert);
-	console.log(`CONSULT ${cyan(cid)} ${dim("→")} ${expert.slice(0, 8)}`);
+	// knowledge first: an answered consult already in the store answers this
+	// without spending an expert round-trip (--no-kb forces live routing)
+	const kbHit = rest.includes("--no-kb") ? null : kbLookup(question);
+	if (kbHit) {
+		const r = db
+			.query("INSERT INTO consults (project, asker_sid, expert_sid, question, scope, state, answer, created_at, answered_at) VALUES (?, ?, ?, ?, ?, 'KB', ?, ?, ?)")
+			.run(projectIdentity(), as, kbHit.answered_by, question, scope, kbHit.solution, Date.now(), Date.now());
+		const cid = `C${r.lastInsertRowid}`;
+		const expertLive = !!db.query("SELECT 1 FROM sessions WHERE sid = ? AND state = 'RUNNING'").get(kbHit.answered_by);
+		db.query("UPDATE consult_kb SET hits = hits + 1, last_hit_at = ? WHERE id = ?").run(Date.now(), kbHit.id);
+		db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'consult.answer', ?, ?, ?)").run(
+			Date.now(),
+			as,
+			scope,
+			JSON.stringify({ consult: cid, state: "KB", answer: kbHit.solution, kb: { id: kbHit.id, solved_by: kbHit.answered_by, expert_live: expertLive } }),
+			as,
+		);
+		console.log(
+			`${green("✓")} ${cyan(cid)} answered from the knowledge base ${dim(`(learned from ${kbHit.answered_by.slice(0, 8)}${expertLive ? ", still live" : ""}, ${kbHit.hits} prior hits) — --no-kb routes to a human`)}`,
+		);
+	} else {
+		const r = db.query("INSERT INTO consults (project, asker_sid, expert_sid, question, scope, state, created_at) VALUES (?, ?, ?, ?, ?, 'OPEN', ?)").run(projectIdentity(), as, expert, question, scope, Date.now());
+		const cid = `C${r.lastInsertRowid}`;
+		db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'consult', ?, ?, ?)").run(Date.now(), as, scope, JSON.stringify({ consult: cid, q: question }), expert);
+		console.log(`CONSULT ${cyan(cid)} ${dim("→")} ${expert.slice(0, 8)}`);
+	}
 } else if (cmd === "consult-reply") {
 	const as = arg("--as");
 	const known = new Set(["--as", "--decline"]);
@@ -531,6 +581,14 @@ if (cmd === "emit") {
 	if (c.state !== "OPEN") die(`${cid} is ${c.state}`);
 	const st = decline ? "DECLINED" : "ANSWERED";
 	db.query("UPDATE consults SET state = ?, answer = ?, answered_at = ? WHERE id = ?").run(st, decline ? null : text, Date.now(), c.id);
+	// harvest: every human answer becomes fleet knowledge — the next asker
+	// with the same question resolves without the round-trip
+	if (!decline) {
+		const kr = db
+			.query("INSERT INTO consult_kb (problem, solution, project, asked_by, answered_by, consult_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+			.run(c.question, text, projectIdentity(), c.asker_sid, as, c.id, Date.now());
+		db.query("INSERT INTO consult_kb_fts (rowid, problem) VALUES (?, ?)").run(kr.lastInsertRowid, c.question);
+	}
 	db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'consult.answer', NULL, ?, ?)").run(Date.now(), as, JSON.stringify({ consult: cid, state: st, answer: decline ? null : text }), c.asker_sid);
 	console.log(`${st} ${cyan(String(cid))} ${dim("→")} ${String(c.asker_sid).slice(0, 8)}`);
 } else if (cmd === "consults") {
@@ -547,6 +605,32 @@ if (cmd === "emit") {
 			})
 			.join("\n") || dim("(no consults)"),
 	);
+} else if (cmd === "kb") {
+	// the fleet's shared memory: what consults have already answered
+	const sub = rest[0];
+	if (sub === "stats") {
+		const tot = (db.query("SELECT COUNT(*) AS n FROM consult_kb").get() as { n: number }).n;
+		const hits = (db.query("SELECT COALESCE(SUM(hits), 0) AS n FROM consult_kb").get() as { n: number }).n;
+		const byState = db.query("SELECT state, COUNT(*) AS n FROM consults GROUP BY state").all() as { state: string; n: number }[];
+		const lat = db.query("SELECT answered_at - created_at AS ms FROM consults WHERE state = 'ANSWERED' AND answered_at IS NOT NULL ORDER BY ms").all() as { ms: number }[];
+		const median = lat.length ? lat[Math.floor(lat.length / 2)].ms : 0;
+		const s = (k: string) => byState.find((b) => b.state === k)?.n ?? 0;
+		console.log(`kb: ${tot} solutions · ${hits} repeat questions auto-answered · consults: ${s("OPEN")} open, ${s("ANSWERED")} human, ${s("KB")} via kb, ${s("DECLINED")} declined`);
+		if (median && hits) console.log(dim(`median human answer ${Math.round(median / 60000)}min — est. ${Math.round((hits * median) / 60000)}min of round-trips skipped (hits × median)`));
+	} else if (sub === "search") {
+		const q = rest.slice(1).join(" ");
+		if (!q) die('usage: kb search "<query words>" | kb list | kb stats');
+		const hit = kbLookup(q);
+		if (!hit) {
+			console.log(dim("(no kb match)"));
+			process.exitCode = 1;
+		} else console.log(`${cyan(`kb#${hit.id}`)} ${dim(`learned from ${String(hit.answered_by).slice(0, 8)}, ${hit.hits} hits`)}\n  Q: ${hit.problem}\n  A: ${hit.solution}`);
+	} else if (sub === "list") {
+		const rows = db.query("SELECT id, problem, solution, answered_by, hits, created_at FROM consult_kb ORDER BY id DESC LIMIT 20").all() as {
+			id: number; problem: string; solution: string; answered_by: string; hits: number;
+		}[];
+		console.log(rows.map((r) => `${cyan(`kb#${r.id}`)} ${dim(String(r.answered_by).slice(0, 8))} ${r.problem.slice(0, 50)} ${dim("→")} ${r.solution.slice(0, 50)}`).join("\n") || dim("(kb empty — answers land here via consult-reply)"));
+	} else die('usage: kb stats | kb list | kb search "<query words>"');
 } else if (cmd === "doctor-session") {
 	// rebind integrity: NO live coordination state may point at a closed
 	// predecessor — everything here should be zero after resume-session
@@ -584,7 +668,7 @@ if (cmd === "emit") {
 	const lk = db.query("DELETE FROM locks WHERE ts < ?").run(now - 15 * 60_000).changes;
 	console.log(`gc: ${e} events, ${s} closed sessions, ${sw} stale RUNNING sessions swept, ${lk} expired locks, ${c} stale cursors, ${f} lane facts, ${x} consults expired, ${cd} consult threads pruned (>${days}d; work ledger untouched)`);
 } else {
-	die("unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | lease-release | gc | fleet");
+	die("unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet");
 }
 
 function scopeCovers(a: string, b: string): boolean {

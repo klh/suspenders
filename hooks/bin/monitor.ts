@@ -245,6 +245,15 @@ for (const { project } of projs) {
 	if (ready.length > 6) console.log(`  … +${ready.length - 6} more (work ready)`);
 }
 
+// 6b. consult diagnostics: where inter-agent latency hides (the kb answers
+// repeat questions without spending an expert round-trip)
+try {
+	const byState = db.query("SELECT state, COUNT(*) AS n FROM consults GROUP BY state").all() as { state: string; n: number }[];
+	const s = (k: string) => byState.find((b) => b.state === k)?.n ?? 0;
+	const kbstats = db.query("SELECT COUNT(*) AS n2, COALESCE(SUM(hits), 0) AS n FROM consult_kb").get() as { n2: number; n: number };
+	console.log(`CONSULTS ${s("OPEN")} open · ${s("ANSWERED")} human-answered · ${s("KB")} kb-answered · kb ${kbstats.n2} solutions, ${kbstats.n} hits`);
+} catch {} // pre-v3 db — consult tracking not present yet
+
 if (fixed.length) console.log(fixed.map((f) => `✓ ${f}`).join("\n"));
 if (issues.length) {
 	console.error(issues.map((i) => `⚠ ${i}`).join("\n"));

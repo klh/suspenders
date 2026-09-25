@@ -118,6 +118,18 @@ export function openGovernorDb(): Database {
 	const wiCols = (db.query("PRAGMA table_info(work_items)").all() as { name: string }[]).map((c) => c.name);
 	if (!wiCols.includes("requires")) db.run("ALTER TABLE work_items ADD COLUMN requires TEXT");
 	if (uv < 2) db.run("PRAGMA user_version = 2");
+	// v4 — consult knowledge base: (problem → solution) pairs harvested from
+	// answered consults; new consults resolve against it before routing to a
+	// live expert. Standalone FTS5 index (rowid = consult_kb.id), all-trees
+	// scope by design — a fix learned in one repo answers the same question
+	// in another. (v3 was spent by the decisions schema.)
+	if (uv < 4) {
+		db.run(
+			"CREATE TABLE IF NOT EXISTS consult_kb (id INTEGER PRIMARY KEY AUTOINCREMENT, problem TEXT NOT NULL, solution TEXT NOT NULL, project TEXT NOT NULL, asked_by TEXT NOT NULL, answered_by TEXT NOT NULL, consult_id INTEGER, hits INTEGER NOT NULL DEFAULT 0, last_hit_at INTEGER, created_at INTEGER NOT NULL)",
+		);
+		db.run("CREATE VIRTUAL TABLE IF NOT EXISTS consult_kb_fts USING fts5(problem)");
+		db.run("PRAGMA user_version = 4");
+	}
 	db.run(
 		"CREATE TABLE IF NOT EXISTS facts (key TEXT PRIMARY KEY, value TEXT, source TEXT, version INTEGER NOT NULL DEFAULT 1, ts INTEGER NOT NULL)",
 	);

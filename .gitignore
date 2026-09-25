@@ -2,3 +2,4 @@ node_modules/
 *.log
 .DS_Store
 .tmp-lease-repo-*/
+.tmp-kb-repo-*/
