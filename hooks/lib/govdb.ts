@@ -61,17 +61,38 @@ export function openGovernorDb(): Database {
 	// work graph: hierarchical, claimable, shatterable work items (bin/work.ts).
 	// project = repo root realpath — partitions the graph per project so
 	// sessions in different repos never see (or steal) each other's work.
-	// CREATE TABLE IF NOT EXISTS cannot upgrade a live table, so pre-partitioned
-	// (single-PK) tables are dropped once — safe while the graph has no
-	// production rows.
-	const staleWork = (name: string): boolean => {
-		const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
-			| { sql?: string }
-			| undefined;
-		return !!row?.sql && !/PRIMARY KEY\s*\(\s*project/.test(row.sql);
-	};
-	if (staleWork("work_deps")) db.run("DROP TABLE work_deps");
-	if (staleWork("work_items")) db.run("DROP TABLE work_items");
+	// CREATE TABLE IF NOT EXISTS cannot upgrade a live table, so legacy
+	// (single-PK, pre-partition) shapes are migrated in one transaction:
+	// empty tables are recreated; tables holding rows are renamed to
+	// <name>_legacy_<ts> — rows survive verbatim, nothing is ever dropped
+	// while non-empty. A failed rename aborts the whole migration (throw),
+	// never a silent loss. FKs off during the shape swap per the documented
+	// alter-table procedure (sqlite.org/lang_altertable.html).
+	db.run("PRAGMA foreign_keys=OFF");
+	try {
+		db.run("BEGIN IMMEDIATE");
+		for (const name of ["work_deps", "work_items"]) {
+			const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
+				| { sql?: string }
+				| undefined;
+			if (!row?.sql || /PRIMARY KEY\s*\(\s*project/.test(row.sql)) continue; // absent or current shape
+			const n = (db.query(`SELECT COUNT(*) AS n FROM "${name}"`).get() as { n: number }).n;
+			if (n === 0) db.run(`DROP TABLE "${name}"`);
+			else {
+				const backup = `${name}_legacy_${Date.now()}`;
+				db.run(`ALTER TABLE "${name}" RENAME TO "${backup}"`);
+				console.error(`[govdb] legacy ${name} held ${n} rows — preserved in ${backup} (project mapping ambiguous, not auto-converted)`);
+			}
+		}
+		db.run("COMMIT");
+	} catch (e) {
+		try {
+			db.run("ROLLBACK");
+		} catch {}
+		throw e instanceof Error ? new Error(`govdb work-graph migration refused (no data touched): ${e.message}`, { cause: e }) : e;
+	} finally {
+		db.run("PRAGMA foreign_keys=ON");
+	}
 	db.run(
 		"CREATE TABLE IF NOT EXISTS work_items (project TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT, state TEXT NOT NULL DEFAULT 'READY', priority INTEGER NOT NULL DEFAULT 0, owner_sid TEXT, created_by TEXT, scope TEXT, why_parallel TEXT, result_sha TEXT, required INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (project, id))",
 	);

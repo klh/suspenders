@@ -4,7 +4,7 @@
   <key>Label</key><string>com.suspenders.fleet-monitor</string>
   <key>ProgramArguments</key><array>
     <string>__BUN__</string>
-    <string>__HOME__/.claude/hooks/bin/monitor.ts</string>
+    <string>__PREFIX__/bin/monitor.ts</string>
     <string>--fix</string>
   </array>
   <key>StartInterval</key><integer>900</integer>

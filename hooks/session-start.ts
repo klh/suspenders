@@ -5,6 +5,7 @@
 // (SESSION / REBIND / OWNED / READY / INBOX / HEAD). Stdout is injected as
 // session context. CLAUDE_FLEET_BOOTSTRAP=0 opts out entirely.
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { openGovernorDb, projectIdentity, CAPABILITIES } from "./lib/govdb.ts";
 
 type In = { session_id?: string; source?: string; transcript_path?: string };
@@ -26,8 +27,18 @@ function pname(p: string): string {
 	return last || parts[parts.length - 2] || p;
 }
 
+// CLIs ship in bin/ next to this hook (repo checkout and installed prefix
+// share the layout) — resolve there first; fall back to the pre-namespacing
+// ~/.claude/bin location for old installs.
+const cli = (name: string): string => {
+	for (const p of [join(import.meta.dir, "bin", name), `${process.env.HOME}/.claude/bin/${name}`]) if (existsSync(p)) return p;
+	return `${process.env.HOME}/.claude/bin/${name}`;
+};
+const WORK = cli("work.ts");
+const COORD = cli("coord.ts");
+
 const RULES =
-	"RULES: Work Graph (bun ~/.claude/bin/work.ts) is authoritative — " +
+	`RULES: Work Graph (bun ${WORK}) is authoritative — ` +
 	"continue OWNED before taking new; own an item (work take) before code " +
 	"work; never reconstruct mutable state from Markdown; parallelizable " +
 	"work gets work split. Stuck or need a colleague's context: " +
@@ -68,7 +79,7 @@ const out = [`SESSION ${sid.slice(0, 8)}  project=${pname(project)}`];
 // >1 → escalate, never guess.
 const dead = src === "resume" ? (db.query(DEAD_SQL).all(project) as { sid: string }[]) : [];
 if (dead.length === 1 && dead[0].sid !== sid) {
-	const p = Bun.spawnSync(["bun", `${process.env.HOME}/.claude/bin/coord.ts`, "resume-session", "--as", sid, "--from", dead[0].sid], {
+	const p = Bun.spawnSync(["bun", COORD, "resume-session", "--as", sid, "--from", dead[0].sid], {
 		stdout: "pipe",
 	});
 	out.push(`REBIND ${new TextDecoder().decode(p.stdout).trim()}`);

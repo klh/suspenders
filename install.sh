@@ -14,9 +14,9 @@ command -v bun >/dev/null || { echo "suspenders needs bun — https://bun.sh fir
 echo "→ installing to $PREFIX"
 mkdir -p "$PREFIX"
 for item in bin lib gates launchd gate.ts session-start.ts session-end.ts; do
-  cp -R "hooks/$item" "$PREFIX/"
+  cp -R "$REPO_DIR/hooks/$item" "$PREFIX/"
 done
-cp package.json bun.lock "$PREFIX/"
+cp "$REPO_DIR/package.json" "$REPO_DIR/bun.lock" "$PREFIX/"
 (cd "$PREFIX" && bun install) # shell-quote, for the bash gate
 echo "→ harness in place"
 
@@ -52,7 +52,7 @@ if [[ "${1:-}" == "--with-launchd" || "${2:-}" == "--with-launchd" ]]; then
     for f in "$REPO_DIR"/hooks/launchd/*.plist; do
       name="$(basename "$f")"
       out="$HOME/Library/LaunchAgents/$name"
-      sed -e "s|__BUN__|$BUN_BIN|" -e "s|__HOME__|$HOME|" "$f" >"$out"
+      sed -e "s|__BUN__|$BUN_BIN|" -e "s|__HOME__|$HOME|" -e "s|__PREFIX__|$PREFIX|" "$f" >"$out"
       launchctl bootout "gui/$(id -u)/${name%.plist}" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$out"
       echo "→ loaded $name"
