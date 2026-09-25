@@ -1,5 +1,6 @@
 // fleet-board.ts — live control-plane dashboard. Read-only over governor.db
-// except the human decision endpoints (/api/answer /api/ack /api/advise) and
+// except the decision endpoints (/api/decisions /api/answer /api/ack
+// /api/advise) and
 // the board-owned decisions table below. Serves a page that polls every
 // second (WAL allows concurrent readers).
 // Start from anywhere:  bun ~/.claude/bin/fleet-board.ts [--port 7799]
@@ -16,26 +17,147 @@ const db = openGovernorDb();
 const PORT = Number(process.argv[process.argv.indexOf("--port") + 1] ?? 7799) || 7799;
 const BIND = process.env.SUSPENDERS_BIND ?? "127.0.0.1";
 
-// decision lifecycle (OPEN/ANSWERED/DISMISSED), owned by the board: NEED%
-// events must not vanish when the recipient acks their inbox — cursors track
-// delivery, this table tracks the human decision. Backfilled idempotently
-// from the bus (dead-letter alias targets included); answers keep the fork's
-// event id as the correlation key.
+// decision lifecycle (schema v2, board-owned `decisions` table), contract:
+// docs/decisions-api.md. NEED% events must not vanish when the recipient acks
+// their inbox — cursors track delivery, this table tracks the human decision.
+// State machine: OPEN → ANSWERED → ACKNOWLEDGED; OPEN → CANCELLED (asking
+// lane supersede/cancel of the linked work, or board dismiss with UI
+// confirmation). answer_token rotates on every state change — clients echo
+// it in POST /api/answer for idempotency + multi-tab/stale-view protection.
 db.run(`CREATE TABLE IF NOT EXISTS decisions (
 	event_id INTEGER PRIMARY KEY,
 	target TEXT NOT NULL,
+	asked_by TEXT,
+	project TEXT,
+	task_id TEXT,
+	question TEXT,
+	options TEXT,
 	state TEXT NOT NULL DEFAULT 'OPEN',
+	delivery TEXT NOT NULL DEFAULT 'DELIVERED',
 	answer_note TEXT,
 	answer_to TEXT,
+	ack_ts INTEGER,
+	answer_token TEXT,
 	answered_at INTEGER,
 	closed_at INTEGER,
 	created_at INTEGER NOT NULL
 )`);
 
-const syncDecisions = (): void =>
-	db
-		.query("INSERT OR IGNORE INTO decisions (event_id, target, created_at) SELECT id, target, ? FROM events WHERE kind LIKE 'NEED%' AND target IS NOT NULL")
-		.run(Date.now());
+// guarded ALTERs — board-owned table: add columns if missing, never drop.
+// A fresh table already has everything; a v1 table gets the v2 columns.
+const decCols = new Set((db.query("PRAGMA table_info(decisions)").all() as { name: string }[]).map((c) => c.name));
+for (const [col, ddl] of Object.entries({
+	asked_by: "TEXT",
+	project: "TEXT",
+	task_id: "TEXT",
+	question: "TEXT",
+	options: "TEXT",
+	delivery: "TEXT",
+	ack_ts: "INTEGER",
+	answer_token: "TEXT",
+})) {
+	if (!decCols.has(col)) db.run(`ALTER TABLE decisions ADD COLUMN ${col} ${ddl}`);
+}
+
+// "dead" hb = the monitor's zombie threshold (same fact, same default)
+const deadAfterMs = (): number =>
+	Number((db.query("SELECT value FROM facts WHERE key = 'fleet.zombie_after_ms'").get() as { value: string } | null)?.value ?? 45 * 60_000);
+
+const projOf = (sid: string): string | null =>
+	(db.query("SELECT project FROM sessions WHERE sid = ?").get(sid) as { project: string | null } | null)?.project ?? null;
+
+// delivery: DELIVERED once the target lane shows life or its cursor reads
+// past the fork; FAILED when the session is unknown/dead and never picked
+// the decision up (UI: "delivery failed — retry")
+const targetAlive = (sid: string, now: number): boolean => {
+	const s = db.query("SELECT hb FROM sessions WHERE sid = ?").get(sid) as { hb: number } | null;
+	return !!s && now - s.hb <= deadAfterMs();
+};
+const pickedUp = (eventId: number, sid: string): boolean =>
+	((db.query("SELECT event_id FROM cursors WHERE sid = ?").get(sid) as { event_id: number } | null)?.event_id ?? 0) >= eventId;
+
+// payload.options → JSON array of {label, tradeoff}. Accepts a real array
+// (TS emitters) or a JSON-encoded array string (coord emit --options=… makes
+// every --field a string); bare strings keep their text, lose nothing.
+function normOptions(v: unknown): string {
+	if (typeof v === "string" && v.trimStart().startsWith("[")) {
+		try {
+			v = JSON.parse(v);
+		} catch {}
+	}
+	if (!Array.isArray(v) || !v.length) return "";
+	return JSON.stringify(
+		v.slice(0, 8).map((o: any) =>
+			typeof o === "string" ? { label: o, tradeoff: null } : { label: String(o?.label ?? ""), tradeoff: o?.tradeoff == null ? null : String(o.tradeoff) },
+		),
+	);
+}
+
+// enrichment straight off the (immutable) source event — task_id from
+// payload.work ONLY, never guessed from the note text
+function enrich(d: { event_id: number; target: string }, e: any): void {
+	let p: any = {};
+	try {
+		p = e?.payload ? JSON.parse(e.payload) : {};
+	} catch {}
+	db.query("UPDATE decisions SET asked_by = ?, project = ?, task_id = COALESCE(task_id, ?), question = COALESCE(question, ?), options = COALESCE(options, ?) WHERE event_id = ?").run(
+		String(e?.source ?? d.target),
+		String(p.project ?? projOf(e?.source) ?? projOf(d.target) ?? ""),
+		p.work != null ? String(p.work) : null,
+		String(p.note ?? p.question ?? ""),
+		normOptions(p.options),
+		d.event_id,
+	);
+}
+
+// sync: backfill new NEED% forks, then apply the best-effort transitions —
+// delivery degradation, work supersede/cancel → CANCELLED, lane activity
+// after an answer → ACKNOWLEDGED. Idempotent + monotonic; safe on every poll.
+function syncDecisions(): void {
+	const now = Date.now();
+	// old DISMISSED rows keep their meaning under the v2 name (board dismiss = CANCELLED)
+	db.run("UPDATE decisions SET state = 'CANCELLED' WHERE state = 'DISMISSED'");
+	for (const r of db.query("SELECT event_id FROM decisions WHERE answer_token IS NULL").all() as { event_id: number }[])
+		db.query("UPDATE decisions SET answer_token = ? WHERE event_id = ?").run(crypto.randomUUID(), r.event_id);
+	// backfill: one row per NEED% event with a concrete target (dead-letter
+	// alias targets included)
+	for (const e of db
+		.query("SELECT id, ts, source, target, payload FROM events WHERE kind LIKE 'NEED%' AND target IS NOT NULL AND id NOT IN (SELECT event_id FROM decisions) ORDER BY id")
+		.all() as any[]) {
+		db.query("INSERT OR IGNORE INTO decisions (event_id, target, state, delivery, created_at, answer_token) VALUES (?, ?, 'OPEN', ?, ?, ?)").run(
+			e.id,
+			e.target,
+			targetAlive(e.target, now) || pickedUp(e.id, e.target) ? "DELIVERED" : "FAILED",
+			e.ts,
+			crypto.randomUUID(),
+		);
+		enrich({ event_id: e.id, target: e.target }, e);
+	}
+	// v1 rows: backfill the enrichment columns from the source event
+	for (const d of db
+		.query("SELECT event_id, target FROM decisions WHERE asked_by IS NULL OR project IS NULL OR question IS NULL")
+		.all() as { event_id: number; target: string }[]) {
+		enrich(d, db.query("SELECT source, payload FROM events WHERE id = ?").get(d.event_id));
+	}
+	// a decision addressed to a lane that died before pickup reads as FAILED
+	// instead of silently waiting forever; cursor past the fork = picked up
+	for (const d of db.query("SELECT event_id, target FROM decisions WHERE state = 'OPEN' AND delivery != 'FAILED'").all() as any[])
+		if (!targetAlive(d.target, now) && !pickedUp(d.event_id, d.target)) db.query("UPDATE decisions SET delivery = 'FAILED' WHERE event_id = ?").run(d.event_id);
+	// OPEN → CANCELLED: the asking lane superseded/cancelled the linked work
+	for (const d of db
+		.query(`SELECT d.event_id AS id FROM decisions d WHERE d.state = 'OPEN' AND d.task_id IS NOT NULL AND EXISTS (SELECT 1 FROM events e
+			WHERE e.kind IN ('work.superseded','work.cancelled','work.supersede','work.cancel') AND json_extract(e.payload, '$.work') = d.task_id)`)
+		.all() as { id: number }[])
+		db.query("UPDATE decisions SET state = 'CANCELLED', closed_at = ?, answer_token = ? WHERE event_id = ? AND state = 'OPEN'").run(now, crypto.randomUUID(), d.id);
+	// ANSWERED → ACKNOWLEDGED (best-effort heuristic, monotonic): the lane the
+	// answer was addressed to produced a checkpoint/message after answered_ts —
+	// it read the answer and moved on
+	for (const d of db
+		.query(`SELECT d.event_id AS id FROM decisions d WHERE d.state = 'ANSWERED' AND d.answered_at IS NOT NULL AND d.answer_to IS NOT NULL AND EXISTS (SELECT 1 FROM events e
+			WHERE e.source = d.answer_to AND e.ts >= d.answered_at AND e.kind IN ('checkpoint','landed','test_green','interface_changed','NOTE','resume_ready'))`)
+		.all() as { id: number }[])
+		db.query("UPDATE decisions SET state = 'ACKNOWLEDGED', ack_ts = ?, answer_token = ? WHERE event_id = ? AND state = 'ANSWERED'").run(now, crypto.randomUUID(), d.id);
+}
 
 const esc = (s: unknown): string =>
 	String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] ?? c));
@@ -203,47 +325,70 @@ function inbox(sid: string): unknown[] {
 		.map((e: any) => ({ id: e.id, tsAgo: ago(e.ts), source: e.source, kind: e.kind, note: e.payload }));
 }
 
-function needsMap(): Record<
-	string,
-	{ id: number; tsAgo: number; source: string; scope?: string | null; note: string; options?: string[]; advice?: any; adviceError?: string }[]
-> {
-	const out: Record<string, { id: number; tsAgo: number; source: string; scope?: string | null; note: string; options?: string[]; advice?: any; adviceError?: string }[]> = {};
-	// OPEN decisions only, straight off the lifecycle table — no cursor
-	// filters (an inbox ack must not hide an unanswered fork) and no board.ack
-	// facts. syncDecisions backfills dead-letter alias targets too.
-	syncDecisions();
+// records per docs/decisions-api.md — legacy column names (event_id/target/
+// answered_at/created_at) surface under their contract names at the API.
+// OPEN decisions first, then newest resolved; advice (hooks/bin/advise.ts,
+// fact advice.<id> or advice.<id>.error) rides along so the card can show
+// the recommendation — the LLM advises, the human decides.
+function decisionRecords(): Record<string, unknown>[] {
 	const rows = db
-		.query("SELECT d.event_id AS id, d.target AS sid, e.scope AS scope, e.ts, e.source, e.payload FROM decisions d JOIN events e ON e.id = d.event_id WHERE d.state = 'OPEN' ORDER BY e.id")
+		.query(`SELECT d.*, w.title AS task_title FROM decisions d
+			LEFT JOIN work_items w ON w.project = d.project AND w.id = d.task_id
+			ORDER BY (d.state = 'OPEN') DESC, d.event_id DESC LIMIT 200`)
 		.all() as any[];
-	for (const e of rows) {
-		let note = "";
-		let options: string[] | undefined;
+	return rows.map((d) => {
+		let options: { label: string; tradeoff?: string | null }[] = [];
 		try {
-			const p = e.payload ? JSON.parse(e.payload) : {};
-			note = String(p.note ?? p.question ?? e.payload ?? "");
-			if (Array.isArray(p.options) && p.options.length) options = p.options.map(String).slice(0, 8);
-		} catch {
-			note = String(e.payload ?? "");
-		}
-		// advice from hooks/bin/advise.ts (fact advice.<id>; error variant if
-		// the LLM call failed) — the human still decides
+			options = d.options ? JSON.parse(d.options) : [];
+		} catch {}
 		let advice: any;
 		let adviceError: string | undefined;
-		const a = db.query("SELECT value FROM facts WHERE key = ?").get("advice." + e.id) as { value: string } | null;
+		const a = db.query("SELECT value FROM facts WHERE key = ?").get("advice." + d.event_id) as { value: string } | null;
 		if (a) {
 			try {
 				advice = JSON.parse(a.value);
 			} catch {}
 		} else {
-			const err = db.query("SELECT value FROM facts WHERE key = ?").get(`advice.${e.id}.error`) as { value: string } | null;
+			const err = db.query("SELECT value FROM facts WHERE key = ?").get(`advice.${d.event_id}.error`) as { value: string } | null;
 			if (err) adviceError = err.value.slice(0, 200);
 		}
-		(out[e.sid] ??= []).push({ id: e.id, tsAgo: ago(e.ts), source: e.source, scope: e.scope, note, options, advice, adviceError });
-	}
-	return out;
+		const role = (db.query("SELECT role FROM sessions WHERE sid = ?").get(d.target) as { role: string | null } | null)?.role ?? "worker";
+		return {
+			id: d.event_id,
+			project: d.project || null,
+			task_id: d.task_id,
+			task_title: d.task_title ?? null,
+			asked_by: d.asked_by || d.target,
+			asked_by_label: label(d.asked_by || d.target, role),
+			target: d.target,
+			question: d.question ?? "",
+			options,
+			state: d.state,
+			delivery: d.delivery || "DELIVERED",
+			answer_note: d.answer_note,
+			answer_to: d.answer_to,
+			answer_token: d.answer_token,
+			created_ts: d.created_at,
+			answered_ts: d.answered_at,
+			ack_ts: d.ack_ts,
+			age_s: ago(d.created_at),
+			advice,
+			adviceError,
+		};
+	});
+}
+
+function decisionsPayload(): unknown {
+	syncDecisions();
+	const recs = decisionRecords();
+	const open = recs.filter((r: any) => r.state === "OPEN");
+	const byProject: Record<string, number> = {};
+	for (const r of open as any[]) if (r.project) byProject[r.project] = (byProject[r.project] ?? 0) + 1;
+	return { ts: Date.now(), count: open.length, byProject, decisions: recs };
 }
 
 function payload(): unknown {
+	syncDecisions();
 	const ss = sessions();
 	const labels: Record<string, string> = {};
 	for (const s of ss as any[]) labels[s.sid] = s.label;
@@ -262,7 +407,9 @@ function payload(): unknown {
 		projects: board(),
 		claims: claims(),
 		events: events(),
-		needs: needsMap(),
+		// decisions live in /api/decisions now — this ts lets the UI mark the
+		// decisions feed stale without the payload
+		decisionsTs: Date.now(),
 		zombies,
 	};
 }
@@ -290,20 +437,31 @@ Bun.serve({
 			const sid = url.searchParams.get("session") ?? "";
 			return json(sid ? payloadFor(sid) : payload());
 		}
+		if (url.pathname === "/api/decisions")
+			// full decision records + counts — the decisions feed the UI polls
+			return json(decisionsPayload());
 		if (req.method === "POST" && url.pathname === "/api/answer") {
-			// the board's single write: relay a human answer into the event bus
+			// the board's single write: relay a human answer into the event bus.
+			// Idempotency per docs/decisions-api.md: the client echoes the
+			// answer_token it read — the same note on an already-answered fork
+			// replays (200 {replay:true}); a stale token (another tab answered
+			// or dismissed since) is 409 {error:"stale"}.
 			const guard = writeGuard(req, url);
 			if (guard) return guard;
 			const parsed = await readJson(req);
 			if (!parsed.ok) return parsed.resp;
+			const id = Number(parsed.body?.id ?? parsed.body?.forEvent ?? 0);
 			let to = String(parsed.body?.to ?? "");
 			const note = String(parsed.body?.note ?? "").trim().slice(0, 2000);
-			const forEvent = Number(parsed.body?.forEvent ?? 0);
-			if (!to || !note) return json({ ok: false, error: "missing target or note" }, 400);
-			// answers correlate to a fork — reject unknown ids instead of
-			// silently answering nothing
-			if (forEvent && !db.query("SELECT 1 AS x FROM events WHERE id = ? AND kind LIKE 'NEED%'").get(forEvent))
-				return json({ ok: false, error: "unknown event id: " + forEvent }, 404);
+			const token = String(parsed.body?.token ?? "");
+			if (!id || !to || !note || !token) return json({ ok: false, error: "missing id, to, note or token" }, 400);
+			syncDecisions();
+			const row = db.query("SELECT state, answer_note, answer_token, answer_to FROM decisions WHERE event_id = ?").get(id) as any;
+			// reject unknown ids instead of silently answering nothing
+			if (!row) return json({ ok: false, error: "unknown decision id: " + id }, 404);
+			if (row.state === "ANSWERED" || row.state === "ACKNOWLEDGED")
+				return row.answer_note === note ? json({ ok: true, replay: true, to: row.answer_to }) : json({ ok: false, error: "stale" }, 409);
+			if (row.state !== "OPEN" || row.answer_token !== token) return json({ ok: false, error: "stale" }, 409);
 			// accept full sids, unique prefixes, or live bus aliases (an identity
 			// that has emitted before — e.g. a coordinator's chosen --as name)
 			const exact = db.query("SELECT sid FROM sessions WHERE sid = ?").get(to) as { sid: string } | null;
@@ -321,20 +479,18 @@ Bun.serve({
 				stderr: "pipe",
 			});
 			const out = (p.stdout.toString() + " " + p.stderr.toString()).trim();
-			if (p.exitCode === 0 && forEvent) {
-				// answered — lifecycle state, correlated to the fork's event id
-				syncDecisions();
-				db.query("UPDATE decisions SET state = 'ANSWERED', answer_note = ?, answer_to = ?, answered_at = ? WHERE event_id = ?").run(
-					note,
-					to,
-					Date.now(),
-					forEvent,
-				);
-			}
-			return json({ ok: p.exitCode === 0, output: out.slice(0, 400), to }, p.exitCode === 0 ? 200 : 500);
+			if (p.exitCode !== 0) return json({ ok: false, output: out.slice(0, 400), to }, 500);
+			// answered — lifecycle state, correlated to the fork's event id; the
+			// WHERE clause guards a concurrent answer (raced → stale, another
+			// tab got there first)
+			const done = db
+				.query("UPDATE decisions SET state = 'ANSWERED', answer_note = ?, answer_to = ?, answered_at = ?, answer_token = ? WHERE event_id = ? AND state = 'OPEN' AND answer_token = ?")
+				.run(note, to, Date.now(), crypto.randomUUID(), id, token);
+			return Number(done.changes) === 0 ? json({ ok: false, error: "stale" }, 409) : json({ ok: true, output: out.slice(0, 400), to });
 		}
 		if (req.method === "POST" && url.pathname === "/api/ack") {
-			// dismiss a question answered out-of-band
+			// board dismiss = CANCELLED (the UI confirms before calling).
+			// Idempotent; monotonic — never un-answers a decision.
 			const guard = writeGuard(req, url);
 			if (guard) return guard;
 			const parsed = await readJson(req);
@@ -345,7 +501,9 @@ Bun.serve({
 			if (!ev) return json({ ok: false, error: "unknown event id: " + id }, 404);
 			if (!ev.kind.startsWith("NEED")) return json({ ok: false, error: "not a decision event: " + id }, 400);
 			syncDecisions();
-			db.query("UPDATE decisions SET state = 'DISMISSED', closed_at = ? WHERE event_id = ?").run(Date.now(), id);
+			const row = db.query("SELECT state FROM decisions WHERE event_id = ?").get(id) as { state: string } | null;
+			if (row && (row.state === "ANSWERED" || row.state === "ACKNOWLEDGED")) return json({ ok: false, error: "already answered" }, 409);
+			db.query("UPDATE decisions SET state = 'CANCELLED', closed_at = ?, answer_token = ? WHERE event_id = ? AND state = 'OPEN'").run(Date.now(), crypto.randomUUID(), id);
 			return json({ ok: true });
 		}
 		if (req.method === "POST" && url.pathname === "/api/advise") {
@@ -375,7 +533,10 @@ console.log(`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; wr
 // resolves from Bonjour-capable machines on the LAN. The name belongs to the
 // dns-sd/avahi child — it vanishes when the board dies (auto-renames to
 // suspenders-2.local on conflict). Skip silently when neither tool exists.
-const mdnsCmd = process.platform === "darwin" ? ["dns-sd", "-R", "suspenders", "_http._tcp", ".", String(PORT)] : ["avahi-publish", "-s", "suspenders", "_http._tcp", String(PORT)];
+// SUSPENDERS_MDNS=0 opts out — on macOS the dns-sd registration claims the
+// service host name and poisons .local resolution for the very name it advertises
+if (process.env.SUSPENDERS_MDNS !== "0") {
+	const mdnsCmd = process.platform === "darwin" ? ["dns-sd", "-R", "suspenders", "_http._tcp", ".", String(PORT)] : ["avahi-publish", "-s", "suspenders", "_http._tcp", String(PORT)];
 try {
 	const mdns = Bun.spawn(mdnsCmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 	const killMdns = () => {
@@ -395,6 +556,7 @@ try {
 		process.exit(0);
 	});
 	console.log(`mDNS service "suspenders" registered (Bonjour discovery) — local URL http://127.0.0.1:${PORT}`);
-} catch {
-	// no mDNS tooling — loopback URL still works
+	} catch {
+		// no mDNS tooling — loopback URL still works
+	}
 }
