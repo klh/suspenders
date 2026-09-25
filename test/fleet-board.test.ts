@@ -29,6 +29,14 @@ async function getData() {
 	const r = await fetch(`${BASE}/api/data`);
 	return r.json();
 }
+// board() lists EVERY partition — the module-scope --demo board shares this
+// DB and its partition may sort before ours (platform-dependent), so tests
+// must select their own project, never projects[0]
+const MY_PROJ = realpathSync(REPO);
+async function myProject() {
+	const d = await getData();
+	return d.projects.find((p: any) => p.project === MY_PROJ);
+}
 async function getDecisions() {
 	// v3 default is OPEN-only (docs/board-api.md) — the lifecycle tests below
 	// also read resolved rows, so they ride the history view
@@ -292,7 +300,7 @@ describe("dashboard accuracy", () => {
 		const w1 = addWork("dep target", ["--scope", "dt"]);
 		const w2 = addWork("dependent item", ["--scope", "dd"]);
 		run("work.ts", ["block", w2, "--on", w1]);
-		const proj = (await getData()).projects[0];
+		const proj = await myProject();
 		expect(proj.gated.length).toBe(1);
 		expect(proj.gated[0].deps).toEqual([w1]);
 	});
@@ -300,7 +308,7 @@ describe("dashboard accuracy", () => {
 	test("failed work is rendered with its error note", async () => {
 		const w = addWork("doomed item", ["--scope", "df"]);
 		run("work.ts", ["fail", w, "--note", "boom: no compiler"]);
-		const failed = (await getData()).projects[0].other.find((x: any) => x.state === "FAILED");
+		const failed = (await myProject()).other.find((x: any) => x.state === "FAILED");
 		expect(failed).toBeDefined();
 		expect(failed.note).toBe("boom: no compiler");
 	});
