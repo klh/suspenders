@@ -93,17 +93,22 @@ try {
 for (const w of decisionGated) {
 	const label = `${w.project.split("/").pop()?.replace(".git", "")}/${w.id} is decision-gated but has no OPEN decision on the board`;
 	if (fix) {
-		const coord = (db.query("SELECT value FROM facts WHERE key = 'coordinator.sid'").get() as { value: string } | null)?.value;
-		if (coord) {
+		// coordinator.sid is a GLOBAL fact — emit only when the coordinator
+		// serves this item's project; foreign-project items alert only (the
+		// .claude frozen backlog W2/W3/W21 must not ride the gaps coordinator)
+		const cproj = coordinatorSid
+			? (db.query("SELECT project FROM sessions WHERE sid = ?").get(coordinatorSid) as { project: string | null } | null)?.project ?? null
+			: null;
+		if (coordinatorSid && cproj === w.project) {
 			db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'monitor', 'NEED_DECISION', ?, ?, ?)").run(
 				now,
 				w.scope,
 				JSON.stringify({ work: w.id, project: w.project, note: `${w.title} — surfaced by monitor: the NEED_DECISION for this item was never emitted` }),
-				coord,
+				coordinatorSid,
 			);
-			fixed.push(`emitted NEED_DECISION for ${w.id} → coordinator`);
+			fixed.push(`emitted NEED_DECISION for ${w.id} → project coordinator`);
 		} else {
-			issues.push(`${label} (no coordinator.sid fact — set it: coord fact set coordinator.sid <sid>)`);
+			issues.push(`${label} (no project coordinator to route the NEED_DECISION to)`);
 		}
 	} else {
 		issues.push(label);
