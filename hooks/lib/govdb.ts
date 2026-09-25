@@ -28,6 +28,77 @@ export function projectIdentity(): string {
 // work_items.requires ⊆ sessions.capabilities or work take refuses
 export const CAPABILITIES = ["shell", "fs", "git", "build", "mcp", "vision", "browser", "network"];
 
+// W15 — lane-level wall-time metric. Per-item claim→done is distorted when a
+// lane works items back-to-back (serialized multi-claims), so replay the Work
+// Graph bus events instead of trusting item timestamps: wall = first claim →
+// terminal event, agent = Σ closed claim segments. Derived from EXISTING
+// events (work.claimed / work.released / work.done / work.failed all carry
+// work+project+ts) — no schema, no migration.
+export interface ItemTiming {
+	project: string;
+	work: string;
+	firstClaim: number; // first work.claimed ts (0 = never claimed, e.g. auto-rollup)
+	lastEvent: number; // last observed event ts (nowMs while still open)
+	wallMs: number; // lastEvent − firstClaim (0 when never claimed)
+	agentMs: number; // Σ claim segments; an open segment counts up to nowMs
+	claims: number;
+	releases: number;
+	done: boolean;
+	failed: boolean;
+}
+
+// Replay one project's work events chronologically. A work.claimed opens a
+// claim segment; the next work.released / work.done / work.failed closes it
+// (that duration is agent time). Items never claimed (auto-rollup parents)
+// get wallMs 0 — there is no claim→done interval to measure.
+export function workTiming(db: Database, project: string, nowMs = Date.now()): ItemTiming[] {
+	const rows = db
+		.query(
+			"SELECT id, ts, kind, payload FROM events WHERE kind IN ('work.claimed','work.released','work.done','work.failed') AND json_extract(payload, '$.project') = ? ORDER BY ts, id",
+		)
+		.all(project) as { id: number; ts: number; kind: string; payload: string | null }[];
+	const open = new Map<string, number>(); // work id → open claim-segment start ts
+	const out = new Map<string, ItemTiming>();
+	const item = (work: string): ItemTiming => {
+		let t = out.get(work);
+		if (!t) {
+			t = { project, work, firstClaim: 0, lastEvent: 0, wallMs: 0, agentMs: 0, claims: 0, releases: 0, done: false, failed: false };
+			out.set(work, t);
+		}
+		return t;
+	};
+	for (const r of rows) {
+		let work = "";
+		try {
+			work = (JSON.parse(r.payload ?? "{}") as { work?: string }).work ?? "";
+		} catch {}
+		if (!work) continue;
+		const t = item(work);
+		if (r.kind === "work.claimed") {
+			t.claims++;
+			if (!t.firstClaim) t.firstClaim = r.ts;
+			open.set(work, r.ts);
+		} else {
+			const start = open.get(work);
+			if (start != null) {
+				t.agentMs += Math.max(0, r.ts - start);
+				open.delete(work);
+				t.releases++;
+			}
+			if (r.kind === "work.done") t.done = true;
+			if (r.kind === "work.failed") t.failed = true;
+			t.lastEvent = r.ts;
+		}
+	}
+	for (const [work, start] of open) {
+		const t = item(work);
+		t.agentMs += Math.max(0, nowMs - start);
+		t.lastEvent = nowMs;
+	}
+	for (const t of out.values()) if (t.firstClaim) t.wallMs = t.lastEvent - t.firstClaim;
+	return [...out.values()].sort((a, b) => (a.work < b.work ? -1 : 1));
+}
+
 export function openGovernorDb(): Database {
 	mkdirSync(REG, { recursive: true });
 	const db = new Database(`${REG}/governor.db`, { create: true });

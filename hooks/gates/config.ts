@@ -2,14 +2,16 @@
 // ASK on writes into the agent's own config (hooks/settings/skills/agents/
 // launchd/shell-rc): interactive work proceeds via visible approvals;
 // headless runs cannot answer prompts, so unattended persistence is dead.
-import { ask, allow, type HookInput } from "../lib/hookio.ts";
+import { ask, type HookInput } from "../lib/hookio.ts";
 
 const HOME = process.env.HOME ?? "";
 
-export function configGate(hook: HookInput): never {
-  if (!["Edit", "Write", "NotebookEdit"].includes(hook.tool_name ?? "")) allow();
+// W14: void, not never — chained in the pre-files pipeline (one process per
+// Edit/Write); a gate that is done returns, ask()/deny() still exit hard.
+export function configGate(hook: HookInput): void {
+  if (!["Edit", "Write", "NotebookEdit"].includes(hook.tool_name ?? "")) return;
   let F = hook.tool_input?.file_path ?? hook.tool_input?.notebook_path ?? "";
-  if (!F) allow();
+  if (!F) return;
 
   if (F.startsWith("~")) F = HOME + F.slice(1);
   F = F.replace(/["']/g, "");
@@ -27,5 +29,5 @@ export function configGate(hook: HookInput): never {
   if (PROTECTED.some((re) => re.test(P)))
     ask(`config-guard: ${P} is agent control-plane (hooks/settings/skills/agents/launchd/shell-rc). Approve only if you requested this exact change.`);
 
-  allow();
+  return;
 }

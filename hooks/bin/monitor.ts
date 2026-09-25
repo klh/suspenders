@@ -155,6 +155,81 @@ for (const e of db.query("SELECT id, payload FROM events ORDER BY id DESC LIMIT 
 	}
 }
 
+// 5b. dead letters: targeted events the addressee never consumed — event
+// older than 30min, target session still RUNNING, cursor not advanced past
+// it. Never auto-acked (--fix leaves cursors alone); deduped via fact
+// deadletter.<event id> (6h), same recipe as the zombie check. Lanes with an
+// OPEN decision are expected-silent — they wait on you, not on their inbox.
+const dead = db
+	.query(
+		`SELECT e.id, e.ts, e.kind, e.target FROM events e
+		 JOIN sessions s ON s.sid = e.target AND s.state = 'RUNNING'
+		 LEFT JOIN cursors c ON c.sid = e.target
+		 WHERE e.target IS NOT NULL AND e.ts < ? AND e.id > COALESCE(c.event_id, 0)
+		 ORDER BY e.id`,
+	)
+	.all(now - 30 * 60_000) as { id: number; ts: number; kind: string; target: string }[];
+for (const d of dead) {
+	if (waiting.has(d.target)) continue; // waiting on you, not dead
+	const fk = `deadletter.${d.id}`;
+	const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as { ts: number } | null;
+	const age = Math.round((now - d.ts) / 60_000);
+	const label = `dead letter #${d.id} ${d.kind} → ${d.target.slice(0, 10)} undrained ${age}m`;
+	if (!seen || now - seen.ts > 6 * 3_600_000) {
+		db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, label, now);
+		issues.push(`${label} — cursor behind, never auto-acked`);
+	} else issues.push(`${label} (alerted ${Math.round((now - seen.ts) / 60_000)}m ago)`);
+}
+// 5c. drive-by fan-outs (monitor half of W16): decomposition-class shatters
+// are plan-gated — >2 children from one split with no plan-item reference in
+// the work.added payloads is a drive-by. One alert per split burst (same
+// parent, children added within one minute), deduped 6h like other checks.
+const added = db
+	.query("SELECT id, ts, payload FROM events WHERE kind = 'work.added' AND ts >= ? ORDER BY ts, id")
+	.all(now - 24 * 3_600_000) as { id: number; ts: number; payload: string | null }[];
+const bursts = new Map<string, { id: number; ts: number; plan: boolean }[]>();
+for (const e of added) {
+	let p: Record<string, unknown> = {};
+	try {
+		p = JSON.parse(e.payload ?? "{}");
+	} catch {
+		continue;
+	}
+	if (typeof p.work !== "string" || !p.work.includes(".")) continue; // roots aren't split children
+	const key = `${String(p.project ?? "")}|${p.work.replace(/\.[^.]+$/, "")}`;
+	const b = bursts.get(key) ?? [];
+	const plan = Object.keys(p).some((k) => k.toLowerCase().startsWith("plan"));
+	b.push({ id: e.id, ts: e.ts, plan });
+	bursts.set(key, b);
+}
+for (const [key, kids] of bursts) {
+	// cluster children of one parent into split bursts on a 1min gap
+	kids.sort((a, b) => a.ts - b.ts);
+	let cluster: { id: number; ts: number; plan: boolean }[] = [];
+	const flush = (): void => {
+		if (cluster.length > 2 && !cluster.some((k) => k.plan)) {
+			const [project, parent] = key.split("|");
+			const pname = project.split("/").pop()?.replace(".git", "") || project;
+			const ids = cluster.map((k) => k.id).join(",");
+			const label = `drive-by fan-out: ${pname}/${parent} split added ${cluster.length} children, no plan-item reference (#${ids})`;
+			const fk = `driveby.${project}/${parent}`;
+			const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as { ts: number } | null;
+			if (seen && now - seen.ts <= 6 * 3_600_000) {
+				issues.push(`${label} (alerted ${Math.round((now - seen.ts) / 60_000)}m ago)`);
+			} else {
+				db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, label, now);
+				issues.push(label);
+			}
+		}
+		cluster = [];
+	};
+	for (const k of kids) {
+		if (cluster.length && k.ts - cluster[cluster.length - 1].ts > 60_000) flush();
+		cluster.push(k);
+	}
+	flush();
+}
+
 // 7. zombie lanes: CLAIMED items whose owner went silent — usage-limit
 // deaths freeze subagents silently while the claim and the wall clock keep
 // going (2026-09-24: 47 frozen, 6h blackout). THREE-STATE multi-signal rule

@@ -9,6 +9,8 @@
 // Runs from the file's dir with the basename (absolute paths fail qlty's
 // strip-prefix). Repos without qlty setup (exit 99) skip silently — run
 // `qlty init -y && qlty plugins enable biome` there to get coverage.
+// W14: the gate body lives in filesCheck() — exit-free — so stop.ts re-verifies
+// changed files IN-PROCESS instead of spawning `bun gate.ts post-files` per file.
 import { allow, context, feedback, type HookInput } from "../lib/hookio.ts";
 import { have, lines, run } from "../lib/run.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
@@ -16,10 +18,30 @@ import { basename, dirname } from "node:path";
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 
+/** Exit-free verdict of the files gate; filesGate maps kinds 1:1 to the old
+ * exit behavior (ok→allow, context→additionalContext+exit 0, feedback→
+ * stderr+exit 2, block→stderr+exit 2). */
+export type FilesExit =
+  | { kind: "ok" }
+  | { kind: "context"; msg: string }
+  | { kind: "feedback"; msg: string }
+  | { kind: "block"; err: string };
+
 export function filesGate(hook: HookInput): never {
-  if (!["Edit", "Write", "NotebookEdit"].includes(hook.tool_name ?? "")) allow();
+  const v = filesCheck(hook);
+  if (v.kind === "context") context(v.msg, "PostToolUse");
+  if (v.kind === "feedback") feedback(v.msg);
+  if (v.kind === "block") {
+    process.stderr.write(v.err);
+    process.exit(2);
+  }
+  allow();
+}
+
+export function filesCheck(hook: HookInput): FilesExit {
+  if (!["Edit", "Write", "NotebookEdit"].includes(hook.tool_name ?? "")) return { kind: "ok" };
   const F = hook.tool_input?.file_path ?? hook.tool_input?.notebook_path ?? "";
-  if (!F) allow();
+  if (!F) return { kind: "ok" };
 
   const isMd = /\.(md|markdown)$/i.test(F);
   const isCode = /\.(ts|tsx|js|jsx|mjs|cjs|json|jsonc)$/i.test(F);
@@ -35,10 +57,9 @@ export function filesGate(hook: HookInput): never {
   if (isMd && !deferFmt && existsSync(F) && have("prettier")) {
     const before = Bun.hash(readFileSync(F));
     run("prettier", ["--write", "--prose-wrap", "preserve", "--log-level", "warn", F]);
-    const after = Bun.hash(readFileSync(F));
-    if (before !== after) {
+    if (Bun.hash(readFileSync(F)) !== before) {
       refreshLeaseHash(F);
-      feedback(`md-format: reformatted ${F} with prettier (GFM: table alignment, list markers, fence style). Re-read before further edits.`);
+      return { kind: "feedback", msg: `md-format: reformatted ${F} with prettier (GFM: table alignment, list markers, fence style). Re-read before further edits.` };
     }
   }
 
@@ -48,12 +69,11 @@ export function filesGate(hook: HookInput): never {
     const issues = qltyGate(F);
     if (issues) {
       const head = fmtNote ? `${fmtNote} Re-read before further edits.\n` : "";
-      process.stderr.write(`${head}qlty check found issues in ${F}:\n${issues.slice(0, 4000)}\nFix this now before continuing.\n`);
-      process.exit(2);
+      return { kind: "block", err: `${head}qlty check found issues in ${F}:\n${issues.slice(0, 4000)}\nFix this now before continuing.\n` };
     }
     if (fmtNote) {
       refreshLeaseHash(F);
-      feedback(`${fmtNote} Re-read before further edits.`);
+      return { kind: "feedback", msg: `${fmtNote} Re-read before further edits.` };
     }
   }
 
@@ -62,10 +82,7 @@ export function filesGate(hook: HookInput): never {
   // user-approved 2026-09-15). jq, ~3ms; basename match covers project copies.
   if (basename(F) === "settings.json" && existsSync(F)) {
     const r = run("jq", ["empty", F]);
-    if (!r.ok) {
-      process.stderr.write(`INVALID JSON in ${F}:\n${lines(r.out, 3)}\nFix this now before continuing.\n`);
-      process.exit(2);
-    }
+    if (!r.ok) return { kind: "block", err: `INVALID JSON in ${F}:\n${lines(r.out, 3)}\nFix this now before continuing.\n` };
   }
 
   // The sanctioned WRITE itself is the lease's new ground truth (owner
@@ -75,8 +92,8 @@ export function filesGate(hook: HookInput): never {
   if (existsSync(F)) refreshLeaseHash(F);
 
   const note = editStreak(hook, F);
-  if (note) context(note, "PostToolUse");
-  allow();
+  if (note) return { kind: "context", msg: note };
+  return { kind: "ok" };
 }
 
 /** `qlty fmt` in place. Returns a note when the file changed, null otherwise.

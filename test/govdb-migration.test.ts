@@ -11,7 +11,11 @@ import { dirname, join } from "node:path";
 
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-mig-"));
 process.env.HOME = HOME; // govdb computes REG from HOME at module load — set before the dynamic import
-const { openGovernorDb } = await import("../hooks/lib/govdb.ts");
+// The ?query busts bun's module cache: bun test shares one module registry across
+// files, so if another suite (gates.test.ts → files.ts) imported govdb first, the
+// cached instance would be bound to the REAL HOME and these tests would run
+// against the production DB. A query param makes this file's instance its own.
+const { openGovernorDb } = await import(`../hooks/lib/govdb.ts?home=${encodeURIComponent(HOME)}`);
 
 const DB = `${HOME}/.cache/claude-governor/governor.db`;
 

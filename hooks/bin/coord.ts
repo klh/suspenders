@@ -7,6 +7,7 @@
 //   bun ~/.claude/bin/coord.ts poll [--as sid] [--scope s] [--kinds a,b] [--limit n]
 //   bun ~/.claude/bin/coord.ts wait --as sid [--scope s] [--kinds a,b] [--max-seconds 30]
 //        (adaptive long-poll: 250ms fast path, backs off to 2s when idle)
+//   bun ~/.claude/bin/coord.ts metrics [project] [--days N]
 //   bun ~/.claude/bin/coord.ts fact set <key> <value> [--source s]
 //   bun ~/.claude/bin/coord.ts fact get <key> / fact list
 //
@@ -16,7 +17,8 @@
 // with NEW information, never with history.
 import { Database } from "bun:sqlite";
 import { realpathSync, statSync } from "node:fs";
-import { openGovernorDb, projectIdentity, CAPABILITIES } from "../lib/govdb.ts";
+import { openGovernorDb, projectIdentity, CAPABILITIES, workTiming } from "../lib/govdb.ts";
+import { resolve } from "node:path";
 
 interface Ev {
 	id: number;
@@ -36,7 +38,7 @@ const db: Database = openGovernorDb();
 const [cmd, ...rest] = process.argv.slice(2);
 // --help anywhere wins before any parsing that could create state
 if (rest.includes("--help") || rest.includes("-h")) {
-	console.log("coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet");
+	console.log("coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet | metrics");
 	process.exit(0);
 }
 const arg = (name: string): string | null => {
@@ -448,6 +450,97 @@ if (cmd === "emit") {
 		return `${g} ${dim(names.get(l) ?? l.slice(0, 8))}`;
 	});
 	console.log(`${head ? `${dim(`@${head.slice(0, 7)}`)}  ` : ""}${parts.join("  ") || dim("(no claimed lanes)")}`);
+} else if (cmd === "metrics") {
+	// W3 — control-plane metrics: did the fleet actually move fast? Runs per
+	// role, per-item wall vs agent time (W15 derivation in govdb.ts), lane
+	// dwell in WAIT_RATE / WAIT_DED / PAUSED, conflicts, repairs. Terse table
+	// + a facts snapshot fact (metrics.snapshot.<date>) for trend diffing.
+	const known = new Set(["--days"]);
+	const projArgs: string[] = [];
+	for (let i = 0; i < rest.length; i++) {
+		if (known.has(rest[i])) {
+			i++;
+			continue;
+		}
+		if (rest[i].startsWith("--")) die(`unknown option: ${rest[i]}`);
+		projArgs.push(rest[i]);
+	}
+	const now = Date.now();
+	const days = Number(arg("--days") ?? 7);
+	const cut = now - days * 86_400_000;
+	let project = projectIdentity();
+	if (projArgs[0]) {
+		const g = Bun.spawnSync(["git", "-C", projArgs[0], "rev-parse", "--git-common-dir"], { stdout: "pipe", stderr: "pipe" });
+		const dir = g.exitCode === 0 ? new TextDecoder().decode(g.stdout).trim() : "";
+		project = dir ? realpathSync(resolve(projArgs[0], dir)) : realpathSync(projArgs[0]);
+	}
+	const name = project.split("/").pop()?.replace(/\.git$/, "") || project.split("/").slice(-2, -1).pop() || project;
+	const runs = db.query("SELECT role, COUNT(*) AS n FROM sessions WHERE project = ? AND started_at >= ? GROUP BY role ORDER BY n DESC").all(project, cut) as { role: string; n: number }[];
+	console.log(`METRICS ${name} (last ${days}d)`);
+	console.log(`  runs: ${runs.reduce((a, r) => a + r.n, 0)}${runs.length ? ` (${runs.map((r) => `${r.n} ${r.role}`).join(", ")})` : ""}`);
+	// per-item wall/agent time — the W15 derivation, straight off the bus
+	const timing = workTiming(db, project, now).filter((t) => t.lastEvent >= cut || (!t.done && !t.failed));
+	const doneItems = timing.filter((t) => t.done && t.firstClaim > 0); // lane work: claimed → done (auto-rollups excluded)
+	const openN = timing.filter((t) => !t.done && !t.failed).length;
+	const med = (xs: number[]): number => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)] : 0);
+	const fmt = (ms: number): string => {
+		if (!ms) return "—";
+		const m = Math.round(ms / 60_000);
+		return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m` : `${m}m`;
+	};
+	console.log(`  items: ${doneItems.length} done, ${openN} open — median done item: wall ${fmt(med(doneItems.map((t) => t.wallMs)))}, agent ${fmt(med(doneItems.map((t) => t.agentMs)))}`);
+	for (const t of [...timing].sort((a, b) => b.wallMs - a.wallMs).slice(0, 8))
+		console.log(`    ${cyan(t.work.padEnd(8))} wall ${fmt(t.wallMs).padStart(6)}  agent ${fmt(t.agentMs).padStart(6)}  ${t.claims} claim${t.claims === 1 ? "" : "s"}${t.failed ? red(" FAILED") : t.done ? "" : amber(" open")}`);
+	// dwell: PAUSED windows are evented (paused → resume_ready); WAIT_RATE /
+	// WAIT_DED leave no event trail, so ongoing dwell = now − lane.<sid>.state
+	// fact ts (the only state history facts keep is their own last ts).
+	const dwell: Record<string, { ms: number; n: number; ongoing: number }> = {};
+	let pausedBy: Record<string, number> = {};
+	for (const e of db.query("SELECT ts, source, kind, target FROM events WHERE kind IN ('pause_requested','paused','resume_ready') AND ts >= ? ORDER BY ts, id").all(cut) as { ts: number; source: string; kind: string; target: string | null }[]) {
+		if (e.kind === "paused") pausedBy[e.source] = e.ts;
+		else if (e.kind === "resume_ready" && e.target && pausedBy[e.target] != null) {
+			const b = (dwell.PAUSED ??= { ms: 0, n: 0, ongoing: 0 });
+			b.ms += Math.max(0, e.ts - pausedBy[e.target]);
+			b.n++;
+			delete pausedBy[e.target];
+		}
+	}
+	for (const f of db.query("SELECT value, ts FROM facts WHERE key LIKE 'lane.%.state' AND value IN ('WAIT_RATE','WAIT_DED','PAUSED')").all() as { value: string; ts: number }[]) {
+		const b = (dwell[f.value] ??= { ms: 0, n: 0, ongoing: 0 });
+		b.ongoing += Math.max(0, now - f.ts);
+	}
+	const dwellLine = Object.entries(dwell)
+		.filter(([, b]) => b.ms || b.ongoing)
+		.map(([k, b]) => `${k}${b.ms ? ` ${fmt(b.ms)}${b.n ? ` (${b.n} win)` : ""}` : ""}${b.ongoing ? ` +${fmt(b.ongoing)} ongoing` : ""}`)
+		.join(" · ");
+	if (dwellLine) console.log(`  dwell: ${dwellLine}`);
+	// friction: conflicts, rework (items claimed >1× — repairs/reclaims), fails
+	const conflicts = (db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'conflict' AND ts >= ? AND json_extract(payload, '$.project') = ?").get(cut, project) as { n: number }).n;
+	const failedQ = "SELECT COUNT(*) AS n FROM events WHERE kind = 'work.failed' AND ts >= ? AND json_extract(payload, '$.project') = ?";
+	const failed = (db.query(failedQ).get(cut, project) as { n: number }).n;
+	const rework = timing.filter((t) => t.claims > 1).length;
+	console.log(`  friction: ${conflicts} conflict event${conflicts === 1 ? "" : "s"}, ${rework} re-claimed item${rework === 1 ? "" : "s"}, ${failed} failed`);
+	// snapshot fact for trend diffing across waves
+	const snap = {
+		ts: now,
+		days,
+		project,
+		runs: runs.reduce((a, r) => a + r.n, 0),
+		byRole: Object.fromEntries(runs.map((r) => [r.role, r.n])),
+		done: doneItems.length,
+		open: openN,
+		medianWallMs: med(doneItems.map((t) => t.wallMs)),
+		medianAgentMs: med(doneItems.map((t) => t.agentMs)),
+		dwell,
+		conflicts,
+		rework,
+		failed,
+	};
+	const snapKey = `metrics.snapshot.${new Date(now).toISOString().slice(0, 10)}`;
+	db.query(
+		"INSERT INTO facts (key, value, source, version, ts) VALUES (?, ?, 'coord', 1, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, source = excluded.source, version = version + 1, ts = excluded.ts",
+	).run(snapKey, JSON.stringify(snap), now);
+	console.log(`  ${dim(`snapshot → ${snapKey}`)}`);
 } else if (cmd === "resume-session") {
 	// ownership rebind for `claude -c` continuations: the runtime hands the
 	// resumed session a fresh id — move ownership forward atomically so the
@@ -668,7 +761,7 @@ if (cmd === "emit") {
 	const lk = db.query("DELETE FROM locks WHERE ts < ?").run(now - 15 * 60_000).changes;
 	console.log(`gc: ${e} events, ${s} closed sessions, ${sw} stale RUNNING sessions swept, ${lk} expired locks, ${c} stale cursors, ${f} lane facts, ${x} consults expired, ${cd} consult threads pruned (>${days}d; work ledger untouched)`);
 } else {
-	die("unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet");
+	die("unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet | metrics");
 }
 
 function scopeCovers(a: string, b: string): boolean {

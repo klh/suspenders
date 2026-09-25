@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 .tmp-lease-repo-*/
 .tmp-kb-repo-*/
+.tmp-work-cli-repo*/
+.gates-test-*/

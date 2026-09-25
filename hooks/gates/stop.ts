@@ -3,10 +3,13 @@
 // from the hooks-review: porcelain -z parsing (spaces/renames safe),
 // JSON.stringify-built payloads (no printf-JSON corruption), bounded loop
 // matching the list cap, files newer than a cap only.
+// W14: re-verify runs filesCheck IN-PROCESS — the old loop spawned one
+// `bun gate.ts post-files` per changed file (up to 50 bun processes per Stop).
 import { allow, feedback, type HookInput } from "../lib/hookio.ts";
 import { run } from "../lib/run.ts";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { filesCheck } from "./files.ts";
 
 const CODE_EXT = /\.(json|py|sh|bash|zsh|dash|ts|tsx|js|jsx|mjs|cjs|mts|cts|yaml|yml|toml)$/i;
 
@@ -38,15 +41,15 @@ export function stopGate(hook: HookInput): never {
     if (f.startsWith("UU") || f.startsWith("AA") || f.startsWith("DD")) failures.push(`unmerged: ${f.slice(3)}`);
   }
 
-  // bounded re-verification via the same files gate (syntax only)
+  // bounded re-verification via the same files gate (syntax only), in-process
   let n = 0;
   for (const rel of files) {
     if (++n > 50) { failures.push("(more than 50 changed files — verify the rest manually)"); break; }
     const abs = `${cwd.replace(/\/$/, "")}/${rel}`;
     if (!existsSync(abs)) continue;
-    const payload = JSON.stringify({ tool_name: "Write", tool_input: { file_path: abs } });
-    const r = spawnSync("bun", [import.meta.dir + "/../gate.ts", "post-files"], { input: payload, encoding: "utf8" });
-    if (r.status === 2) failures.push((r.stderr ?? "").trim());
+    const payload = { tool_name: "Write", tool_input: { file_path: abs }, _deferred_fmt: true } as HookInput;
+    const v = filesCheck(payload);
+    if (v.kind === "block" || v.kind === "feedback") failures.push((v.err ?? v.msg).trim());
   }
 
   if (failures.length)

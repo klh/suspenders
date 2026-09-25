@@ -150,3 +150,151 @@ describe("waiting for you", () => {
 		d.close();
 	});
 });
+
+// ---- 5b dead letters + 5c drive-by fan-outs (ported from the .claude wave) ----
+// Both checks dedupe via facts (6h TTL), so each test reseeds a fresh
+// database: the monitor's own run bootstraps the schema, the test seeds rows
+// directly (same recipe as above), then asserts on its run. Second temp HOME
+// keeps the dedupe facts isolated from the "waiting for you" suite.
+const HOME2 = mkdtempSync(join(tmpdir(), "suspenders-monitor-dead-"));
+const DB2 = join(HOME2, ".cache", "claude-governor", "governor.db");
+afterAll(() => rmSync(HOME2, { recursive: true, force: true }));
+
+function run2(): { out: string; err: string; code: number } {
+	const p = Bun.spawnSync(["bun", join(bin, "monitor.ts")], { cwd: REPO, env: { ...process.env, HOME: HOME2 }, stdout: "pipe", stderr: "pipe" });
+	return { out: p.stdout.toString(), err: p.stderr.toString(), code: p.exitCode };
+}
+// wipe state, then let the monitor itself recreate the schema
+function fresh2() {
+	rmSync(join(HOME2, ".cache"), { recursive: true, force: true });
+	run2();
+}
+function seed2(fn: (db: Database) => void): void {
+	const db = new Database(DB2);
+	fn(db);
+	db.close();
+}
+const NOW2 = Date.now();
+const M2 = 60_000;
+const LANE2 = "dead-lane-aaaaaaaa";
+const PROJ2 = "/tmp/fake-proj2/.git";
+const ev2 = (kind: string, minAgo: number, payload: unknown, target: string | null): unknown[] => [NOW2 - minAgo * M2, "test", kind, null, JSON.stringify(payload), target];
+const insSession2 = (db: Database, sid: string, state: string) =>
+	db.query("INSERT INTO sessions (sid, project, role, parent_sid, started_at, hb, state) VALUES (?, ?, 'worker', 'coord-parent', ?, ?, ?)").run(sid, PROJ2, NOW2 - 60 * M2, NOW2 - (state === "RUNNING" ? 0 : 30) * M2, state);
+const insEvent2 = (db: Database, e: unknown[]) =>
+	db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, ?, ?, ?, ?)").run(...(e as [number, string, string, null, string, string | null]));
+const count2 = (db: Database, sql: string): number => (db.query(sql).get() as { n: number }).n;
+
+describe("monitor 5b — dead letters", () => {
+	test("old targeted event + RUNNING target + no cursor advance → alert + dedupe fact", () => {
+		fresh2();
+		seed2((db) => {
+			insSession2(db, LANE2, "RUNNING");
+			insEvent2(db, ev2("paused", 60, { sha: "abc" }, LANE2));
+		});
+		const r = run2();
+		expect(r.err).toContain("dead letter");
+		expect(r.code).toBe(1);
+		const d = new Database(DB2, { readonly: true });
+		expect(count2(d, "SELECT COUNT(*) AS n FROM facts WHERE key LIKE 'deadletter.%'")).toBe(1);
+		d.close();
+	});
+
+	test("dedupe: second run keeps one fact, re-alerts with (alerted …m ago)", () => {
+		const r2 = run2();
+		expect(r2.err).toContain("(alerted");
+		const d = new Database(DB2, { readonly: true });
+		expect(count2(d, "SELECT COUNT(*) AS n FROM facts WHERE key LIKE 'deadletter.%'")).toBe(1);
+		d.close();
+	});
+
+	test("cursor advanced past the event → clean", () => {
+		fresh2();
+		seed2((db) => {
+			insSession2(db, LANE2, "RUNNING");
+			insEvent2(db, ev2("paused", 60, { sha: "abc" }, LANE2));
+			db.query("INSERT INTO cursors (sid, event_id) VALUES (?, ?)").run(LANE2, 1);
+		});
+		const r = run2();
+		expect(r.code).toBe(0);
+		expect(r.out).toContain("health clean");
+	});
+
+	test("CLOSED target → no alert", () => {
+		fresh2();
+		seed2((db) => {
+			insSession2(db, LANE2, "CLOSED");
+			insEvent2(db, ev2("paused", 60, { sha: "abc" }, LANE2));
+		});
+		const r = run2();
+		expect(r.code).toBe(0);
+		expect(r.out).toContain("health clean");
+	});
+
+	test("target waiting on an OPEN decision → exempt (expected-silent)", () => {
+		fresh2();
+		seed2((db) => {
+			insSession2(db, LANE2, "RUNNING");
+			insEvent2(db, ev2("paused", 60, { sha: "abc" }, LANE2));
+			db.run("CREATE TABLE IF NOT EXISTS decisions (id INTEGER PRIMARY KEY, project TEXT, task_id TEXT, asked_by TEXT, question TEXT, options TEXT, state TEXT NOT NULL DEFAULT 'OPEN', delivery TEXT, answer_note TEXT, answer_to TEXT, answer_token TEXT, created_ts INTEGER, answered_ts INTEGER, ack_ts INTEGER)");
+			db.query("INSERT INTO decisions (project, task_id, asked_by, question, state, answer_to, created_ts) VALUES (?, 'W9', 'human', 'rule on this?', 'OPEN', ?, ?)").run(PROJ2, LANE2, NOW2);
+		});
+		const r = run2();
+		expect(r.code).toBe(0);
+		expect(r.out).toContain("health clean");
+	});
+});
+
+describe("monitor 5c — drive-by fan-outs", () => {
+	const added2 = (work: string, minAgo: number, extra: Record<string, unknown> = {}): unknown[] =>
+		ev2("work.added", minAgo, { work, project: PROJ2, ...extra }, null);
+
+	test("3 children in one split without plan ref → exactly one alert, fact written", () => {
+		fresh2();
+		seed2((db) => {
+			insEvent2(db, added2("W90.1", 31));
+			insEvent2(db, added2("W90.2", 31));
+			insEvent2(db, added2("W90.3", 30));
+		});
+		const r = run2();
+		expect(r.err.split("drive-by fan-out").length - 1).toBe(1);
+		expect(r.err).toContain("W90");
+		expect(r.code).toBe(1);
+		const d = new Database(DB2, { readonly: true });
+		expect(count2(d, "SELECT COUNT(*) AS n FROM facts WHERE key LIKE 'driveby.%'")).toBe(1);
+		d.close();
+	});
+
+	test("plan-referenced split (payload plan key) → clean", () => {
+		fresh2();
+		seed2((db) => {
+			insEvent2(db, added2("W90.1", 31, { plan: "W80" }));
+			insEvent2(db, added2("W90.2", 31, { plan: "W80" }));
+			insEvent2(db, added2("W90.3", 30, { plan: "W80" }));
+		});
+		const r = run2();
+		expect(r.code).toBe(0);
+		expect(r.out).toContain("health clean");
+	});
+
+	test("2 children → not a fan-out", () => {
+		fresh2();
+		seed2((db) => {
+			insEvent2(db, added2("W90.1", 31));
+			insEvent2(db, added2("W90.2", 31));
+		});
+		const r = run2();
+		expect(r.code).toBe(0);
+	});
+
+	test("same parent, children >1min apart → separate bursts, none >2 → clean", () => {
+		fresh2();
+		seed2((db) => {
+			insEvent2(db, added2("W90.1", 61));
+			insEvent2(db, added2("W90.2", 61));
+			insEvent2(db, added2("W90.3", 5));
+		});
+		const r = run2();
+		expect(r.code).toBe(0);
+	});
+});

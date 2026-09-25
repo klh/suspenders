@@ -72,10 +72,12 @@ export function leaseExpired(rec: { ts: number }, now = Date.now()): boolean {
 	return now - rec.ts > TTL_MS;
 }
 
-export function governorGate(hook: HookInput): never {
+// W14: void, not never — the pre-files pipeline (gate.ts) chains gates in ONE
+// process; a gate that is done simply returns, deny() still exits hard.
+export function governorGate(hook: HookInput): void {
 	const ti = hook.tool_input ?? {};
 	const F: string = ti.file_path ?? ti.notebook_path ?? "";
-	if (!F) allow();
+	if (!F) return;
 	const sid = hook.session_id ?? "unknown";
 	// Subagents inherit the parent session's session_id, so an exempt-list
 	// hit alone would leak the orchestrator's exemption to every subagent.
@@ -85,7 +87,7 @@ export function governorGate(hook: HookInput): never {
 	const isSubagent = (hook.transcript_path ?? "").includes("/subagents/");
 	if (!isSubagent && existsSync(EXEMPT)) {
 		const exempt = loadJSON<string[]>(EXEMPT, []);
-		if (exempt.includes(sid)) allow();
+		if (exempt.includes(sid)) return;
 	}
 	const lane = laneId(hook);
 
@@ -203,7 +205,7 @@ export function governorGate(hook: HookInput): never {
 			} catch {}
 			if (seen.includes(hash)) {
 				db.query("UPDATE locks SET hash = ?, ts = ? WHERE path = ? AND sid = ?").run(hash, now, P, lane);
-				allow();
+				return;
 			}
 			db.query("DELETE FROM locks WHERE path = ? AND sid = ?").run(P, lane);
 			deny(
@@ -231,7 +233,6 @@ export function governorGate(hook: HookInput): never {
 			);
 		}
 	}
-	allow();
 }
 
 /** The incoming agents' workload (owner 2026-09-22: "query incoming agents
