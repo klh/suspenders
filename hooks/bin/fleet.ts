@@ -1,15 +1,22 @@
 // fleet.ts — `fleet` from any directory: start the board server if it is not
 // already up, then open it in the browser. Alias in .zshrc:
 //   alias fleet="bun $HOME/.claude/bin/fleet.ts"
+import { existsSync } from "node:fs";
+
 const PORT = String(Number(process.argv[process.argv.indexOf("--port") + 1] ?? 7799) || 7799);
 const URL = "http://127.0.0.1:" + PORT;
+// board lives next to this script in both repo and installed layouts;
+// fall back to the legacy dotfiles path for old installs
+const BOARD = existsSync(`${import.meta.dir}/fleet-board.ts`)
+	? `${import.meta.dir}/fleet-board.ts`
+	: `${process.env.HOME}/.claude/bin/fleet-board.ts`;
 
 const up = await fetch(URL + "/api/data", { signal: AbortSignal.timeout(400) })
 	.then((r) => r.ok)
 	.catch(() => false);
 
 if (!up) {
-	Bun.spawn(["bun", process.env.HOME + "/.claude/bin/fleet-board.ts", "--port", PORT], { stdout: "ignore", stderr: "ignore" });
+	Bun.spawn(["bun", BOARD, "--port", PORT], { stdout: "ignore", stderr: "ignore" });
 	let ok = false;
 	for (let i = 0; i < 20; i++) {
 		await Bun.sleep(150);
@@ -19,7 +26,7 @@ if (!up) {
 		if (ok) break;
 	}
 	if (!ok) {
-		console.error("fleet: server did not come up on " + PORT + " — check ~/.claude/bin/fleet-board.ts");
+		console.error("fleet: server did not come up on " + PORT + " — check " + BOARD);
 		process.exit(1);
 	}
 }
