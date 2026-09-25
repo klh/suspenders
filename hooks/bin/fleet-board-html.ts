@@ -924,7 +924,28 @@ function saveTaskView(){
   try { localStorage.setItem('sb.taskSort', JSON.stringify(taskSort)); localStorage.setItem('sb.taskOwner', taskOwner); } catch (e) {}
 }
 function ownerKey(t){ return t.owner_sid ? String(t.owner_sid) : 'unclaimed'; }
-function ownerName(t){ return t.owner_label || (t.owner_sid ? String(t.owner_sid).slice(0, 10) : '') || 'unclaimed'; }
+var ownerDisp = {}; // sid → display label, rebuilt per poll; shared intent labels get the sid appended
+function ownerName(t){
+  var s = t.owner_sid ? String(t.owner_sid) : '';
+  if (s && ownerDisp[s]) return ownerDisp[s];
+  return t.owner_label || (s ? s.slice(0, 10) : '') || 'unclaimed';
+}
+function buildOwnerDisp(ts){ // seven lanes all claiming "work-graph" must stay distinguishable
+  var sidLabel = {}, byLabel = {};
+  for (var i = 0; i < ts.length; i++){
+    var s = ts[i].owner_sid ? String(ts[i].owner_sid) : '';
+    if (!s) continue;
+    var l = ts[i].owner_label || s.slice(0, 10) || 'unclaimed';
+    sidLabel[s] = l;
+    (byLabel[l] || (byLabel[l] = {}))[s] = 1;
+  }
+  ownerDisp = {};
+  for (var s2 in sidLabel){
+    var l2 = sidLabel[s2];
+    var n = 0; for (var x in byLabel[l2]) n++;
+    ownerDisp[s2] = n > 1 ? l2 + ' (' + s2.slice(0, 12) + ')' : l2;
+  }
+}
 function taskSortVal(t, k){
   if (k === 'age') return Number(t.age_s || 0);
   if (k === 'decisions') return Number(t.open_decisions || 0);
@@ -1019,6 +1040,7 @@ function renderTasks(){
   }
   if (!tasksData) return; // nothing good yet — keep loading/error row
   var ts = tasksData.tasks;
+  buildOwnerDisp(ts);
   renderTaskOwnerOptions(ts);
   var own = taskOwner === 'all' ? ts : ts.filter(function(t){ return ownerKey(t) === taskOwner; });
   var g = taskGroups(own); // fragments nest under their parent row
