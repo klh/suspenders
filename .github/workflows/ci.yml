@@ -17,6 +17,7 @@ jobs:
           for f in hooks/gate.ts hooks/session-start.ts hooks/session-end.ts \
                    hooks/bin/work.ts hooks/bin/coord.ts hooks/bin/monitor.ts \
                    hooks/bin/fleet-board.ts hooks/bin/advise.ts \
+                   hooks/bin/claim.ts hooks/bin/fleet.ts \
                    hooks/bin/progress.ts hooks/bin/quota-window.ts; do
             bun build "$f" --target=bun --outfile=/dev/null
           done
