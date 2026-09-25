@@ -8,7 +8,7 @@
 // focusing a session shows its project's TODO / IN-FLIGHT / DONE board,
 // its claims, inbox, lane state, and the event tail.
 import { openGovernorDb } from "../lib/govdb.ts";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { HTML } from "./fleet-board-html.ts";
 
 // sibling CLIs resolve relative to this file — the board is relocatable
@@ -396,14 +396,22 @@ async function llmCheck(): Promise<{ ok: boolean; detail: string }> {
 async function setupChecks(): Promise<unknown[]> {
 	const launchdPlist = `${process.env.HOME}/Library/LaunchAgents/com.suspenders.fleet-monitor.plist`;
 	const llm = await llmCheck();
-	const hookOk = settingsCommands("PreToolUse").some((c) => c.includes(gatePath));
-	const startOk = settingsCommands("SessionStart").some((c) => c.includes(sessionStartPath));
-	const monitorOk = existsSync(launchdPlist);
+	// wired = a registered command runs the hook BY NAME — the install layout
+	// varies (namespaced suspenders/ vs legacy hooks/), so a literal-path match
+	// false-negatived every non-namespaced machine
+	const hookOk = settingsCommands("PreToolUse").some((c) => c.includes("gate.ts"));
+	const startOk = settingsCommands("SessionStart").some((c) => c.includes("session-start.ts"));
+	let monitorOk = existsSync(launchdPlist);
+	if (!monitorOk) {
+		try {
+			monitorOk = readdirSync(`${process.env.HOME}/Library/LaunchAgents`).some((f) => /fleet-monitor/i.test(f));
+		} catch {} // no LaunchAgents dir — nothing installed
+	}
 	return [
 		{ id: "db", label: "Control-plane database", ok: true, detail: `${REG_DIR}/governor.db`, fix: null },
 		{ id: "hooks-wired", label: "Hook gates wired", ok: hookOk, detail: hookOk ? gatePath : `PreToolUse hooks in ~/.claude/settings.json do not reference ${gatePath}`, fix: hookOk ? null : "./install.sh --wire" },
 		{ id: "session-start", label: "Session injection wired", ok: startOk, detail: startOk ? sessionStartPath : `SessionStart hooks in ~/.claude/settings.json do not reference ${sessionStartPath}`, fix: startOk ? null : "./install.sh --wire" },
-		{ id: "monitor-agent", label: "Fleet monitor launchd", ok: monitorOk, detail: launchdPlist, fix: monitorOk ? null : "./install.sh --with-launchd" },
+		{ id: "monitor-agent", label: "Fleet monitor launchd", ok: monitorOk, detail: monitorOk ? "fleet-monitor agent installed" : "no *fleet-monitor* plist in ~/Library/LaunchAgents", fix: monitorOk ? null : "./install.sh --with-launchd" },
 		{ id: "llm", label: "Advice LLM endpoint", ok: llm.ok, detail: llm.detail, fix: llm.ok ? null : "local LLM stack docs" },
 		{ id: "bind", label: "LAN binding", ok: true, detail: BIND, fix: null },
 	];

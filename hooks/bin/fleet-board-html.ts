@@ -100,6 +100,14 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
 #tasksTbl th { text-align:left; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:#98958e; border-bottom:1px solid rgba(255,255,255,.12); padding:6px 10px; }
 #tasksTbl td { border-bottom:1px solid rgba(255,255,255,.07); padding:7px 10px; vertical-align:top; }
 #tasksTbl tbody tr:hover { background:#1c1b19; }
+#tasksTbl th button.thsort { all:unset; cursor:pointer; font:inherit; color:inherit; text-transform:inherit; letter-spacing:inherit; }
+#tasksTbl th button.thsort:hover { text-decoration:underline; text-underline-offset:3px; }
+.kidmark { color:#98958e; margin-right:6px; }
+.taskbar { display:flex; align-items:center; gap:10px; margin:0 0 10px; }
+.taskbar select {
+  background:#232220; color:#d6d3cc; border:1px solid rgba(255,255,255,.14); border-radius:4px;
+  font:12px ui-monospace, Menlo, monospace; padding:3px 6px;
+}
 #tasksTbl .num { text-align:right; font-variant-numeric:tabular-nums; color:#98958e; }
 .tidbtn { background:none; border:none; padding:0; color:#d8900f; font:inherit; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
 .ttitle { word-break:break-word; max-width:480px; }
@@ -177,9 +185,22 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
   </div>
 </section>
 <section id="tab-tasks" hidden>
+  <div class="taskbar">
+    <label class="plabel" for="taskOwner">session</label>
+    <select id="taskOwner"><option value="all">all sessions</option></select>
+    <span id="taskCount" class="dim"></span>
+  </div>
+
   <div id="tasksErr" class="taberr"></div>
   <table id="tasksTbl">
-    <thead><tr><th scope="col">id</th><th scope="col">task</th><th scope="col">state</th><th scope="col">owner</th><th scope="col">age</th><th scope="col">decisions</th></tr></thead>
+    <thead><tr>
+      <th scope="col" data-k="id"><button type="button" class="thsort" data-label="id">id</button></th>
+      <th scope="col" data-k="title"><button type="button" class="thsort" data-label="task">task</button></th>
+      <th scope="col" data-k="state"><button type="button" class="thsort" data-label="state">state</button></th>
+      <th scope="col" data-k="owner"><button type="button" class="thsort" data-label="owner">owner</button></th>
+      <th scope="col" data-k="age"><button type="button" class="thsort" data-label="age">age</button></th>
+      <th scope="col" data-k="decisions"><button type="button" class="thsort" data-label="decisions">decisions</button></th>
+    </tr></thead>
     <tbody id="tasksBody"><tr><td colspan="6" class="dim">loading tasks...</td></tr></tbody>
   </table>
 </section>
@@ -889,6 +910,75 @@ function renderHist(){
   sigSet(body, String(histOkAt), html); // rebuild per good poll; ages stay fresh
 }
 // --- 4: tasks table (Tasks tab, /api/tasks) + drawer (/api/task) ---
+// view state: session filter + column sort, persisted per browser (owner
+// asked: filter tasks by owning session, sortable table, fragments grouped)
+var taskSort = {key: 'id', dir: 1};
+var taskOwner = 'all';
+try {
+  var savedSort = JSON.parse(localStorage.getItem('sb.taskSort') || 'null');
+  if (savedSort && savedSort.key) taskSort = savedSort;
+  var savedOwner = localStorage.getItem('sb.taskOwner');
+  if (savedOwner) taskOwner = String(savedOwner);
+} catch (e) {}
+function saveTaskView(){
+  try { localStorage.setItem('sb.taskSort', JSON.stringify(taskSort)); localStorage.setItem('sb.taskOwner', taskOwner); } catch (e) {}
+}
+function ownerKey(t){ return t.owner_sid ? String(t.owner_sid) : 'unclaimed'; }
+function ownerName(t){ return t.owner_label || (t.owner_sid ? String(t.owner_sid).slice(0, 10) : '') || 'unclaimed'; }
+function taskSortVal(t, k){
+  if (k === 'age') return Number(t.age_s || 0);
+  if (k === 'decisions') return Number(t.open_decisions || 0);
+  if (k === 'owner') return ownerName(t).toLowerCase();
+  var s2 = String(k === 'title' ? t.title : k === 'state' ? t.state : t.id || '');
+  return s2.toLowerCase();
+}
+function sortTasks(arr){
+  var k = taskSort.key, d = taskSort.dir;
+  arr.sort(function(a, b){
+    var va = taskSortVal(a, k), vb = taskSortVal(b, k);
+    return (typeof va === 'number' ? va - vb : String(va).localeCompare(String(vb))) * d;
+  });
+}
+function taskGroups(ts){ // dotted fragments (W138.1) nest under their parent row
+  var byIdMap = {}, roots = [], kids = {};
+  for (var i = 0; i < ts.length; i++) byIdMap[String(ts[i].id)] = ts[i];
+  for (var j = 0; j < ts.length; j++){
+    var t = ts[j], id = String(t.id), dot = id.lastIndexOf('.');
+    var pid = dot > 0 ? id.slice(0, dot) : null;
+    if (pid && byIdMap[pid]) (kids[pid] || (kids[pid] = [])).push(t);
+    else roots.push(t);
+  }
+  return {roots: roots, kids: kids};
+}
+function renderTaskOwnerOptions(ts){
+  var sel = byId('taskOwner');
+  var seen = {}, names = [];
+  for (var i = 0; i < ts.length; i++){
+    var k = ownerKey(ts[i]);
+    if (!seen[k]) { seen[k] = ownerName(ts[i]); names.push([k, seen[k]]); }
+  }
+  names.sort(function(a, b){ return a[1].localeCompare(b[1]); });
+  var html = '<option value="all">all sessions</option>';
+  for (var j = 0; j < names.length; j++) html += '<option value="' + esc(names[j][0]) + '">' + esc(names[j][1]) + '</option>';
+  if (sel.dataset.sig === html) return;
+  sel.innerHTML = html;
+  sel.dataset.sig = html;
+  var has = false;
+  for (var o = 0; o < sel.options.length; o++) if (sel.options[o].value === taskOwner) has = true;
+  if (!has) { taskOwner = 'all'; saveTaskView(); }
+  sel.value = taskOwner;
+}
+function paintSort(){
+  var ths = document.querySelectorAll('#tasksTbl th');
+  for (var i = 0; i < ths.length; i++){
+    var th = ths[i], k = th.getAttribute('data-k');
+    var b = th.querySelector('.thsort');
+    if (!k || !b) continue;
+    var active = k === taskSort.key;
+    th.setAttribute('aria-sort', active ? (taskSort.dir === 1 ? 'ascending' : 'descending') : 'none');
+    b.textContent = (b.getAttribute('data-label') || '') + (active ? (taskSort.dir === 1 ? ' \u25B4' : ' \u25BE') : '');
+  }
+}
 function pollTasks(){
   if (tasksBusy || curTab !== 'tasks') return;
   tasksBusy = true;
@@ -902,10 +992,11 @@ function pollTasks(){
     .catch(function(e){ tasksErr = String((e && e.message) || e); })
     .finally(function(){ tasksBusy = false; renderTasks(); });
 }
-function taskRow(t){
-  var owner = t.owner_label || (t.owner_sid ? String(t.owner_sid).slice(0, 10) : '') || 'unclaimed';
+function taskRow(t, parentId){
+  var owner = ownerName(t);
   var od = t.open_decisions || 0;
-  return '<tr data-tid="' + esc(t.id) + '"><td><button type="button" class="tidbtn mono" data-task="' + esc(t.id) + '" data-proj="' + esc(t.project || '') + '" aria-haspopup="dialog">' + esc(t.id) + '</button></td>' +
+  var kid = parentId ? '<span class="kidmark">↳</span>' : '';
+  return '<tr data-tid="' + esc(t.id) + '"><td>' + kid + '<button type="button" class="tidbtn mono" data-task="' + esc(t.id) + '" data-proj="' + esc(t.project || '') + '" aria-haspopup="dialog">' + esc(t.id) + '</button></td>' +
     '<td class="ttitle">' + esc(String(t.title || '(untitled)')).slice(0, 120) + '</td>' +
     '<td>' + taskPill(t.state) + '</td>' +
     '<td>' + esc(owner) + '</td>' +
@@ -928,9 +1019,20 @@ function renderTasks(){
   }
   if (!tasksData) return; // nothing good yet — keep loading/error row
   var ts = tasksData.tasks;
+  renderTaskOwnerOptions(ts);
+  var own = taskOwner === 'all' ? ts : ts.filter(function(t){ return ownerKey(t) === taskOwner; });
+  var g = taskGroups(own); // fragments nest under their parent row
+  sortTasks(g.roots);
   var html = '';
-  for (var i = 0; i < ts.length; i++) html += taskRow(ts[i]);
-  if (!html) html = '<tr><td colspan="6" class="dim">(no tasks)</td></tr>';
+  for (var i = 0; i < g.roots.length; i++){
+    var r = g.roots[i];
+    html += taskRow(r);
+    var kids = g.kids[r.id];
+    if (kids) { sortTasks(kids); for (var c = 0; c < kids.length; c++) html += taskRow(kids[c], r.id); }
+  }
+  if (!html) html = '<tr><td colspan="6" class="dim">' + (ts.length ? '(no tasks for this session)' : '(no tasks)') + '</td></tr>';
+  var cnt = byId('taskCount');
+  if (cnt) cnt.textContent = own.length === ts.length ? own.length + ' tasks' : own.length + ' of ' + ts.length + ' tasks';
   sigSetKeep(body, html, html, 'data-task'); // rebuild only on real change; refocus the row button if the table swapped under it
 }
 function openTask(id, proj, trigger){
@@ -1137,6 +1239,23 @@ byId('tasksTbl').addEventListener('click', function(e){
   var b = e.target.closest && e.target.closest('[data-task]');
   if (b) openTask(b.getAttribute('data-task'), b.getAttribute('data-proj'), b);
 });
+var theadEl = document.querySelector('#tasksTbl thead');
+if (theadEl) theadEl.addEventListener('click', function(e){
+  var b = e.target && e.target.closest ? e.target.closest('.thsort') : null;
+  if (!b) return;
+  var th = b.closest('th');
+  var k = th ? th.getAttribute('data-k') : null;
+  if (!k) return;
+  if (taskSort.key === k) taskSort.dir = -taskSort.dir;
+  else { taskSort.key = k; taskSort.dir = 1; }
+  saveTaskView(); paintSort(); renderTasks();
+});
+var ownSel = byId('taskOwner');
+if (ownSel) ownSel.addEventListener('change', function(e){
+  taskOwner = e.target.value || 'all';
+  saveTaskView(); renderTasks();
+});
+paintSort();
 byId('drawerClose').addEventListener('click', closeTask);
 byId('setupBody').addEventListener('click', function(e){
   var b = e.target.closest && e.target.closest('.copyfix');
