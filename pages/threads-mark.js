@@ -12,6 +12,8 @@
 //   cadence  — ms between fresh generations (default 500)
 //   seed     — freeze one generation instead of cycling
 //   borderless — drop the hairline card edge
+//   transparent — the stitch alone: no card fill, no edge (for badges that
+//     sit on a page's own background)
 // Reduced motion: one frozen generation (seed 77), no cycle.
 
 // Page tokens cross the shadow boundary; same defaults as <dynamic-mark>.
@@ -126,15 +128,18 @@ class ThreadsMark extends HTMLElement {
     if (!ctx) return
     const r = px * 0.16
     const colors = colorsFrom(this)
+    const bare = this.hasAttribute("transparent") // stitch only: no card, no edge
     ctx.clearRect(0, 0, px, px)
-    ctx.beginPath()
-    ctx.roundRect(0, 0, px, px, r)
-    ctx.fillStyle = colors.paper
-    ctx.fill()
-    ctx.save()
-    ctx.beginPath()
-    ctx.roundRect(0, 0, px, px, r)
-    ctx.clip()
+    if (!bare) {
+      ctx.beginPath()
+      ctx.roundRect(0, 0, px, px, r)
+      ctx.fillStyle = colors.paper
+      ctx.fill()
+      ctx.save()
+      ctx.beginPath()
+      ctx.roundRect(0, 0, px, px, r)
+      ctx.clip()
+    }
     ctx.lineCap = "round"
     ctx.lineJoin = "round"
     ctx.strokeStyle = colors.thread
@@ -150,8 +155,8 @@ class ThreadsMark extends HTMLElement {
       ctx.lineTo(b.x * s * dpr, b.y * s * dpr)
       ctx.stroke()
     }
-    ctx.restore()
-    if (!this.hasAttribute("borderless")) {
+    if (!bare) ctx.restore()
+    if (!bare && !this.hasAttribute("borderless")) {
       ctx.beginPath()
       ctx.roundRect(0.5, 0.5, px - 1, px - 1, r)
       ctx.strokeStyle = colors.hair
