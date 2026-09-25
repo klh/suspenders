@@ -277,8 +277,23 @@ console.log(`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; wr
 const mdnsCmd = process.platform === "darwin" ? ["dns-sd", "-R", "suspenders", "_http._tcp", ".", String(PORT)] : ["avahi-publish", "-s", "suspenders", "_http._tcp", String(PORT)];
 try {
 	const mdns = Bun.spawn(mdnsCmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-	process.on("exit", () => mdns.kill());
-	console.log(`mDNS registered → http://suspenders.local:${PORT}`);
+	const killMdns = () => {
+		try {
+			mdns.kill();
+		} catch {}
+	};
+	process.on("exit", killMdns);
+	// Bun's exit handlers don't fire on bare SIGTERM/SIGINT — without these,
+	// orphaned dns-sd children accumulate and fight over the service name
+	process.on("SIGTERM", () => {
+		killMdns();
+		process.exit(0);
+	});
+	process.on("SIGINT", () => {
+		killMdns();
+		process.exit(0);
+	});
+	console.log(`mDNS service "suspenders" registered (Bonjour discovery) — local URL http://127.0.0.1:${PORT}`);
 } catch {
 	// no mDNS tooling — loopback URL still works
 }
