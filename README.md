@@ -70,6 +70,55 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding
 
 Decision-fork flow: lane emits `NEED_DECISION` → board surfaces it (red card) → optional **Advice me!** spawns `advise.ts` → endpoint-agnostic LLM call (any OpenAI-compatible API; model autodiscovered from `/v1/models`) → recommendation as `advice.<event-id>` fact → human edits/accepts → `ANSWER` event back to the lane. **The LLM advises; the human decides.**
 
+### Messaging, consults, and the human in the loop
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant L as Lane (worker session)
+    participant C as Coordinator session
+    participant G as governor.db (bus + graph)
+    participant B as Fleet board (browser)
+    participant A as advise.ts (LLM worker)
+    participant H as Human operator
+
+    Note over L,G: work and checkpoints ride the bus — never prose
+    L->>G: work take W7 (CAS claim, capability-checked)
+    L->>G: emit checkpoint --sha (milestone)
+    L->>G: emit NEED_DECISION --note "queue vs stream?" (fork raised)
+
+    G->>B: 1s poll → fork card (red, asker, age)
+    B->>H: "2 forks need you"
+
+    alt human wants machine advice
+        H->>B: click "Advice me!"
+        B->>A: POST /api/advise (spawn, detached)
+        A->>G: read claims, recent events, graph shape, zombies
+        A->>A: LLM call (OpenAI-compatible, model autodiscovered)
+        A->>G: fact advice.<id> + ADVICE event
+        G->>B: advice renders inline (rec · rationale · risk · model)
+        B->>H: "use this" → fills the answer box
+    end
+
+    H->>B: edit decision, click send
+    B->>G: emit ANSWER --to <lane> --note "…" (auto-acks the fork)
+    G->>L: lane inbox sees ANSWER on next poll
+
+    Note over L,C: questions, never ownership
+    L->>G: coord who-knows "stitch contracts?" (discover expert)
+    G->>C: consult C## — "? C## from <lane>"
+    C->>G: coord consult-reply C## "<answer>"
+    G->>L: expert's answer lands in lane inbox
+
+    Note over G,H: zombies: 2 stale signals → ZOMBIE alert to the human — never auto-reclaimed
+    G->>B: zombie chip (lane frozen by usage cliff)
+    H->>G: work reclaim W7 → re-dispatch pointing at frozen transcript
+```
+
+## Examples
+
+A full worked session — bootstrap, register work, capability-gated dispatch, consult, fork with advice, human answer, zombie reclaim — lives in [examples/walkthrough.md](examples/walkthrough.md). Every command is copy-pasteable against any repo.
+
 ## Security posture
 
 - The control plane never stores credentials; secrets never enter the bus.

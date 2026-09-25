@@ -86,6 +86,55 @@ footer .r { margin-left:auto; }
 </section>
 
 <section>
+  <h2>Messaging, consults, and the human in the loop</h2>
+  <div class="arch">
+<pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant L as Lane (worker session)
+    participant C as Coordinator session
+    participant G as governor.db (bus + graph)
+    participant B as Fleet board (browser)
+    participant A as advise.ts (LLM worker)
+    participant H as Human operator
+
+    Note over L,G: work and checkpoints ride the bus — never prose
+    L->>G: work take W7 (CAS claim, capability-checked)
+    L->>G: emit checkpoint --sha (milestone)
+    L->>G: emit NEED_DECISION (fork raised)
+
+    G->>B: 1s poll — fork card (red, asker, age)
+    B->>H: "2 forks need you"
+
+    alt human wants machine advice
+        H->>B: click "Advice me!"
+        B->>A: POST /api/advise (spawn, detached)
+        A->>G: read claims, recent events, graph shape
+        A->>A: LLM call (OpenAI-compatible, autodiscovered)
+        A->>G: fact advice.#id + ADVICE event
+        G->>B: advice inline (rec / rationale / risk / model)
+        B->>H: "use this" fills the answer box
+    end
+
+    H->>B: edit decision, send
+    B->>G: emit ANSWER --to lane (auto-acks the fork)
+    G->>L: lane inbox sees ANSWER on next poll
+
+    Note over L,C: consults — questions, never ownership
+    L->>G: coord who-knows "retry contracts?"
+    G->>C: consult C## in expert inbox
+    C->>G: coord consult-reply C## answer
+    G->>L: answer lands in lane inbox
+
+    Note over G,H: zombies — 2 stale signals alert, never auto-reclaim
+    G->>B: zombie chip (lane frozen by usage cliff)
+    H->>G: work reclaim W4 — re-dispatch at frozen transcript
+</pre>
+  </div>
+  <p class="caption">Rendered with mermaid — the same diagram lives in the <a href="https://github.com/klh/suspenders#messaging-consults-and-the-human-in-the-loop">README</a>. The invariants: the bus is the transport, consults never move ownership, and the human is the only one who answers forks or reclaims lanes.</p>
+</section>
+
+<section>
   <h2>Architecture</h2>
   <div class="arch"><pre>bun CLIs + hook gates
   │ SessionStart → bootstrap session, caps, transcript_path
@@ -106,6 +155,9 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre></div
   <span class="r"><a href="https://github.com/klh/suspenders">github.com/klh/suspenders</a> · extracted from the <a href="https://github.com/klh/speedy-claude">speedy-claude</a> setup</span>
 </footer>
 
-</div>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "dark", fontFamily: "ui-monospace, Menlo, monospace" });
+</script>
 </body>
 </html>

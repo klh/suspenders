@@ -1,6 +1,7 @@
+const unesc = (s) => s.split("\\u2014").join(String.fromCharCode(0x2014));
 // fleet-board-html.ts — the fleet board page, split from the server so the
 // HTML payload stays reviewable. Pure string; served by fleet-board.ts.
-export const HTML = String.raw`<!doctype html>
+export const HTML = unesc(String.raw`<!doctype html>
 <html><head><meta charset="utf-8"><title>FLEET BOARD</title>
 <style>
 :root { color-scheme: dark; }
@@ -271,4 +272,8 @@ function tick() {
 setInterval(tick, 1000);
 sel.addEventListener('change', tick);
 tick();
-</script></body></html>`;
+if (new URLSearchParams(location.search).get('open') === 'forks') {
+  // open immediately; the 1s render loop keeps the panel populated
+  document.getElementById('needsPanel').style.display = 'block';
+}
+</script></body></html>`);

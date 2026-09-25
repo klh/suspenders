@@ -269,3 +269,16 @@ Bun.serve({
 	},
 });
 console.log(`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise)`);
+
+// best-effort Bonjour/mDNS: while the board runs, http://suspenders.local:PORT
+// resolves from Bonjour-capable machines on the LAN. The name belongs to the
+// dns-sd/avahi child — it vanishes when the board dies (auto-renames to
+// suspenders-2.local on conflict). Skip silently when neither tool exists.
+const mdnsCmd = process.platform === "darwin" ? ["dns-sd", "-R", "suspenders", "_http._tcp", ".", String(PORT)] : ["avahi-publish", "-s", "suspenders", "_http._tcp", String(PORT)];
+try {
+	const mdns = Bun.spawn(mdnsCmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+	process.on("exit", () => mdns.kill());
+	console.log(`mDNS registered → http://suspenders.local:${PORT}`);
+} catch {
+	// no mDNS tooling — loopback URL still works
+}
