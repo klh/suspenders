@@ -929,7 +929,7 @@ try {
 function saveTaskView(){
   try { localStorage.setItem('sb.taskSort', JSON.stringify(taskSort)); localStorage.setItem('sb.taskOwner', taskOwner); localStorage.setItem('sb.taskProj', taskProj); } catch (e) {}
 }
-function projShort(p){ return String(p || '').split('/').pop().replace(/\.git$/, '') || '—'; }
+function projShort(p){ return String(p || '').replace(/\/\.git$/, '').split('/').pop() || '—'; }
 function ownerKey(t){ return t.owner_sid ? String(t.owner_sid) : 'unclaimed'; }
 var ownerDisp = {}; // sid → display label, rebuilt per poll; shared intent labels get the sid appended
 function ownerName(t){
