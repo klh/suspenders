@@ -11,7 +11,11 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-leases-"));
-const REPO = mkdtempSync(join(tmpdir(), "suspenders-lrepo-"));
+// REPO must NOT live under /tmp: the bash gate exempts /tmp/** paths from
+// lease arbitration by design, and on Linux os.tmpdir() IS /tmp — the lease
+// tests would silently test nothing. The checkout (process.cwd()) is never
+// under /tmp, on macOS, Linux, or CI.
+const REPO = mkdtempSync(join(process.cwd(), ".tmp-lease-repo-"));
 mkdirSync(join(REPO, ".git"), { recursive: true });
 mkdirSync(join(REPO, "sub"), { recursive: true });
 const env = { ...process.env, HOME };
