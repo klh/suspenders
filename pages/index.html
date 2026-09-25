@@ -12,14 +12,22 @@
       :root { color-scheme: light; }
       * { box-sizing: border-box; margin: 0; }
       body {
-        background: #fff;
+        background: #e9e9e7 url("suspenders.jpg") center 20% / cover no-repeat fixed;
         color: #666;
         font: 14px/1.65 "Lucida Grande", Geneva, Verdana, Arial, sans-serif;
         padding: 0 24px;
       }
       a { color: #af2f12; text-decoration: none; }
       a:hover { text-decoration: underline; text-underline-offset: 3px; }
-      .wrap { max-width: 980px; margin: 0 auto; padding: 72px 0 48px; }
+      .wrap {
+        max-width: 980px;
+        margin: 48px auto 0;
+        padding: 56px 46px 44px;
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(5px);
+        -webkit-backdrop-filter: blur(5px);
+        border: 1px solid rgba(32, 29, 26, 0.08);
+      }
       .kicker {
         font-size: 11px;
         letter-spacing: 0.18em;
@@ -60,9 +68,10 @@
         color: #555;
       }
       .install .p { color: #af2f12; }
-      .why { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 36px; align-items: center; }
-      .why img { width: 100%; display: block; border: 1px solid #ddd; }
-      @media (max-width: 640px) { .why { grid-template-columns: 1fr; } }
+      @media (max-width: 640px) {
+        .wrap { padding: 36px 22px; margin-top: 0; }
+        body { background-attachment: scroll; }
+      }
       section { margin-top: 84px; }
       h2 {
         font-size: 12px;
@@ -276,14 +285,11 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
 
       <section>
         <h2>Why "suspenders"</h2>
-        <div class="why">
-          <img src="suspenders.jpg" alt="Black leather suspenders on a light background — the namesake" />
-          <p class="tagline" style="margin-top: 0">
-            Belt <em>and</em> suspenders: the harness trusts the graph, verifies with two independent liveness signals, and
-            never lets one failure mode be fatal.
-            <b>The Work Graph is authoritative; everything else — prose, transcripts, memory — is reconstruction.</b>
-          </p>
-        </div>
+        <p class="tagline" style="margin-top: 0">
+          Belt <em>and</em> suspenders: the harness trusts the graph, verifies with two independent liveness signals, and
+          never lets one failure mode be fatal.
+          <b>The Work Graph is authoritative; everything else — prose, transcripts, memory — is reconstruction.</b>
+        </p>
       </section>
 
       <footer>
@@ -309,5 +315,17 @@ fleet board — forks · lanes · tasks · stream   ← you, deciding</pre>
          (copied into this repo per its intended distribution mode):
          dependency-free, regenerates every 500ms by default -->
     <script src="./threads-mark.js"></script>
+    <script>
+      // random backdrop: 50/50 swap to the alternative product shot
+      // (suspenders-b.jpg) once it confirms loadable
+      (function () {
+        if (Math.random() < 0.5) return;
+        var alt = new Image();
+        alt.onload = function () {
+          document.body.style.backgroundImage = 'url("suspenders-b.jpg")';
+        };
+        alt.src = "suspenders-b.jpg";
+      })();
+    </script>
   </body>
 </html>
