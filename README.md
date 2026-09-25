@@ -1,5 +1,8 @@
 # suspenders
 
+[![ci](https://github.com/klh/suspenders/actions/workflows/ci.yml/badge.svg)](https://github.com/klh/suspenders/actions/workflows/ci.yml)
+[![pages](https://github.com/klh/suspenders/actions/workflows/deploy-pages.yml/badge.svg)](https://klh.github.io/suspenders/)
+
 **A governor for agent fleets.** You run five parallel Claude Code sessions; a usage cliff freezes three of them mid-edit; the survivors keep claiming their scopes; nobody notices for six hours. Suspenders is the control plane that notices — and the board where you decide what happens next.
 
 It's the extraction of a harness that has run a real multi-agent fleet for months: a SQLite control plane (claims, locks, events, work graph, sessions) wired into Claude Code's hook system, plus a live web board that turns the bus into a monitoring and task-completion tool — **decision forks with a one-click "Advice me!" LLM recommendation**, per-lane telemetry with zombie detection, project completion stats, and a filterable event stream.
