@@ -23,7 +23,7 @@ import { basename, dirname, resolve } from "node:path";
 const REG = `${process.env.HOME}/.cache/claude-governor`;
 const DRIFT = `${REG}/drift.jsonl`;
 const EXEMPT = `${REG}/exempt.json`;
-const TTL_MS = 15 * 60_000;
+export const TTL_MS = 15 * 60_000;
 
 // Canonical path: symlinks resolved for what exists, nearest existing ancestor
 // otherwise (Write-new has no file yet). Keys in the locks table are canonical.
@@ -48,6 +48,31 @@ function loadJSON<T>(p: string, fallback: T): T {
 	}
 }
 
+// Stable LANE identity: subagents inherit the parent's session_id, so raw
+// session_id makes sibling subagents share lease ownership (two lanes could
+// edit one file). Discriminate by the transcript — subagent transcripts live
+// under /subagents/<agent>.jsonl. Main-lane ids are unchanged, so leases
+// written before this are still owned by their session. Shared with the Bash
+// gate: both enforcers must compute the SAME owner identity.
+export function laneId(hook: HookInput): string {
+	const sid: string = hook.session_id ?? "unknown";
+	const tp: string = hook.transcript_path ?? "";
+	const m = tp.match(/\/subagents\/([^/]+?)(?:\.jsonl)?\/?$/);
+	return m ? `${sid}#${m[1]}` : sid;
+}
+
+// Lease expiry: quiet 15 min AND owner transcript dead/silent ⇒ gone.
+// A quiet-but-alive lane keeps its lease. Shared with the Bash gate.
+export function leaseExpired(rec: { ts: number; tp?: string | null }, now = Date.now()): boolean {
+	if (now - rec.ts <= TTL_MS) return false;
+	try {
+		if (rec.tp && existsSync(rec.tp) && now - statSync(rec.tp).mtimeMs < TTL_MS) return false;
+	} catch {
+		return false; // transcript unreadable — keep the lease (fail open)
+	}
+	return true;
+}
+
 export function governorGate(hook: HookInput): never {
 	const ti = hook.tool_input ?? {};
 	const F: string = ti.file_path ?? ti.notebook_path ?? "";
@@ -56,19 +81,17 @@ export function governorGate(hook: HookInput): never {
 	// Subagents inherit the parent session's session_id, so an exempt-list
 	// hit alone would leak the orchestrator's exemption to every subagent.
 	// Subagent transcripts always live under /subagents/ — strip the
-	// exemption there so each subagent takes a real lease.
+	// exemption there so each subagent takes a real lease. Exemption stays
+	// SESSION-scoped; every ownership decision below uses the lane id.
 	const isSubagent = (hook.transcript_path ?? "").includes("/subagents/");
 	if (!isSubagent && existsSync(EXEMPT)) {
 		const exempt = loadJSON<string[]>(EXEMPT, []);
 		if (exempt.includes(sid)) allow();
 	}
+	const lane = laneId(hook);
 
 	const now = Date.now();
 	const tpSelf = hook.transcript_path ?? "";
-	const alive = (rec: { tp?: string | null }): boolean =>
-		!!rec.tp && existsSync(rec.tp) && now - statSync(rec.tp).mtimeMs < TTL_MS;
-	const expired = (rec: { ts: number; tp?: string | null }): boolean =>
-		now - rec.ts > TTL_MS && !alive(rec); // quiet 15 min AND transcript dead/silent ⇒ gone
 
 	// registry DB — fail open: if it cannot open, no leases/claims enforce
 	let db: Database | null = null;
@@ -79,13 +102,15 @@ export function governorGate(hook: HookInput): never {
 	}
 
 	// ---- lease sweep: dead owners release; alive-but-quiet lanes renew ----
+	// Deletes and renewals are owner-predicated: a row re-leased to someone
+	// else between the SELECT and the mutation is never touched.
 	if (db) {
-		const rows = db.query("SELECT path, ts, tp FROM locks").all() as { path: string; ts: number; tp: string | null }[];
-		const del = db.query("DELETE FROM locks WHERE path = ?");
-		const renew = db.query("UPDATE locks SET ts = ? WHERE path = ?");
+		const rows = db.query("SELECT path, sid, ts, tp FROM locks").all() as { path: string; sid: string; ts: number; tp: string | null }[];
+		const del = db.query("DELETE FROM locks WHERE path = ? AND sid = ?");
+		const renew = db.query("UPDATE locks SET ts = ? WHERE path = ? AND sid = ?");
 		for (const r of rows) {
-			if (expired(r)) del.run(r.path);
-			else if (now - r.ts > TTL_MS) renew.run(now, r.path);
+			if (leaseExpired(r, now)) del.run(r.path, r.sid);
+			else if (now - r.ts > TTL_MS) renew.run(now, r.path, r.sid);
 		}
 	}
 
@@ -101,15 +126,15 @@ export function governorGate(hook: HookInput): never {
 			let hitRow: (typeof rows)[number] | null = null;
 			let hitHot = false;
 			for (const r of rows) {
-				if (r.sid === sid) {
+				if (r.sid === lane) {
 					if (scopeCovers(r.scope, P)) {
 						try {
-							upd.run(now, tpSelf || r.tp, sid);
+							upd.run(now, tpSelf || r.tp, lane);
 						} catch {}
 					}
 					continue;
 				}
-				if (expired(r)) continue;
+				if (leaseExpired(r)) continue;
 				if (!hitScope && scopeCovers(r.scope, P)) {
 					hitScope = r.scope;
 					hitRow = r;
@@ -128,7 +153,7 @@ export function governorGate(hook: HookInput): never {
 				// advisory by default: allow the edit, log the cross-area touch for the
 				// coordinator's conflict monitor (it re-scopes, hot-marks, or orders the merge)
 				try {
-					appendFileSync(DRIFT, JSON.stringify({ at: now, sid: sid.slice(0, 8), path: P, area: hitScope, owner: hitRow.sid.slice(0, 8) }) + "\n");
+					appendFileSync(DRIFT, JSON.stringify({ at: now, lane: lane.slice(0, 12), path: P, area: hitScope, owner: hitRow.sid.slice(0, 12) }) + "\n");
 				} catch {}
 			}
 		} catch {
@@ -141,7 +166,7 @@ export function governorGate(hook: HookInput): never {
 		const row = db.query("SELECT path, sid, tool, ts, tp, hash, seen FROM locks WHERE path = ?").get(P) as {
 			path: string; sid: string; tool: string | null; ts: number; tp: string | null; hash: string | null; seen: string | null;
 		} | null;
-		if (row && row.sid !== sid) {
+		if (row && row.sid !== lane) {
 			deny(
 				`GOVERNOR: ${P} is leased to another agent (session ${row.sid.slice(0, 8)}, ` +
 					`active ${Math.round((now - row.ts) / 60000)} min ago). Do NOT edit it in parallel. ` +
@@ -165,16 +190,16 @@ export function governorGate(hook: HookInput): never {
 				// unreadable — skip the version check rather than block
 			}
 		}
-		if (row && row.sid === sid && row.hash && hash && row.hash !== hash) {
+		if (row && row.sid === lane && row.hash && hash && row.hash !== hash) {
 			let seen: string[] = [];
 			try {
 				seen = row.seen ? (JSON.parse(row.seen) as string[]) : [];
 			} catch {}
 			if (seen.includes(hash)) {
-				db.query("UPDATE locks SET hash = ?, ts = ? WHERE path = ?").run(hash, now, P);
+				db.query("UPDATE locks SET hash = ?, ts = ? WHERE path = ? AND sid = ?").run(hash, now, P, lane);
 				allow();
 			}
-			db.query("DELETE FROM locks WHERE path = ?").run(P);
+			db.query("DELETE FROM locks WHERE path = ? AND sid = ?").run(P, lane);
 			deny(
 				`GOVERNOR: ${P} changed on disk since your last governed edit ` +
 					`(${row.hash.slice(0, 8)} → ${hash.slice(0, 8)}) — written outside the governor. ` +
@@ -183,10 +208,22 @@ export function governorGate(hook: HookInput): never {
 					activeRoster(),
 			);
 		}
-		db.query(
+		// atomic acquire/renew: INSERT wins the path by the UNIQUE constraint; an
+		// existing row is only overwritten when it is OURS (renewal). The old
+		// read-then-upsert raced: two first-writers both saw no lock and both
+		// allowed. Owner-conditional upsert: a lost race yields changes = 0 and
+		// the caller is denied instead of silently stealing the lease.
+		const got = db.query(
 			"INSERT INTO locks (path, sid, tool, ts, tp, hash) VALUES (?, ?, ?, ?, ?, ?) " +
-				"ON CONFLICT(path) DO UPDATE SET sid = excluded.sid, tool = excluded.tool, ts = excluded.ts, tp = excluded.tp, hash = excluded.hash",
-		).run(P, sid, hook.tool_name ?? "?", now, tpSelf || null, hash);
+				"ON CONFLICT(path) DO UPDATE SET tool = excluded.tool, ts = excluded.ts, tp = excluded.tp, hash = excluded.hash " +
+				"WHERE locks.sid = excluded.sid",
+		).run(P, lane, hook.tool_name ?? "?", now, tpSelf || null, hash);
+		if (got.changes === 0) {
+			deny(
+				`GOVERNOR: ${P} was leased to another agent mid-check (lost the acquire race) — ` +
+					`do NOT edit it in parallel; SendMessage to "main" for access if essential.` + activeRoster(),
+			);
+		}
 	}
 	allow();
 }

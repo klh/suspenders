@@ -13,9 +13,9 @@
 //   work list [open|ready|all] / work ready / work mine --as <sid> / work owned
 //   work show <id>
 //   work take <id> --as <sid>            (CAS: READY → CLAIMED; refuses taken/unmet-deps/foreign-project)
-//   work release <id> [--as sid]         (CLAIMED → READY; releases the scope claim)
-//   work start <id>                      (CLAIMED → RUNNING)
-//   work done <id> --sha <sha>           (→ DONE + auto-releases claim + auto-rolls SHATTERED parents up)
+//   work release <id> --as sid           (CLAIMED/RUNNING → READY; owner-verified; releases the scope claim)
+//   work start <id> [--as sid]           (CLAIMED → RUNNING; owner-verified when --as given)
+//   work done <id> [--as sid] --sha <sha> (→ DONE; owner-verified when --as given; rolls SHATTERED parents up)
 //   work fail <id> --note "why"
 //   work split <id> "t1" "t2" ... --reason independent-scopes [--keep N]
 //   work block <id> --on <id2>           / work unblock <id> --on <id2>   (cycle-checked)
@@ -140,16 +140,21 @@ function reaches(id: string, target: string, seen = new Set<string>()): boolean 
 	return false;
 }
 
-// roll-up: a SHATTERED parent auto-DONEs when no REQUIRED child remains open
+// roll-up: a SHATTERED parent auto-DONEs ONLY when every required child is in
+// a successful terminal state — DONE, or SUPERSEDED (replaced; its successor
+// carries the work). Positively defined: FAILED/ORPHANED children block the
+// parent (recover them: reclaim → finish, or supersede), a nested SHATTERED
+// child blocks until its own leaves close (rollUp recurses up from each
+// child transition), and any future unknown state blocks by default.
 function rollUp(id: string): void {
 	const it = get(id);
 	if (it.state !== "SHATTERED") return;
-	const open = db
-		.query("SELECT COUNT(*) AS n FROM work_items WHERE project = ? AND parent_id = ? AND state IN ('READY','CLAIMED','RUNNING','BLOCKED','PAUSED') AND (required IS NULL OR required = 1)")
-		.get(PROJECT, id) as { n: number };
-	if (open.n === 0) {
+	const unsatisfied = db
+		.query("SELECT id, state FROM work_items WHERE project = ? AND parent_id = ? AND (required IS NULL OR required = 1) AND state NOT IN ('DONE','SUPERSEDED')")
+		.all(PROJECT, id) as { id: string; state: string }[];
+	if (unsatisfied.length === 0) {
 		setState(id, "DONE");
-		emit("work.done", id, { auto: "all required children complete" });
+		emit("work.done", id, { auto: "all required children done/superseded" });
 		const p = it.parent_id;
 		if (p) rollUp(p as string);
 	}
@@ -174,10 +179,10 @@ function nextRootId(): string {
 	return `W${tx()}`;
 }
 
-function insertItem(id: string, parentId: string | null, title: string, scope: string | null, priority: number, by: string, why: string | null): void {
+function insertItem(id: string, parentId: string | null, title: string, scope: string | null, priority: number, by: string, why: string | null, requires: string | null = null): void {
 	db.query(
-		"INSERT INTO work_items (id, parent_id, title, state, priority, created_by, scope, why_parallel, project, required, created_at, updated_at) VALUES (?, ?, ?, 'READY', ?, ?, ?, ?, ?, 1, ?, ?)",
-	).run(id, parentId, title, priority, by, scope, why, PROJECT, Date.now(), Date.now());
+		"INSERT INTO work_items (id, parent_id, title, state, priority, created_by, scope, why_parallel, project, required, requires, created_at, updated_at) VALUES (?, ?, ?, 'READY', ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+	).run(id, parentId, title, priority, by, scope, why, PROJECT, requires, Date.now(), Date.now());
 }
 
 // claim coupling: taking work auto-claims its scope; finishing releases it —
@@ -218,6 +223,16 @@ function liveTranscript(sid: string): string | null {
 	return null;
 }
 
+// truncated-sid guard (shared by take/start/done/release): a display slice
+// (e.g. 'visual-c') must not become the owner of record — expand a unique
+// session-sid prefix to the full sid; unknown sids pass through untouched
+function resolveSid(as: string): string {
+	const sm = db.query("SELECT sid FROM sessions WHERE sid LIKE ? || '%'").all(as) as { sid: string }[];
+	if (sm.length === 1) return sm[0].sid;
+	if (sm.length > 1) die(`ambiguous sid prefix: ${as} — use the full sid`);
+	return as;
+}
+
 if (cmd === "add") {
 	const title = pos()[0];
 	if (!title) die('usage: add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid]');
@@ -232,13 +247,7 @@ if (cmd === "add") {
 	}
 	const id = parent ? nextChildId(parent) : nextRootId();
 	if (parent) get(parent);
-	insertItem(id, parent, title, scope, priority, by, arg("--reason"));
-	if (requires)
-		db.query("UPDATE work_items SET requires = ? WHERE project = ? AND id = ?").run(
-			requires.split(",").map((c) => c.trim()).join(","),
-			PROJECT,
-			id,
-		);
+	insertItem(id, parent, title, scope, priority, by, arg("--reason"), requires ? requires.split(",").map((c) => c.trim()).join(",") : null);
 	emit("work.added", id, { scope: scope ?? "" });
 	console.log(`${green("✓")} ${cyan(id)} ${dim("READY")} — ${title}`);
 } else if (cmd === "list" || cmd === "ready") {
@@ -281,9 +290,7 @@ if (cmd === "add") {
 	if (!id || !as) die("usage: take <id> --as <sid>");
 	// truncated-sid guard: a display slice (e.g. 'visual-c') must not become
 	// the owner of record — expand a unique session-sid prefix to the full sid
-	const sm = db.query("SELECT sid FROM sessions WHERE sid LIKE ? || '%'").all(as) as { sid: string }[];
-	if (sm.length === 1) as = sm[0].sid;
-	else if (sm.length > 1) die(`ambiguous sid prefix: ${as} — use the full sid`);
+	as = resolveSid(as);
 	const it = get(id);
 	// capability-aware dispatch (v2): requires ⊆ capabilities or refuse —
 	// kills the W28/W29-class NO-SHELL dead spawn at the CLI boundary
@@ -304,22 +311,40 @@ if (cmd === "add") {
 	console.log(`${green("✓")} ${cyan(id)} claimed by ${dim(as.slice(0, 8))}`);
 } else if (cmd === "release") {
 	const id = pos()[0];
-	if (!id) die("usage: release <id> [--as sid]");
+	const as = arg("--as");
+	if (!id || !as) die("usage: release <id> --as <sid>");
 	const it = get(id);
+	// release is the OWNER's give-up: state and caller are verified — --as is
+	// no longer accepted-then-ignored. Operator override for a foreign/stuck
+	// item stays explicit: `work reclaim`.
+	if (!["CLAIMED", "RUNNING"].includes(it.state as string)) die(`${id} is ${it.state} — only CLAIMED/RUNNING work can be released`);
+	const owner = resolveSid(as);
+	if (it.owner_sid !== owner) die(`${id} is owned by ${String(it.owner_sid ?? "?").slice(0, 8)} — ${owner.slice(0, 8)} cannot release it`);
 	setState(id, "READY", null);
 	releaseClaim((it.owner_sid as string) ?? "", it.scope as string | null, it.id as string);
-	emit("work.released", id, { by: ((it.owner_sid as string) ?? "").slice(0, 8) });
+	emit("work.released", id, { by: owner.slice(0, 8) });
 	console.log(`${cyan("·")} ${dim(`${id} → READY`)}`);
 } else if (cmd === "start") {
 	const id = pos()[0];
-	get(id ?? "");
-	setState(id, "RUNNING");
+	const as = arg("--as");
+	const it = get(id ?? "");
+	// transition guard: only claimed work starts; --as (when given) must be
+	// the owner of record
+	if (!["CLAIMED", "RUNNING"].includes(it.state as string)) die(`${id} is ${it.state} — only CLAIMED/RUNNING work can start`);
+	if (as && it.owner_sid !== resolveSid(String(as))) die(`${id} is owned by ${String(it.owner_sid ?? "?").slice(0, 8)} — ${String(as).slice(0, 8)} cannot start it`);
+	if (it.state !== "RUNNING") setState(id, "RUNNING");
 	console.log(`${green("▶")} ${id}`);
 } else if (cmd === "done") {
 	const id = pos()[0];
 	const sha = arg("--sha");
-	if (!id) die("usage: done <id> --sha <sha>");
+	const as = arg("--as");
+	if (!id) die("usage: done <id> [--as sid] --sha <sha>");
 	const it = get(id);
+	// transition + ownership guard: stray completions corrupt roll-up — only
+	// CLAIMED/RUNNING work completes, and --as (when given) must be the
+	// owner of record
+	if (!["CLAIMED", "RUNNING"].includes(it.state as string)) die(`${id} is ${it.state} — only CLAIMED/RUNNING work can be marked done`);
+	if (as && it.owner_sid !== resolveSid(String(as))) die(`${id} is owned by ${String(it.owner_sid ?? "?").slice(0, 8)} — ${String(as).slice(0, 8)} cannot complete it`);
 	const tx = db.transaction(() => {
 		setState(id, "DONE", null, sha);
 		emit("work.done", id, { sha: sha ?? "" });
@@ -341,8 +366,11 @@ if (cmd === "add") {
 	const id = pos()[0];
 	const byId = arg("--by");
 	if (!id || !byId) die("usage: supersede <id> --by <new-id>");
-	get(id);
+	const it = get(id);
 	setState(id, "SUPERSEDED", null, byId);
+	// superseding the last unsatisfied child closes its SHATTERED parent
+	const p = it.parent_id;
+	if (p) rollUp(p as string);
 	console.log(`${dim("■")} ${id} superseded by ${byId}`);
 } else if (cmd === "block") {
 	const id = pos()[0];
@@ -383,7 +411,9 @@ if (cmd === "add") {
 		let n = 0;
 		for (const t of titles) {
 			const cid = nextChildId(id);
-			insertItem(cid, id, t, it.scope as string | null, Number(it.priority), it.owner_sid as string, reason);
+			// children inherit the parent's capability requirement — a split must
+			// not be able to launder away the dispatch constraint
+			insertItem(cid, id, t, it.scope as string | null, Number(it.priority), it.owner_sid as string, reason, (it.requires as string | null) ?? null);
 			if (++n === keep) setState(cid, "CLAIMED", it.owner_sid as string);
 		}
 	});

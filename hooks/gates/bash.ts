@@ -9,6 +9,9 @@ import { have, run } from "../lib/run.ts";
 import { verifyAndConsume, extractSourceRef } from "../lib/approvals.ts";
 import { basename, dirname, resolve } from "node:path";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { openGovernorDb } from "../lib/govdb.ts";
+import type { Database } from "bun:sqlite";
+import { laneId, leaseExpired } from "./governor.ts";
 
 // governor-bypass section: shell writes must respect governor leases
 const GOV = `${process.env.HOME}/.cache/claude-governor`;
@@ -110,56 +113,76 @@ export function bashGate(hook: HookInput): never {
     }
   }
 
-  // ---- governor bypass: shell writes to leased paths (BEFORE edit-enforce:
-  // nudge() exits the process, so deny checks must run before any nudge) ----
+  // ---- governor leases: shell writes must respect the same per-file leases
+  // the Write/Edit gate enforces (BEFORE edit-enforce: nudge() exits the
+  // process, so deny checks must run before any nudge). Leases live in
+  // governor.db (SQLite) — the legacy locks.json read is gone. Lane identity,
+  // canonical paths, TTL/liveness, and exemptions match gates/governor.ts.
   {
-    const LOCKS_FILE = `${GOV}/locks.json`;
-    const locks = existsSync(LOCKS_FILE)
-      ? (JSON.parse(readFileSync(LOCKS_FILE, "utf8")) as Record<string, { sid: string; tool: string; ts: number; hash?: string }>)
-      : {};
-    const keys = Object.keys(locks);
-    if (keys.length > 0) {
-      const sid = hook.session_id ?? "unknown";
-      const isSubagent = (hook.transcript_path ?? "").includes("/subagents/");
-      const exPath = `${GOV}/exempt.json`;
-      const exempt =
-        !isSubagent && existsSync(exPath) && (JSON.parse(readFileSync(exPath, "utf8")) as string[]).includes(sid);
-      const targets: string[] = [];
-      for (const w of SEGS) {
-        const v = verb(w);
-        // explicit write redirects (>, >>) — input redirects excluded
-        for (let i = 0; i < w.length; i++) {
-          if ((w[i] === "<op:>" || w[i] === "<op:>>") && w[i + 1] && !String(w[i + 1]).startsWith("<op")) {
-            targets.push(String(w[i + 1]));
+    let db: Database | null = null;
+    if (existsSync(`${GOV}/governor.db`)) {
+      try {
+        db = openGovernorDb();
+      } catch {
+        db = null; // fail open: a dead registry never blocks a shell command
+      }
+    }
+    if (db) {
+      const now = Date.now();
+      const rows = db.query("SELECT path, sid, ts, tp FROM locks").all() as {
+        path: string; sid: string; ts: number; tp: string | null;
+      }[];
+      const live = rows.filter((r) => !leaseExpired(r, now));
+      if (live.length > 0) {
+        const lane = laneId(hook);
+        const sid = hook.session_id ?? "unknown";
+        const isSubagent = (hook.transcript_path ?? "").includes("/subagents/");
+        const exPath = `${GOV}/exempt.json`;
+        const exempt =
+          !isSubagent && existsSync(exPath) && (JSON.parse(readFileSync(exPath, "utf8")) as string[]).includes(sid);
+        const targets: string[] = [];
+        let segCwd = CWD;
+        for (const w of SEGS) {
+          const v = verb(w);
+          const vi = w.indexOf(v);
+          const rest = vi >= 0 ? w.slice(vi + 1) : w;
+          // collect against the segment's working directory; `cd X` takes
+          // effect for LATER segments (a redirect on the cd line itself
+          // resolves in the pre-cd cwd, as the shell sets it up before cd runs)
+          for (let i = 0; i < w.length; i++) {
+            if ((w[i] === "<op:>" || w[i] === "<op:>>") && w[i + 1] && !String(w[i + 1]).startsWith("<op")) {
+              targets.push(resolve(segCwd, String(w[i + 1])));
+            }
+          }
+          if (["tee", "touch", "truncate", "sd", "ambr"].includes(v)) {
+            for (const t of rest) if (!t.startsWith("-")) targets.push(resolve(segCwd, t));
+          }
+          if (["cp", "mv", "rsync", "ditto"].includes(v)) {
+            const last = rest[rest.length - 1];
+            if (last && !last.startsWith("-")) targets.push(resolve(segCwd, last));
+          }
+          if (v === "rm") for (const t of rest) if (!t.startsWith("-")) targets.push(resolve(segCwd, t));
+          if (v === "dd") for (const kv of rest) if (kv.startsWith("of=")) targets.push(resolve(segCwd, kv.slice(3)));
+          if (v === "cd") {
+            const target = w[w.length - 1];
+            if (target && !target.startsWith("<op")) segCwd = target.startsWith("/") ? target : resolve(segCwd, target);
           }
         }
-        const vi = w.indexOf(v);
-        const rest = vi >= 0 ? w.slice(vi + 1) : w;
-        if (["tee", "touch", "truncate", "sd", "ambr"].includes(v)) {
-          for (const t of rest) if (!t.startsWith("-")) targets.push(t);
+        for (const t of targets) {
+          if (!t || throwaway(t)) continue; // temp/dev targets are not arbitrated
+          const P = canonPath(t);
+          const hit = live.find((r) => r.path === P);
+          if (hit && hit.sid !== lane && !exempt) {
+            deny(
+              `GOVERNOR: shell write to ${P} blocked — leased to another agent (session ${hit.sid.slice(0, 8)}). ` +
+                `Use Edit/Write (governed), or SendMessage to "main" for arbitration.`,
+            );
+          }
+          // own lease or no lease → allowed; governor.ts renews/claims on Edit/Write
         }
-        if (["cp", "mv", "rsync", "ditto"].includes(v)) {
-          const last = rest[rest.length - 1];
-          if (last && !last.startsWith("-")) targets.push(last);
-        }
-        if (v === "rm") for (const t of rest) if (!t.startsWith("-")) targets.push(t);
-        if (v === "dd") for (const kv of rest) if (kv.startsWith("of=")) targets.push(kv.slice(3));
-      }
-      for (const t of targets) {
-        if (!t || throwaway(t)) continue;
-        const P = canonPath(resolve(CWD, t));
-        const hit = keys.find((k) => k === P);
-        if (hit && locks[hit] && locks[hit].sid !== sid && !exempt) {
-          deny(
-            `GOVERNOR: shell write to ${P} blocked — leased to another agent (session ${locks[hit].sid.slice(0, 8)}). ` +
-              `Use Edit/Write (governed), or SendMessage to "main" for arbitration.`,
-          );
-        }
-        // own lease or no lease → allowed; governor.ts renews/claims on Edit/Write
       }
     }
   }
-
   // ---- edit-enforce ----
   for (const w of SEGS) {
     const v = verb(w);
