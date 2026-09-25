@@ -1,5 +1,7 @@
-// fleet-board.ts — live control-plane dashboard. Read-only: serves a page
-// that polls governor.db every second (WAL allows concurrent readers).
+// fleet-board.ts — live control-plane dashboard. Read-only over governor.db
+// except the human decision endpoints (/api/answer /api/ack /api/advise) and
+// the board-owned decisions table below. Serves a page that polls every
+// second (WAL allows concurrent readers).
 // Start from anywhere:  bun ~/.claude/bin/fleet-board.ts [--port 7799]
 // then open http://127.0.0.1:<port> — dropdown lists every known session;
 // focusing a session shows its project's TODO / IN-FLIGHT / DONE board,
@@ -12,6 +14,28 @@ const CLI = (f: string) => new URL(f, import.meta.url).pathname;
 
 const db = openGovernorDb();
 const PORT = Number(process.argv[process.argv.indexOf("--port") + 1] ?? 7799) || 7799;
+const BIND = process.env.SUSPENDERS_BIND ?? "127.0.0.1";
+
+// decision lifecycle (OPEN/ANSWERED/DISMISSED), owned by the board: NEED%
+// events must not vanish when the recipient acks their inbox — cursors track
+// delivery, this table tracks the human decision. Backfilled idempotently
+// from the bus (dead-letter alias targets included); answers keep the fork's
+// event id as the correlation key.
+db.run(`CREATE TABLE IF NOT EXISTS decisions (
+	event_id INTEGER PRIMARY KEY,
+	target TEXT NOT NULL,
+	state TEXT NOT NULL DEFAULT 'OPEN',
+	answer_note TEXT,
+	answer_to TEXT,
+	answered_at INTEGER,
+	closed_at INTEGER,
+	created_at INTEGER NOT NULL
+)`);
+
+const syncDecisions = (): void =>
+	db
+		.query("INSERT OR IGNORE INTO decisions (event_id, target, created_at) SELECT id, target, ? FROM events WHERE kind LIKE 'NEED%' AND target IS NOT NULL")
+		.run(Date.now());
 
 const esc = (s: unknown): string =>
 	String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] ?? c));
@@ -19,6 +43,55 @@ const esc = (s: unknown): string =>
 function json(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 }
+
+// write endpoints are for the human at this board: same-origin only. Host
+// must be loopback or the bind itself (DNS-rebind protection); a present
+// Origin must match the Host (CSRF protection). Absent Origin = non-browser
+// client (curl, hooks) — Host check still applies.
+function writeGuard(req: Request, url: URL): Response | null {
+	const host = (req.headers.get("host") ?? "").toLowerCase().replace(/\.$/, "");
+	const hname = host.replace(/:\d+$/, "");
+	const okHost =
+		["localhost", "127.0.0.1", "::1", "[::1]", "[0:0:0:0:0:0:0:1]"].includes(hname) ||
+		hname === BIND.toLowerCase() ||
+		hname === `[${BIND.toLowerCase()}]`;
+	if (!host || !okHost) return json({ ok: false, error: "untrusted host" }, 403);
+	const origin = req.headers.get("origin");
+	if (origin) {
+		try {
+			if (new URL(origin).host.toLowerCase() !== host) return json({ ok: false, error: "cross-origin request" }, 403);
+		} catch {
+			return json({ ok: false, error: "bad origin" }, 403);
+		}
+	}
+	return null;
+}
+
+// JSON-body endpoints must declare application/json (a plain form POST from
+// another site can't forge it cross-origin) and must parse.
+async function readJson(req: Request): Promise<{ ok: true; body: any } | { ok: false; resp: Response }> {
+	const ct = (req.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+	if (ct !== "application/json") return { ok: false, resp: json({ ok: false, error: "content-type must be application/json" }, 415) };
+	try {
+		return { ok: true, body: await req.json() };
+	} catch {
+		return { ok: false, resp: json({ ok: false, error: "malformed json body" }, 400) };
+	}
+}
+
+// failure notes ride the work.failed event payload ($.work = item id) — the
+// board shows why a lane died, not just that it died
+const failNote = (id: string): string | null => {
+	try {
+		const r = db
+			.query("SELECT payload FROM events WHERE kind = 'work.failed' AND json_extract(payload, '$.work') = ? ORDER BY id DESC LIMIT 1")
+			.get(id) as { payload: string | null } | null;
+		const note = r?.payload ? (JSON.parse(r.payload) as any).note : null;
+		return note ? String(note).slice(0, 300) : null;
+	} catch {
+		return null;
+	}
+};
 
 function ago(ts: number | null | undefined): number {
 	return ts ? Math.max(0, Math.round((Date.now() - ts) / 1000)) : -1;
@@ -56,12 +129,12 @@ function board(): Record<string, unknown>[] {
 			.query("SELECT id, state, owner_sid, title, priority, result_sha, requires, updated_at FROM work_items WHERE project = ? ORDER BY priority DESC, id")
 			.all(project) as any[];
 		const doneIds = new Set(items.filter((w) => w.state === "DONE").map((w) => w.id));
-		const blocked = new Set(
-			db
-				.query("SELECT work_id FROM work_deps WHERE project = ? AND depends_on NOT IN (SELECT id FROM work_items WHERE project = ? AND state = 'DONE')")
-				.all(project, project)
-				.map((r: any) => r.work_id),
-		);
+		const depRows = db
+			.query("SELECT work_id, depends_on FROM work_deps WHERE project = ? AND depends_on NOT IN (SELECT id FROM work_items WHERE project = ? AND state = 'DONE')")
+			.all(project, project) as any[];
+		const blocked = new Set(depRows.map((r: any) => r.work_id));
+		const openDeps: Record<string, string[]> = {};
+		for (const r of depRows) (openDeps[r.work_id] ??= []).push(r.depends_on);
 		const shape = (w: any) => ({
 			id: w.id,
 			state: w.state,
@@ -70,6 +143,8 @@ function board(): Record<string, unknown>[] {
 			sha: w.result_sha,
 			requires: w.requires,
 			blocked: blocked.has(w.id),
+			deps: openDeps[w.id] ?? null,
+			note: w.state === "FAILED" ? failNote(w.id) : null,
 			updatedAgo: ago(w.updated_at),
 		});
 		return {
@@ -126,41 +201,40 @@ function inbox(sid: string): unknown[] {
 
 function needsMap(): Record<
 	string,
-	{ id: number; tsAgo: number; source: string; note: string; options?: string[]; advice?: any; adviceError?: string }[]
+	{ id: number; tsAgo: number; source: string; scope?: string | null; note: string; options?: string[]; advice?: any; adviceError?: string }[]
 > {
-	const out: Record<string, { id: number; tsAgo: number; source: string; note: string; options?: string[]; advice?: any; adviceError?: string }[]> = {};
-	// every distinct NEED% target surfaces — including alias targets with no
-	// sessions row (dead-letter inboxes are exactly where decisions pile up)
-	const targets = db.query("SELECT DISTINCT target AS sid FROM events WHERE kind LIKE 'NEED%' AND target IS NOT NULL").all() as { sid: string }[];
-	for (const { sid } of targets) {
-		const cur = (db.query("SELECT event_id FROM cursors WHERE sid = ?").get(sid) as { event_id: number } | null)?.event_id ?? 0;
-		for (const e of db
-			.query("SELECT id, ts, source, payload FROM events WHERE target = ? AND id > ? AND kind LIKE 'NEED%' AND id NOT IN (SELECT CAST(substr(key, 11) AS INTEGER) FROM facts WHERE key LIKE 'board.ack.%') ORDER BY id")
-			.all(sid, cur) as any[]) {
-			let note = "";
-			let options: string[] | undefined;
-			try {
-				const p = e.payload ? JSON.parse(e.payload) : {};
-				note = String(p.note ?? p.question ?? e.payload ?? "");
-				if (Array.isArray(p.options) && p.options.length) options = p.options.map(String).slice(0, 8);
-			} catch {
-				note = String(e.payload ?? "");
-			}
-			// advice from hooks/bin/advise.ts (fact advice.<id>; error variant if
-			// the LLM call failed) — the human still decides
-			let advice: any;
-			let adviceError: string | undefined;
-			const a = db.query("SELECT value FROM facts WHERE key = ?").get("advice." + e.id) as { value: string } | null;
-			if (a) {
-				try {
-					advice = JSON.parse(a.value);
-				} catch {}
-			} else {
-				const err = db.query("SELECT value FROM facts WHERE key = ?").get(`advice.${e.id}.error`) as { value: string } | null;
-				if (err) adviceError = err.value.slice(0, 200);
-			}
-			(out[sid] ??= []).push({ id: e.id, tsAgo: ago(e.ts), source: e.source, note, options, advice, adviceError });
+	const out: Record<string, { id: number; tsAgo: number; source: string; scope?: string | null; note: string; options?: string[]; advice?: any; adviceError?: string }[]> = {};
+	// OPEN decisions only, straight off the lifecycle table — no cursor
+	// filters (an inbox ack must not hide an unanswered fork) and no board.ack
+	// facts. syncDecisions backfills dead-letter alias targets too.
+	syncDecisions();
+	const rows = db
+		.query("SELECT d.event_id AS id, d.target AS sid, e.scope AS scope, e.ts, e.source, e.payload FROM decisions d JOIN events e ON e.id = d.event_id WHERE d.state = 'OPEN' ORDER BY e.id")
+		.all() as any[];
+	for (const e of rows) {
+		let note = "";
+		let options: string[] | undefined;
+		try {
+			const p = e.payload ? JSON.parse(e.payload) : {};
+			note = String(p.note ?? p.question ?? e.payload ?? "");
+			if (Array.isArray(p.options) && p.options.length) options = p.options.map(String).slice(0, 8);
+		} catch {
+			note = String(e.payload ?? "");
 		}
+		// advice from hooks/bin/advise.ts (fact advice.<id>; error variant if
+		// the LLM call failed) — the human still decides
+		let advice: any;
+		let adviceError: string | undefined;
+		const a = db.query("SELECT value FROM facts WHERE key = ?").get("advice." + e.id) as { value: string } | null;
+		if (a) {
+			try {
+				advice = JSON.parse(a.value);
+			} catch {}
+		} else {
+			const err = db.query("SELECT value FROM facts WHERE key = ?").get(`advice.${e.id}.error`) as { value: string } | null;
+			if (err) adviceError = err.value.slice(0, 200);
+		}
+		(out[e.sid] ??= []).push({ id: e.id, tsAgo: ago(e.ts), source: e.source, scope: e.scope, note, options, advice, adviceError });
 	}
 	return out;
 }
@@ -174,7 +248,8 @@ function payload(): unknown {
 	}
 	const zombies = (db.query("SELECT key, value FROM facts WHERE key LIKE 'zombie.%'").all() as { key: string; value: string }[]).map((z) => ({
 		item: z.key.slice("zombie.".length),
-		label: z.value,
+		// old monitor versions wrote a leading article — strip it at the boundary
+		label: z.value.replace(/^an? /, ""),
 	}));
 	return {
 		ts: Date.now(),
@@ -204,7 +279,7 @@ function payloadFor(sid: string): unknown {
 
 Bun.serve({
 	port: PORT,
-	hostname: process.env.SUSPENDERS_BIND ?? "127.0.0.1",
+	hostname: BIND,
 	async fetch(req) {
 		const url = new URL(req.url);
 		if (url.pathname === "/api/data") {
@@ -213,11 +288,18 @@ Bun.serve({
 		}
 		if (req.method === "POST" && url.pathname === "/api/answer") {
 			// the board's single write: relay a human answer into the event bus
-			const body = (await req.json().catch(() => null)) as { to?: string; note?: string; forEvent?: number } | null;
-			let to = String(body?.to ?? "");
-			const note = String(body?.note ?? "").trim().slice(0, 2000);
-			const forEvent = Number(body?.forEvent ?? 0);
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			const parsed = await readJson(req);
+			if (!parsed.ok) return parsed.resp;
+			let to = String(parsed.body?.to ?? "");
+			const note = String(parsed.body?.note ?? "").trim().slice(0, 2000);
+			const forEvent = Number(parsed.body?.forEvent ?? 0);
 			if (!to || !note) return json({ ok: false, error: "missing target or note" }, 400);
+			// answers correlate to a fork — reject unknown ids instead of
+			// silently answering nothing
+			if (forEvent && !db.query("SELECT 1 AS x FROM events WHERE id = ? AND kind LIKE 'NEED%'").get(forEvent))
+				return json({ ok: false, error: "unknown event id: " + forEvent }, 404);
 			// accept full sids, unique prefixes, or live bus aliases (an identity
 			// that has emitted before — e.g. a coordinator's chosen --as name)
 			const exact = db.query("SELECT sid FROM sessions WHERE sid = ?").get(to) as { sid: string } | null;
@@ -235,30 +317,45 @@ Bun.serve({
 				stderr: "pipe",
 			});
 			const out = (p.stdout.toString() + " " + p.stderr.toString()).trim();
-			if (p.exitCode === 0 && forEvent)
-				db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, '1', 'fleet-board', 1, ?)").run(
-					"board.ack." + forEvent,
+			if (p.exitCode === 0 && forEvent) {
+				// answered — lifecycle state, correlated to the fork's event id
+				syncDecisions();
+				db.query("UPDATE decisions SET state = 'ANSWERED', answer_note = ?, answer_to = ?, answered_at = ? WHERE event_id = ?").run(
+					note,
+					to,
 					Date.now(),
+					forEvent,
 				);
+			}
 			return json({ ok: p.exitCode === 0, output: out.slice(0, 400), to }, p.exitCode === 0 ? 200 : 500);
 		}
 		if (req.method === "POST" && url.pathname === "/api/ack") {
 			// dismiss a question answered out-of-band
-			const body = (await req.json().catch(() => null)) as { id?: number } | null;
-			const id = Number(body?.id ?? 0);
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			const parsed = await readJson(req);
+			if (!parsed.ok) return parsed.resp;
+			const id = Number(parsed.body?.id ?? 0);
 			if (!id) return json({ ok: false, error: "missing event id" }, 400);
-			db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, '1', 'fleet-board', 1, ?)").run(
-				"board.ack." + id,
-				Date.now(),
-			);
+			const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
+			if (!ev) return json({ ok: false, error: "unknown event id: " + id }, 404);
+			if (!ev.kind.startsWith("NEED")) return json({ ok: false, error: "not a decision event: " + id }, 400);
+			syncDecisions();
+			db.query("UPDATE decisions SET state = 'DISMISSED', closed_at = ? WHERE event_id = ?").run(Date.now(), id);
 			return json({ ok: true });
 		}
 		if (req.method === "POST" && url.pathname === "/api/advise") {
 			// fire hooks/bin/advise.ts detached — it writes fact advice.<id> when
 			// the LLM answers; the 1s poll picks it up. Human decides after.
-			const body = (await req.json().catch(() => null)) as { id?: number } | null;
-			const id = Number(body?.id ?? 0);
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			const parsed = await readJson(req);
+			if (!parsed.ok) return parsed.resp;
+			const id = Number(parsed.body?.id ?? 0);
 			if (!id) return json({ ok: false, error: "missing event id" }, 400);
+			const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
+			if (!ev) return json({ ok: false, error: "unknown event id: " + id }, 404);
+			if (!ev.kind.startsWith("NEED")) return json({ ok: false, error: "not a decision event: " + id }, 400);
 			const child = Bun.spawn(["bun", CLI("advise.ts"), String(id)], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 			child.unref();
 			return json({ ok: true, started: true });
