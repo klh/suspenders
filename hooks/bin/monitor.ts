@@ -17,6 +17,17 @@ const fix = process.argv.includes("--fix");
 const issues: string[] = [];
 const fixed: string[] = [];
 
+// 0. "waiting for you": lanes with an OPEN decision addressed to them —
+// board-owned `decisions` table in this same governor.db, queried read-only
+// (CREATE TABLE is the board's job; a missing table just means the board
+// never ran — nothing to exempt). Waiting is an alert class of its own,
+// distinct from ZOMBIE/SUSPECT/UNKNOWN, and never swept.
+const waiting = new Map<string, number>();
+try {
+	for (const r of db.query("SELECT answer_to AS sid, COUNT(*) AS n FROM decisions WHERE state = 'OPEN' AND answer_to IS NOT NULL GROUP BY answer_to").all() as { sid: string; n: number }[])
+		waiting.set(r.sid, r.n);
+} catch {} // no decisions table yet
+
 // 1. stale RUNNING sessions with dead transcripts (session sids ARE
 // transcript filenames — decidable for TOP-LEVEL sessions only; lanes close
 // at 24h, their real liveness is backlog W9)
@@ -36,7 +47,11 @@ for (const s of db.query("SELECT sid, hb FROM sessions WHERE state = 'RUNNING' A
 		}
 	} catch {}
 	if (!live) {
-		if (fix) {
+		if (waiting.has(s.sid)) {
+			// waiting on a human, not dead — surfaced, never swept
+			const n = waiting.get(s.sid) ?? 0;
+			console.log(`WAITING session ${s.sid.slice(0, 8)} — ${n} open decision${n === 1 ? "" : "s"}, stale hb (not swept)`);
+		} else if (fix) {
 			db.query("UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'").run(s.sid);
 			fixed.push(`swept stale session ${s.sid.slice(0, 8)} → CLOSED`);
 		} else issues.push(`session ${s.sid.slice(0, 8)} RUNNING, hb stale, transcript dead`);
@@ -58,6 +73,18 @@ for (const l of db.query("SELECT path, sid, ts FROM locks WHERE ts < ?").all(now
 		db.query("DELETE FROM locks WHERE path = ? AND ts = ?").run(l.path, l.ts);
 		fixed.push(`swept expired lock ${String(l.path).slice(0, 50)}`);
 	} else issues.push(`expired lock ${String(l.path).slice(0, 50)} (${Math.round((now - l.ts) / 60_000)}m)`);
+}
+
+// 3b. --fix releases the file locks of waiting lanes so parallel work
+// proceeds while the human decides — ownership-checked (path+sid must match
+// a waiting lane), each release logged with path + owner. work_items
+// ownership is never touched: resume goes through the normal claim path.
+if (fix && waiting.size) {
+	for (const l of db.query("SELECT path, sid FROM locks").all() as { path: string; sid: string }[]) {
+		if (!waiting.has(l.sid)) continue;
+		db.query("DELETE FROM locks WHERE path = ? AND sid = ?").run(l.path, l.sid);
+		fixed.push(`released lock ${String(l.path).slice(0, 50)} (owner ${l.sid.slice(0, 8)} waiting for you)`);
+	}
 }
 
 // 4. lane facts must stay inside the preemption state machine
@@ -98,6 +125,20 @@ for (const { project } of zProjects) {
 		.query("SELECT id, owner_sid, title FROM work_items WHERE project = ? AND state IN ('CLAIMED','RUNNING') AND owner_sid IS NOT NULL")
 		.all(project) as { id: string; owner_sid: string; title: string }[];
 	for (const w of claimed) {
+		if (waiting.has(w.owner_sid)) {
+			// waiting for you — own alert class, never ZOMBIE/SUSPECT: the OPEN
+			// decision addressed to this lane is why it's quiet. Fact goes to
+			// waiting.<id> so the board renders it separately from zombie chips;
+			// no reclaim, no alert event (reclaiming a lane that's waiting on
+			// the human would be wrong).
+			const n = waiting.get(w.owner_sid) ?? 0;
+			const label = `${w.owner_sid.slice(0, 10)} WAITING for you (${n} open decision${n === 1 ? "" : "s"})`;
+			const fk = `waiting.${w.id}`;
+			const prev = db.query("SELECT value FROM facts WHERE key = ?").get(fk) as { value: string } | null;
+			if (prev?.value !== label) fixed.push(`WAITING ${w.id} (${label})`);
+			db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, label, now);
+			continue;
+		}
 		const sess = db.query("SELECT state, hb, transcript_path FROM sessions WHERE sid = ?").get(w.owner_sid) as
 			| { state: string; hb: number; transcript_path: null | string }
 			| null;
