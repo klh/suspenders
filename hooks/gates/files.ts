@@ -99,6 +99,7 @@ export function filesCheck(hook: HookInput): FilesExit {
 /** `qlty fmt` in place. Returns a note when the file changed, null otherwise.
  * Repos without qlty setup (exit 99) skip silently — never blocks. */
 function qltyFmt(F: string): string | null {
+  if (!have("qlty")) return null; // no qlty on PATH (CI) — skip like an unsetup repo
   const before = Bun.hash(readFileSync(F));
   const proc = Bun.spawnSync(["qlty", "fmt", "--no-upgrade-check", basename(F)], {
     cwd: dirname(F),
@@ -112,6 +113,8 @@ function qltyFmt(F: string): string | null {
 
 /** `qlty check` — returns the issues text, or null when clean/skipped. */
 function qltyGate(F: string): string | null {
+  if (!have("qlty")) return null; // Bun.spawnSync THROWS on a missing binary — the old
+  // process-level fail-open swallowed this; in-process filesCheck must skip instead
   const stillThere = () => existsSync(F);
   const proc = Bun.spawnSync(["qlty", "check", "--no-upgrade-check", basename(F)], {
     cwd: dirname(F),
