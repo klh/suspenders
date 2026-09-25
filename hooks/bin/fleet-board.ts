@@ -44,26 +44,30 @@ function json(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 }
 
-// write endpoints are for the human at this board: same-origin only. Host
-// must be loopback or the bind itself (DNS-rebind protection); a present
-// Origin must match the Host (CSRF protection). Absent Origin = non-browser
-// client (curl, hooks) — Host check still applies.
+// write endpoints are for the human at this board. Two paths:
+//  • browser (Origin present): same-origin only — Origin host must equal the
+//    Host header (CSRF protection). The nginx front only routes trusted
+//    names (default_server 444), so a non-loopback Host here is the proxy.
+//  • non-browser (no Origin — curl, hooks): Host must be loopback or the
+//    configured bind (DNS-rebind protection).
 function writeGuard(req: Request, url: URL): Response | null {
 	const host = (req.headers.get("host") ?? "").toLowerCase().replace(/\.$/, "");
+	if (req.headers.get("origin")) {
+		let ohost = "";
+		try {
+			ohost = new URL(req.headers.get("origin") as string).host.toLowerCase().replace(/\.$/, "");
+		} catch {
+			return json({ ok: false, error: "bad origin" }, 403);
+		}
+		if (!host || ohost !== host) return json({ ok: false, error: "cross-origin request" }, 403);
+		return null;
+	}
 	const hname = host.replace(/:\d+$/, "");
 	const okHost =
 		["localhost", "127.0.0.1", "::1", "[::1]", "[0:0:0:0:0:0:0:1]"].includes(hname) ||
 		hname === BIND.toLowerCase() ||
 		hname === `[${BIND.toLowerCase()}]`;
 	if (!host || !okHost) return json({ ok: false, error: "untrusted host" }, 403);
-	const origin = req.headers.get("origin");
-	if (origin) {
-		try {
-			if (new URL(origin).host.toLowerCase() !== host) return json({ ok: false, error: "cross-origin request" }, 403);
-		} catch {
-			return json({ ok: false, error: "bad origin" }, 403);
-		}
-	}
 	return null;
 }
 
