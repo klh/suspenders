@@ -186,6 +186,8 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
 </section>
 <section id="tab-tasks" hidden>
   <div class="taskbar">
+    <label class="plabel" for="taskProj">project</label>
+    <select id="taskProj"><option value="all">all projects</option></select>
     <label class="plabel" for="taskOwner">session</label>
     <select id="taskOwner"><option value="all">all sessions</option></select>
     <span id="taskCount" class="dim"></span>
@@ -195,13 +197,14 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
   <table id="tasksTbl">
     <thead><tr>
       <th scope="col" data-k="id"><button type="button" class="thsort" data-label="id">id</button></th>
+      <th scope="col" data-k="proj"><button type="button" class="thsort" data-label="proj">proj</button></th>
       <th scope="col" data-k="title"><button type="button" class="thsort" data-label="task">task</button></th>
       <th scope="col" data-k="state"><button type="button" class="thsort" data-label="state">state</button></th>
       <th scope="col" data-k="owner"><button type="button" class="thsort" data-label="owner">owner</button></th>
       <th scope="col" data-k="age"><button type="button" class="thsort" data-label="age">age</button></th>
       <th scope="col" data-k="decisions"><button type="button" class="thsort" data-label="decisions">decisions</button></th>
     </tr></thead>
-    <tbody id="tasksBody"><tr><td colspan="6" class="dim">loading tasks...</td></tr></tbody>
+    <tbody id="tasksBody"><tr><td colspan="7" class="dim">loading tasks...</td></tr></tbody>
   </table>
 </section>
 <section id="tab-activity" hidden>
@@ -914,15 +917,19 @@ function renderHist(){
 // asked: filter tasks by owning session, sortable table, fragments grouped)
 var taskSort = {key: 'id', dir: 1};
 var taskOwner = 'all';
+var taskProj = 'all';
 try {
   var savedSort = JSON.parse(localStorage.getItem('sb.taskSort') || 'null');
   if (savedSort && savedSort.key) taskSort = savedSort;
   var savedOwner = localStorage.getItem('sb.taskOwner');
   if (savedOwner) taskOwner = String(savedOwner);
+  var savedProj = localStorage.getItem('sb.taskProj');
+  if (savedProj) taskProj = String(savedProj);
 } catch (e) {}
 function saveTaskView(){
-  try { localStorage.setItem('sb.taskSort', JSON.stringify(taskSort)); localStorage.setItem('sb.taskOwner', taskOwner); } catch (e) {}
+  try { localStorage.setItem('sb.taskSort', JSON.stringify(taskSort)); localStorage.setItem('sb.taskOwner', taskOwner); localStorage.setItem('sb.taskProj', taskProj); } catch (e) {}
 }
+function projShort(p){ return String(p || '').split('/').pop().replace(/\.git$/, '') || '—'; }
 function ownerKey(t){ return t.owner_sid ? String(t.owner_sid) : 'unclaimed'; }
 var ownerDisp = {}; // sid → display label, rebuilt per poll; shared intent labels get the sid appended
 function ownerName(t){
@@ -950,6 +957,7 @@ function taskSortVal(t, k){
   if (k === 'age') return Number(t.age_s || 0);
   if (k === 'decisions') return Number(t.open_decisions || 0);
   if (k === 'owner') return ownerName(t).toLowerCase();
+  if (k === 'proj') return projShort(t.project).toLowerCase();
   var s2 = String(k === 'title' ? t.title : k === 'state' ? t.state : t.id || '');
   return s2.toLowerCase();
 }
@@ -970,6 +978,24 @@ function taskGroups(ts){ // dotted fragments (W138.1) nest under their parent ro
     else roots.push(t);
   }
   return {roots: roots, kids: kids};
+}
+function renderTaskProjOptions(ts){
+  var sel = byId('taskProj');
+  var seen = {}, names = [];
+  for (var i = 0; i < ts.length; i++){
+    var p = projShort(ts[i].project);
+    if (!seen[p]) { seen[p] = 1; names.push(p); }
+  }
+  names.sort();
+  var html = '<option value="all">all projects</option>';
+  for (var j = 0; j < names.length; j++) html += '<option value="' + esc(names[j]) + '">' + esc(names[j]) + '</option>';
+  if (sel.dataset.sig === html) return;
+  sel.innerHTML = html;
+  sel.dataset.sig = html;
+  var has = false;
+  for (var o = 0; o < sel.options.length; o++) if (sel.options[o].value === taskProj) has = true;
+  if (!has) { taskProj = 'all'; saveTaskView(); }
+  sel.value = taskProj;
 }
 function renderTaskOwnerOptions(ts){
   var sel = byId('taskOwner');
@@ -1018,6 +1044,7 @@ function taskRow(t, parentId){
   var od = t.open_decisions || 0;
   var kid = parentId ? '<span class="kidmark">↳</span>' : '';
   return '<tr data-tid="' + esc(t.id) + '"><td>' + kid + '<button type="button" class="tidbtn mono" data-task="' + esc(t.id) + '" data-proj="' + esc(t.project || '') + '" aria-haspopup="dialog">' + esc(t.id) + '</button></td>' +
+    '<td class="mono dim">' + esc(projShort(t.project)) + '</td>' +
     '<td class="ttitle">' + esc(String(t.title || '(untitled)')).slice(0, 120) + '</td>' +
     '<td>' + taskPill(t.state) + '</td>' +
     '<td>' + esc(owner) + '</td>' +
@@ -1041,8 +1068,10 @@ function renderTasks(){
   if (!tasksData) return; // nothing good yet — keep loading/error row
   var ts = tasksData.tasks;
   buildOwnerDisp(ts);
+  renderTaskProjOptions(ts);
   renderTaskOwnerOptions(ts);
-  var own = taskOwner === 'all' ? ts : ts.filter(function(t){ return ownerKey(t) === taskOwner; });
+  var byProj = taskProj === 'all' ? ts : ts.filter(function(t){ return projShort(t.project) === taskProj; });
+  var own = taskOwner === 'all' ? byProj : byProj.filter(function(t){ return ownerKey(t) === taskOwner; });
   var g = taskGroups(own); // fragments nest under their parent row
   sortTasks(g.roots);
   var html = '';
@@ -1052,7 +1081,7 @@ function renderTasks(){
     var kids = g.kids[r.id];
     if (kids) { sortTasks(kids); for (var c = 0; c < kids.length; c++) html += taskRow(kids[c], r.id); }
   }
-  if (!html) html = '<tr><td colspan="6" class="dim">' + (ts.length ? '(no tasks for this session)' : '(no tasks)') + '</td></tr>';
+  if (!html) html = '<tr><td colspan="7" class="dim">' + (ts.length ? '(no tasks match the filters)' : '(no tasks)') + '</td></tr>';
   var cnt = byId('taskCount');
   if (cnt) cnt.textContent = own.length === ts.length ? own.length + ' tasks' : own.length + ' of ' + ts.length + ' tasks';
   sigSetKeep(body, html, html, 'data-task'); // rebuild only on real change; refocus the row button if the table swapped under it
@@ -1275,6 +1304,11 @@ if (theadEl) theadEl.addEventListener('click', function(e){
 var ownSel = byId('taskOwner');
 if (ownSel) ownSel.addEventListener('change', function(e){
   taskOwner = e.target.value || 'all';
+  saveTaskView(); renderTasks();
+});
+var projSel = byId('taskProj');
+if (projSel) projSel.addEventListener('change', function(e){
+  taskProj = e.target.value || 'all';
   saveTaskView(); renderTasks();
 });
 paintSort();
