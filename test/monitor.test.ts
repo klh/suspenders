@@ -123,7 +123,7 @@ describe("waiting for you", () => {
 		const db0 = new Database(DB);
 		db0.query("INSERT INTO work_items (project, id, title, state, owner_sid, created_at, updated_at) VALUES (?, 'W-DEC', 'W-DEC seam ruling (DECISION, no code)', 'READY', NULL, ?, ?)").run(REPO, OLD, OLD);
 		db0.query("INSERT INTO facts (key, value, ts) VALUES ('coordinator.sid', 'coord-sess-cccccc', ?)").run(Date.now());
-		db0.query("INSERT OR REPLACE INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, transcript_path) VALUES ('coord-sess-cccccc', ?, 'coordinator', NULL, NULL, ?, ?, 'RUNNING', NULL, NULL)").run(REPO, OLD, OLD);
+		db0.query("INSERT OR REPLACE INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, transcript_path) VALUES ('coord-sess-cccccc', ?, 'coordinator', NULL, NULL, ?, ?, 'RUNNING', NULL, NULL)").run(REPO, OLD + 30 * 60_000, OLD + 30 * 60_000); // 1.5h stale — inside the quiet coordinator branch, off the W42 dark boundary
 		db0.close();
 		const r = run(); // read-only: alert only, no emission
 		expect(r.err).toContain("W-DEC is decision-gated");
@@ -147,6 +147,29 @@ describe("waiting for you", () => {
 		const d = new Database(DB, { readonly: true });
 		expect(one(d, "SELECT state FROM sessions WHERE sid = ?", WAIT_SID)).toEqual({ state: "CLOSED" });
 		expect(one(d, "SELECT value FROM facts WHERE key = 'zombie.W1'").value).toContain("ZOMBIE");
+		d.close();
+	});
+});
+
+// W42 — sleeping-vs-dead coordinator observability: a coordinator-role row
+// hb-stale past the quiet window must surface to a HUMAN (the 2026-09-26
+// gaps incident: ~12.5h dark, bus pings unread, nobody could tell). Alert
+// only — the sweep still never closes a coordinator.
+describe("coordinator dark", () => {
+	test(">2h dark escalates to an issue; --fix still never closes it", () => {
+		const db = new Database(DB);
+		db.query("INSERT OR REPLACE INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, transcript_path) VALUES ('dark-coord-dddddddd', ?, 'coordinator', NULL, NULL, ?, ?, 'RUNNING', NULL, NULL)").run(REPO, Date.now() - 3 * 3_600_000, Date.now() - 3 * 3_600_000);
+		db.close();
+		const r = run(); // read-only pass
+		expect(r.code).toBe(1);
+		expect(r.err).toContain("COORDINATOR-DARK dark-coo");
+		expect(r.err).toContain("hb-stale 3.");
+		expect(r.out).toContain("COORDINATOR coord-se hb stale"); // 1.5h fixture — quiet branch
+		const rf = run(["--fix"]);
+		expect(rf.code).toBe(1); // the alert persists — it is an issue, not a fixable state
+		expect(rf.err).toContain("COORDINATOR-DARK");
+		const d = new Database(DB, { readonly: true });
+		expect(one(d, "SELECT state FROM sessions WHERE sid = 'dark-coord-dddddddd'")).toEqual({ state: "RUNNING" }); // never swept
 		d.close();
 	});
 });

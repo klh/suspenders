@@ -57,8 +57,16 @@ for (const s of db.query("SELECT sid, role, hb FROM sessions WHERE state = 'RUNN
 			console.log(`WAITING session ${s.sid.slice(0, 8)} — ${n} open decision${n === 1 ? "" : "s"}, stale hb (not swept)`);
 		} else if (s.role === "coordinator" || s.sid === coordinatorSid) {
 			// the coordinator sleeps between waves — a stale hb is not death;
-			// state stays RUNNING so broadcasts and bus targeting keep working
-			console.log(`COORDINATOR ${s.sid.slice(0, 8)} hb stale — left RUNNING`);
+			// state stays RUNNING so broadcasts and bus targeting keep working.
+			// W42: but dark-for-hours must surface to a human — the 2026-09-26
+			// gaps incident ran 12.5h with unread bus pings before anyone
+			// noticed. Alert only; the sweep still never closes a coordinator.
+			const ageH = ((now - s.hb) / 3_600_000).toFixed(1);
+			if (now - s.hb > 2 * 3_600_000) {
+				issues.push(`COORDINATOR-DARK ${s.sid.slice(0, 8)} hb-stale ${ageH}h — sleeping between waves or dead? ping it directly or have the owner EXIT it`);
+			} else {
+				console.log(`COORDINATOR ${s.sid.slice(0, 8)} hb stale ${ageH}h — left RUNNING (sleeping between waves)`);
+			}
 		} else if (fix) {
 			db.query("UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'").run(s.sid);
 			fixed.push(`swept stale session ${s.sid.slice(0, 8)} → CLOSED`);
