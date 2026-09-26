@@ -94,6 +94,28 @@ function kbLookup(question: string): { id: number; problem: string; solution: st
 		return null;
 	}
 }
+
+// lessonLookup — doctrine answers: lesson.* facts are the plane's curriculum
+// (session-start pushes them; coord fact set lesson.<topic> writes them). A
+// consult whose question overlaps a lesson is answered BY THE PLANE — no
+// expert round-trip. Score = question tokens found in key+value; wins at ≥2.
+// Deterministic on purpose — no LLM in the routing path.
+function lessonLookup(question: string): { key: string; value: string; score: number } | null {
+	const terms = [...new Set(question.toLowerCase().split(/[^a-z0-9_.-]+/).filter((t) => t.length > 2))];
+	if (!terms.length) return null;
+	const rows = db.query("SELECT key, value FROM facts WHERE key LIKE 'lesson.%' AND key NOT LIKE 'lesson.seen.%'").all() as {
+		key: string;
+		value: string;
+	}[];
+	let best: { key: string; value: string; score: number } | null = null;
+	for (const r of rows) {
+		const hay = `${r.key} ${r.value}`.toLowerCase().split(/[^a-z0-9_.-]+/);
+		const keyTokens = r.key.slice("lesson.".length).toLowerCase().split(/[^a-z0-9_.-]+/);
+		const score = terms.filter((t) => hay.includes(t)).length + (terms.some((t) => keyTokens.includes(t)) ? 1 : 0);
+		if (score >= 2 && (!best || score > best.score)) best = { key: r.key, value: r.value, score };
+	}
+	return best;
+}
 const dim = paint("2");
 const cyan = paint("36");
 const green = paint("32");
@@ -552,6 +574,14 @@ if (cmd === "emit") {
 	const failed = (db.query(failedQ).get(cut, project) as { n: number }).n;
 	const rework = timing.filter((t) => t.claims > 1).length;
 	console.log(`  friction: ${conflicts} conflict event${conflicts === 1 ? "" : "s"}, ${rework} re-claimed item${rework === 1 ? "" : "s"}, ${failed} failed`);
+	// self-serve: consults the plane resolved without spending a human's context
+	const selfServe = db.query("SELECT state, COUNT(*) AS n FROM consults WHERE project = ? AND answered_at >= ? AND state IN ('KB','LESSON') GROUP BY state").all(project, cut) as {
+		state: string;
+		n: number;
+	}[];
+	const kbN = selfServe.find((s) => s.state === "KB")?.n ?? 0;
+	const lessonN = selfServe.find((s) => s.state === "LESSON")?.n ?? 0;
+	console.log(`  self-serve: ${kbN} kb + ${lessonN} lesson answer${lessonN === 1 ? "" : "s"} (no expert round-trip)`);
 	// snapshot fact for trend diffing across waves
 	const snap = {
 		ts: now,
@@ -657,11 +687,29 @@ if (cmd === "emit") {
 	}
 	if (!as) die("consult requires --as <asker-sid>");
 	if (!expert || !question) die('usage: consult [--best] "<question>" | consult <sid> <question> [--scope s] --as <asker>');
-	if (!db.query("SELECT 1 FROM sessions WHERE sid = ? AND project = ? AND state = 'RUNNING'").get(expert, projectIdentity())) die(`${expert.slice(0, 8)} is not a live session in this project`);
+	// the plane answers before people do: a lesson hit skips the expert
+	// liveness check too — the plane routes nothing, so nothing must be live
+	const lessonHit = rest.includes("--no-kb") ? null : lessonLookup(question);
+	if (!lessonHit && !db.query("SELECT 1 FROM sessions WHERE sid = ? AND project = ? AND state = 'RUNNING'").get(expert, projectIdentity())) die(`${expert.slice(0, 8)} is not a live session in this project`);
 	// knowledge first: an answered consult already in the store answers this
 	// without spending an expert round-trip (--no-kb forces live routing)
 	const kbHit = rest.includes("--no-kb") ? null : kbLookup(question);
-	if (kbHit) {
+	if (lessonHit) {
+		const r = db
+			.query("INSERT INTO consults (project, asker_sid, expert_sid, question, scope, state, answer, created_at, answered_at) VALUES (?, ?, ?, ?, ?, 'LESSON', ?, ?, ?)")
+			.run(projectIdentity(), as, "plane", question, scope, lessonHit.value, Date.now(), Date.now());
+		const cid = `C${r.lastInsertRowid}`;
+		db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'consult.answer', ?, ?, ?)").run(
+			Date.now(),
+			as,
+			scope,
+			JSON.stringify({ consult: cid, state: "LESSON", answer: lessonHit.value, lesson: lessonHit.key }),
+			as,
+		);
+		console.log(
+			`${green("✓")} ${cyan(cid)} answered from the plane ${dim(`(${lessonHit.key}) — full note: coord fact get ${lessonHit.key}; --no-kb routes to a human`)}`,
+		);
+	} else if (kbHit) {
 		const r = db
 			.query("INSERT INTO consults (project, asker_sid, expert_sid, question, scope, state, answer, created_at, answered_at) VALUES (?, ?, ?, ?, ?, 'KB', ?, ?, ?)")
 			.run(projectIdentity(), as, kbHit.answered_by, question, scope, kbHit.solution, Date.now(), Date.now());

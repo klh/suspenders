@@ -122,3 +122,40 @@ describe("consult knowledge layer", () => {
 		expect(miss.code).toBe(1);
 	});
 });
+
+// teeth — the plane answers doctrine questions before people do: a consult
+// whose question overlaps a lesson.* fact resolves on the spot (state LESSON,
+// expert_sid "plane"), the expert's inbox is never touched, and --no-kb
+// bypasses lessons and the KB alike.
+describe("lesson teeth", () => {
+	const LQ = "how do we handle sync parity between the repos";
+	test("a consult matching a lesson is answered by the plane, expert untouched", () => {
+		const set = run(["fact", "set", "lesson.testsync", "always check sync parity before suspenders claude file syncs"]);
+		expect(set.code).toBe(0);
+		const c = run(["consult", EXPERT, LQ, "--as", ASKER]);
+		expect(c.out).toContain("answered from the plane");
+		expect(c.out).toContain("lesson.testsync");
+		const id = Number(c.out.match(/C(\d+)/)?.[1]);
+		const row = consultRow(id);
+		expect(row?.state).toBe("LESSON");
+		expect(row?.expert_sid).toBe("plane");
+		const db = new Database(DB, { readonly: true });
+		const routed = (db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'consult' AND json_extract(payload, '$.consult') = ?").get(`C${id}`) as { n: number }).n;
+		db.close();
+		expect(routed).toBe(0);
+	});
+
+	test("--no-kb bypasses lessons and routes to the expert", () => {
+		const c = run(["consult", EXPERT, LQ, "--no-kb", "--as", ASKER]);
+		expect(c.out).toContain("CONSULT");
+		const id = Number(c.out.match(/C(\d+)/)?.[1]);
+		expect(consultRow(id)?.state).toBe("OPEN");
+	});
+
+	test("unrelated questions route normally", () => {
+		const c = run(["consult", EXPERT, "favorite coffee preference of astronauts", "--as", ASKER]);
+		expect(c.out).toContain("CONSULT");
+		const id = Number(c.out.match(/C(\d+)/)?.[1]);
+		expect(consultRow(id)?.state).toBe("OPEN");
+	});
+});
