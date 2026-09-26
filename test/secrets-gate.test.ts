@@ -35,7 +35,14 @@ const denied = (r: { out: string }) => expect(r.out).toContain('"permissionDecis
 // the history scan on every future push (entropy: all-repeated chars are
 // skipped by gitleaks, hence the realistic filler)
 const FAKE = ["ghp_", "xK9m", "Q2vL", "8pR4", "tW7z", "B3nC", "6yF0", "jH5s", "D1aG", "9eU2"].join("");
-const hasGitleaks = Bun.spawnSync(["gitleaks", "version"], { stdout: "pipe", stderr: "pipe" }).exitCode === 0;
+// Bun.spawnSync THROWS on a missing executable (ENOENT) — CI images have no
+// gitleaks, so the probe itself must not be the thing that fails the run
+let hasGitleaks = false;
+try {
+	hasGitleaks = Bun.spawnSync(["gitleaks", "version"], { stdout: "pipe", stderr: "pipe" }).exitCode === 0;
+} catch {
+	hasGitleaks = false; // not installed — the gate skips via have(), we skip the file
+}
 
 afterAll(() => {
 	rmSync(HOME, { recursive: true, force: true });
