@@ -53,6 +53,9 @@ const RULES =
 	"work gets work split. Stuck or need a colleague's context: " +
 	"coord consult/who-knows (questions, never ownership). Who-is-working: " +
 	"query the plane (sessions + claims, coord fleet) — never /tmp files. " +
+	"Fleet lessons live in facts — coord fact list (lesson.*) before " +
+	"re-deriving painful knowledge; set lesson.<topic> when you learn " +
+	"something another lane will need. " +
 	"Between items: " +
 	"poll coord inbox --as <sid>; if READY work matches your capabilities, " +
 	"take it yourself — don't wait for dispatch; checkpoint each landed " +
@@ -135,6 +138,28 @@ if (mine.length || inbox > 0 || readyN > 0 || head) {
 				);
 			}
 		} catch {}
+	}
+}
+
+// fleet lessons: facts under the lesson.* namespace are the curriculum —
+// pushed at bootstrap (once per session, watermark like broadcasts) because
+// pull-only knowledge never gets pulled. Values are truncated; the full note
+// is one coord fact get away.
+{
+	const wm = db.query("SELECT value FROM facts WHERE key = ?").get(`lesson.seen.${sid}`) as { value: string } | null;
+	const rows = db
+		.query("SELECT key, value, ts FROM facts WHERE key LIKE 'lesson.%' AND key NOT LIKE 'lesson.seen.%' AND ts > ? ORDER BY ts LIMIT 5")
+		.all(Number(wm?.value ?? 0)) as { key: string; value: string; ts: number }[];
+	if (rows.length) {
+		for (const r of rows) {
+			const v = r.value.length > 200 ? `${r.value.slice(0, 200)}… (coord fact get ${r.key})` : r.value;
+			out.push(`LESSON ${r.key.slice("lesson.".length)}: ${v}`);
+		}
+		db.query("INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts").run(
+			`lesson.seen.${sid}`,
+			String(Math.max(...rows.map((r) => r.ts))),
+			now,
+		);
 	}
 }
 
