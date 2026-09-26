@@ -5,7 +5,7 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-kb-"));
@@ -21,7 +21,9 @@ function projectOf(dir: string): string {
 	const r = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--git-common-dir"], { stdout: "pipe", stderr: "pipe" });
 	if (r.exitCode === 0) {
 		const d = new TextDecoder().decode(r.stdout).trim();
-		if (d) return realpathSync(join(dir, d));
+		// resolve, not join: git prints an ABSOLUTE gitdir when the repo root is
+		// above cwd (linked-worktree runs) — join would concatenate it into garbage
+		if (d) return realpathSync(resolve(dir, d));
 	}
 	return realpathSync(dir);
 }
