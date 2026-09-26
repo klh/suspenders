@@ -103,11 +103,18 @@ export function governorGate(hook: HookInput): void {
 	}
 
 	// ---- lease sweep: stale leases release, regardless of holder liveness ----
-	// Owner-predicated: a row re-leased to someone else between the SELECT and
-	// the DELETE is never touched. No renewal here: ts advances only through
-	// real touches of that file (the acquire/upsert below), so the denial
-	// message's age reports the holder's last real touch.
+	// W9 lane heartbeat: hb advances with real tool activity, so a lane
+	// mid-turn never reads as dead (hb advanced only at SessionStart before,
+	// making every lane look instantly stale). Zero rows is a legal no-op —
+	// the row exists only after SessionStart registers it (lesson
+	// silent-noop-mutations: noted, not hidden).
 	if (db) {
+		db.query("UPDATE sessions SET hb = ? WHERE sid = ?").run(now, lane);
+
+		// Owner-predicated: a row re-leased to someone else between the SELECT and
+		// the DELETE is never touched. No renewal here: ts advances only through
+		// real touches of that file (the acquire/upsert below), so the denial
+		// message's age reports the holder's last real touch.
 		const rows = db.query("SELECT path, sid, ts FROM locks").all() as { path: string; sid: string; ts: number }[];
 		const del = db.query("DELETE FROM locks WHERE path = ? AND sid = ?");
 		for (const r of rows) {

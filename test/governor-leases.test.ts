@@ -160,3 +160,25 @@ describe("lease enforcement (findings 1-3)", () => {
 		allowed(gate("governor", writeHook("relC", join(HOME, "relC.jsonl"), "rel-b.txt")));
 	});
 });
+
+// W9 — lane heartbeat: tool activity must advance the session row's hb so a
+// lane mid-turn never reads as dead (hb used to advance only at SessionStart,
+// making every lane instantly stale). The gate is the one component that sees
+// every Write/Edit/Bash, and it already opens governor.db — one UPDATE. A
+// row that SessionStart has not registered yet is a legal silent no-op.
+describe("W9 lane heartbeat", () => {
+	test("tool activity advances hb on the acting row only", () => {
+		const db0 = new Database(DB);
+		const T = Date.now() - 3_600_000; // 1h stale — would read dead without the heartbeat
+		db0.query("INSERT OR REPLACE INTO sessions (sid, project, started_at, hb, state, parent_sid, role) VALUES ('hb9', ?, ?, ?, 'RUNNING', NULL, 'worker')").run(REPO, T, T);
+		db0.query("INSERT OR REPLACE INTO sessions (sid, project, started_at, hb, state, parent_sid, role) VALUES ('hb9#agent-1', ?, ?, ?, 'RUNNING', 'hb9', 'worker')").run(REPO, T, T);
+		db0.close();
+		allowed(gate("governor", writeHook("hb9", subTp("agent-1"), "hb.txt"))); // lane touch — must still ALLOW
+		const d = new Database(DB, { readonly: true });
+		const laneHb = (d.query("SELECT hb FROM sessions WHERE sid = 'hb9#agent-1'").get() as { hb: number }).hb;
+		const topHb = (d.query("SELECT hb FROM sessions WHERE sid = 'hb9'").get() as { hb: number }).hb;
+		d.close();
+		expect(laneHb).toBeGreaterThan(T); // the lane's own row heartbeat
+		expect(topHb).toBe(T); // the top-level row is NOT touched by a lane-scoped call
+	});
+});
