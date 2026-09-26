@@ -204,8 +204,57 @@ export function openGovernorDb(): Database {
 	db.run(
 		"CREATE TABLE IF NOT EXISTS facts (key TEXT PRIMARY KEY, value TEXT, source TEXT, version INTEGER NOT NULL DEFAULT 1, ts INTEGER NOT NULL)",
 	);
+	// v5 — row-image delta log (W33): sessions, claims, locks, facts, and
+	// work_items all mutate IN PLACE with no event trail, so "what actually
+	// changed between two points" (coord diff --since) was unreconstructable.
+	// AFTER triggers append row images to `deltas`; before is NULL on insert,
+	// after NULL on delete. events/cursors stay untracked — the bus already is
+	// its own trail. CREATEs run every open (IF NOT EXISTS, so a dropped table
+	// or trigger self-heals) and DDL never fires row triggers.
+	db.run(
+		"CREATE TABLE IF NOT EXISTS deltas (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, tbl TEXT NOT NULL, op TEXT NOT NULL, pk TEXT NOT NULL, before TEXT, after TEXT)",
+	);
+	db.run("CREATE INDEX IF NOT EXISTS deltas_ts ON deltas(ts, seq)"); // --since <event-id> resolves ts → seq
+	if (uv < 5) db.run("PRAGMA user_version = 5");
+	// one column table drives all 15 triggers so the images can never drift
+	// from the schemas they mirror. Locks are the highest-churn rows in the
+	// fleet (a renew per file edit), so lock rows are op-only (before/after
+	// NULL): a renew carries no information beyond the path, and flooding the
+	// log with lock images would drown the tables that matter. The json cost
+	// measured in the noise either way (~5-7 µs/op, op-only vs full-image);
+	// the other four tables carry full row images.
+	const deltaImg = (cols: string[], r: "OLD" | "NEW"): string =>
+		cols.length ? `json_object(${cols.map((c) => `'${c}', ${r}.${c}`).join(", ")})` : "NULL";
+	// ms clock: deltas must interleave with events.ts (--since <event-id> picks
+	// the nearest later seq by ts), so second-granular strftime('%s') would
+	// order same-second rows wrongly. unixepoch('subsec') is SQLite ≥3.42.
+	let deltaNow = "strftime('%s','now') * 1000";
+	try {
+		db.query("SELECT unixepoch('subsec') AS ms").get();
+		deltaNow = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
+	} catch {}
+	const deltaTables: { tbl: string; pk: string; cols: string[] }[] = [
+		{ tbl: "sessions", pk: "$.sid", cols: ["sid", "project", "role", "parent_sid", "worktree", "started_at", "hb", "state", "capabilities", "transcript_path"] },
+		{ tbl: "claims", pk: "$.sid || '/' || $.scope", cols: ["sid", "scope", "intent", "hot", "ts", "tp"] },
+		{ tbl: "locks", pk: "$.path", cols: [] },
+		{ tbl: "facts", pk: "$.key", cols: ["key", "value", "source", "version", "ts"] },
+		{ tbl: "work_items", pk: "$.project || '/' || $.id", cols: ["project", "id", "parent_id", "title", "description", "state", "priority", "owner_sid", "created_by", "scope", "why_parallel", "result_sha", "required", "created_at", "updated_at", "requires"] },
+	];
+	for (const { tbl, pk, cols } of deltaTables)
+		for (const op of ["insert", "update", "delete"] as const) {
+			const R = op === "delete" ? "OLD" : "NEW";
+			db.run(
+				`CREATE TRIGGER IF NOT EXISTS deltas_${tbl}_${op} AFTER ${op.toUpperCase()} ON ${tbl} BEGIN INSERT INTO deltas (ts, tbl, op, pk, before, after) VALUES (${deltaNow}, '${tbl}', '${op}', ${pk.replaceAll("$.", `${R}.`)}, ${op === "insert" ? "NULL" : deltaImg(cols, "OLD")}, ${op === "delete" ? "NULL" : deltaImg(cols, "NEW")}); END`,
+			);
+		}
 	migrateJSON(db);
 	return db;
+}
+
+// W33 retention: the delta log is a ring, not an archive — coord gc trims it
+// on the same window as events. Returns rows removed.
+export function pruneDeltas(db: Database, olderThanMs: number): number {
+	return db.query("DELETE FROM deltas WHERE ts < ?").run(Date.now() - olderThanMs).changes;
 }
 
 // JSON registries → SQL, once, idempotently (whoever runs first migrates; the

@@ -10,6 +10,9 @@
 //   bun ~/.claude/bin/coord.ts metrics [project] [--days N]
 //   bun ~/.claude/bin/coord.ts fact set <key> <value> [--source s]
 //   bun ~/.claude/bin/coord.ts fact get <key> / fact list
+//   bun ~/.claude/bin/coord.ts diff [--since <seq|event-id>] [--last N] [--table t] [--json]
+//        (row-image delta log: what changed in sessions/claims/locks/facts/
+//         work_items between two points — events/cursors are the bus's own trail)
 //
 // event kinds (doctrine): checkpoint | landed | interface_changed | test_red |
 //   test_green | conflict | blocked | decision | dependency_changed
@@ -17,7 +20,7 @@
 // with NEW information, never with history.
 import { Database } from "bun:sqlite";
 import { realpathSync, statSync } from "node:fs";
-import { openGovernorDb, projectIdentity, CAPABILITIES, workTiming } from "../lib/govdb.ts";
+import { openGovernorDb, projectIdentity, CAPABILITIES, workTiming, pruneDeltas } from "../lib/govdb.ts";
 import { resolve } from "node:path";
 
 interface Ev {
@@ -29,6 +32,17 @@ interface Ev {
 	payload: string | null;
 }
 
+// one row-image change from the deltas trigger log (govdb.ts v5 migration)
+interface DeltaRow {
+	seq: number;
+	ts: number;
+	tbl: string;
+	op: string;
+	pk: string;
+	before: string | null;
+	after: string | null;
+}
+
 const die = (m: string): never => {
 	console.error(`coord: ${m}`);
 	process.exit(2);
@@ -38,7 +52,7 @@ const db: Database = openGovernorDb();
 const [cmd, ...rest] = process.argv.slice(2);
 // --help anywhere wins before any parsing that could create state
 if (rest.includes("--help") || rest.includes("-h")) {
-	console.log("coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet | metrics");
+	console.log("coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet | metrics | diff");
 	process.exit(0);
 }
 const arg = (name: string): string | null => {
@@ -745,6 +759,116 @@ if (cmd === "emit") {
 		if (f) issues.push(`${f} lane facts still keyed ${old.slice(0, 8)}`);
 	}
 	console.log(issues.length ? `RESIDUE ${sid.slice(0, 8)}: ${issues.join("; ")}` : `✓ ${sid.slice(0, 8)} clean${old ? ` (lineage ${old.slice(0, 8)})` : ""}`);
+} else if (cmd === "diff") {
+	// W33 — the row-image read model: sessions/claims/locks/facts/work_items
+	// mutate in place; the `deltas` trigger log is what makes "what actually
+	// changed between two points" answerable. --since takes a deltas seq, an
+	// events id (e<N> — or a bare number unknown to deltas), and resolves it
+	// to the nearest strictly-later seq by ts. Terse per-table lines;
+	// --json for machines.
+	if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'deltas'").get())
+		die("no delta log in governor.db — open the DB once via openGovernorDb() to install the v5 triggers");
+	const sinceArg = arg("--since");
+	const tbl = arg("--table");
+	const last = Math.max(1, Number(arg("--last") ?? 50));
+	const wantJson = rest.includes("--json");
+	const resolveSince = (s: string): { from: number; label: string } => {
+		const byEvent = (id: number): { from: number; label: string } => {
+			const ev = db.query("SELECT ts FROM events WHERE id = ?").get(id) as { ts: number } | undefined;
+			if (!ev) die(`--since: no event #${id}`);
+			// strictly later: a delta written in the event's own ms is history
+			const nxt = db.query("SELECT seq FROM deltas WHERE ts > ? ORDER BY ts, seq LIMIT 1").get(ev.ts) as
+				| { seq: number }
+				| undefined;
+			return { from: nxt ? nxt.seq - 1 : Number.MAX_SAFE_INTEGER, label: `event #${id}` };
+		};
+		const evM = /^e(?:v)?(\d+)$/i.exec(s);
+		if (evM) return byEvent(Number(evM[1]));
+		if (!/^\d+$/.test(s)) die(`bad --since ${s} — want a deltas seq or an event id (42 or e42)`);
+		const n = Number(s);
+		if (db.query("SELECT 1 FROM deltas WHERE seq = ?").get(n)) return { from: n, label: `seq ${n}` };
+		return byEvent(n); // unknown to deltas → try the bus
+	};
+	const { from, label } = sinceArg == null ? { from: 0, label: "start" } : resolveSince(sinceArg);
+	const where = tbl ? "seq > ? AND tbl = ?" : "seq > ?";
+	const params: (number | string)[] = tbl ? [from, tbl] : [from];
+	const tot = db.query(`SELECT COUNT(*) AS n, COUNT(DISTINCT tbl) AS t FROM deltas WHERE ${where}`).get(...params) as {
+		n: number;
+		t: number;
+	};
+	const rows = (db
+		.query(`SELECT seq, ts, tbl, op, pk, before, after FROM deltas WHERE ${where} ORDER BY seq DESC LIMIT ?`)
+		.all(...params, last) as DeltaRow[]).reverse();
+	// terse rendering: table  pk  op-glyph  changed-fields ("old→new"; a null
+	// old prints as "field new"). Timeish fields (_at/ts/hb) render as HH:MM.
+	const short = (s: string): string => (s.length > 24 ? `${s.slice(0, 23)}…` : s);
+	const hhmm = (ms: number): string => {
+		const d = new Date(ms);
+		return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+	};
+	const val = (v: unknown): string => {
+		const s = typeof v === "string" ? v : JSON.stringify(v);
+		return !s ? "null" : s.length > 24 ? `${s.slice(0, 23)}…` : s;
+	};
+	const TIMEISH = /(_at$|^ts$|^hb$)/;
+	const detail = (b: string | null, a: string | null): string => {
+		if (!b || !a) return "";
+		let bo: Record<string, unknown>;
+		let ao: Record<string, unknown>;
+		try {
+			bo = JSON.parse(b);
+			ao = JSON.parse(a);
+		} catch {
+			return "";
+		}
+		const changed = Object.keys(ao).filter((k) => JSON.stringify(bo[k]) !== JSON.stringify(ao[k]));
+		return (
+			changed.slice(0, 4).map((k) => {
+				const o = bo[k];
+				const n = ao[k];
+				if (TIMEISH.test(k) && typeof n === "number" && n > 1e12)
+					return `${k} ${typeof o === "number" && o > 1e12 ? `${hhmm(o)}→` : ""}${hhmm(n)}`;
+				return o == null ? `${k} ${val(n)}` : `${k} ${val(o)}→${val(n)}`;
+			}).join(", ") + (changed.length > 4 ? ` +${changed.length - 4} more` : "")
+		);
+	};
+	// pk display: sids truncate to the house 8-char style; work-item pks carry
+	// an absolute project path — collapse to …<repo>/<id>
+	const pkShow = (t: string, pk: string): string => {
+		if (t === "sessions") return `${pk.slice(0, 8)}…`;
+		if (t === "work_items" && pk.includes("/")) {
+			const i = pk.lastIndexOf("/");
+			return `…${pk.slice(0, i).split("/").pop()?.replace(/\.git$/, "")}/${pk.slice(i + 1)}`;
+		}
+		return short(pk);
+	};
+	const glyph = (op: string): string => (op === "insert" ? green("+") : op === "delete" ? red("-") : cyan("~"));
+	const img = (s: string | null): unknown => {
+		try {
+			return s == null ? null : JSON.parse(s);
+		} catch {
+			return s;
+		}
+	};
+	if (wantJson) {
+		console.log(
+			JSON.stringify({
+				since: label,
+				total: tot.n,
+				tables: tot.t,
+				shown: rows.length,
+				changes: rows.map((r) => ({ seq: r.seq, ts: r.ts, tbl: r.tbl, op: r.op, pk: r.pk, before: img(r.before), after: img(r.after) })),
+			}),
+		);
+	} else {
+		for (const r of rows)
+			console.log(`${r.tbl.padEnd(11)} ${dim(pkShow(r.tbl, r.pk))} ${glyph(r.op)} ${detail(r.before, r.after)}`.trimEnd());
+		console.log(
+			dim(
+				`${tot.n} change${tot.n === 1 ? "" : "s"} across ${tot.t} table${tot.t === 1 ? "" : "s"}${sinceArg != null ? ` since ${label}` : ""}${rows.length < tot.n ? ` — last ${rows.length} shown` : ""}`,
+			),
+		);
+	}
 } else if (cmd === "gc") {
 	// retention: events + closed sessions + their cursors age out; terminal
 	// work items are the ledger and are NEVER auto-deleted
@@ -758,10 +882,11 @@ if (cmd === "emit") {
 	const x = db.query("UPDATE consults SET state = 'EXPIRED', answered_at = ? WHERE state = 'OPEN' AND created_at < ?").run(Date.now(), Date.now() - 3_600_000).changes;
 	const cd = db.query("DELETE FROM consults WHERE state IN ('ANSWERED','DECLINED','EXPIRED') AND answered_at < ? AND answered_at IS NOT NULL").run(cut).changes;
 	const sw = sweepStaleSessions();
-	const lk = db.query("DELETE FROM locks WHERE ts < ?").run(now - 15 * 60_000).changes;
-	console.log(`gc: ${e} events, ${s} closed sessions, ${sw} stale RUNNING sessions swept, ${lk} expired locks, ${c} stale cursors, ${f} lane facts, ${x} consults expired, ${cd} consult threads pruned (>${days}d; work ledger untouched)`);
+	const lk = db.query("DELETE FROM locks WHERE ts < ?").run(Date.now() - 15 * 60_000).changes;
+	const d = pruneDeltas(db, days * 86_400_000);
+	console.log(`gc: ${e} events, ${s} closed sessions, ${sw} stale RUNNING sessions swept, ${lk} expired locks, ${c} stale cursors, ${f} lane facts, ${x} consults expired, ${cd} consult threads pruned, ${d} deltas (>${days}d; work ledger untouched)`);
 } else {
-	die("unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet | metrics");
+	die("unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | lease-release | gc | fleet | metrics | diff");
 }
 
 function scopeCovers(a: string, b: string): boolean {
