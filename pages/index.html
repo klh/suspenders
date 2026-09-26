@@ -8,7 +8,7 @@
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <meta
       name="description"
-      content="A SQLite control plane for multi-agent Claude Code fleets: capability-aware dispatch, zombie detection, decisions with LLM recommendations, and a live fleet board."
+      content="A SQLite control plane for multi-agent Claude Code fleets: capability-aware dispatch, zombie detection, decisions with LLM recommendations, a consult knowledge base, and a live fleet board."
     />
     <style>
       :root { color-scheme: light; }
@@ -156,7 +156,7 @@
       </header>
 
       <section>
-        <h2>The board — monitoring and task completion in one surface</h2>
+        <h2>The board — decisions, tasks, and fleet health in one surface</h2>
         <div class="shot">
           <img
             src="screenshot.png"
@@ -166,6 +166,25 @@
         <p class="caption">
           Open decisions surface as red cards. <b>Get recommendation</b> has an LLM analyze the decision in
           control-plane context; you edit or send. Lanes, completion stats, and the event stream stay live at 1s.
+        </p>
+        <div class="grid" style="margin-top: 14px">
+          <figure class="shot" style="margin: 0">
+            <img
+              src="screenshot-tasks.png"
+              alt="Tasks view: every work item across projects with state, owner, age, and open-decision counts; filter by project or session, sort by any column"
+            />
+          </figure>
+          <figure class="shot" style="margin: 0">
+            <img
+              src="screenshot-setup.png"
+              alt="Setup view: installation checks for hook wiring, the monitor agent, and the advice endpoint, each with its fix command"
+            />
+          </figure>
+        </div>
+        <p class="caption">
+          <b>Tasks</b> tracks every work item across projects — state, owner, age, and which ones wait on a decision.
+          <b>Setup</b> checks your wiring and prints the fix when something is missing. Answered and cancelled
+          decisions keep their history instead of vanishing.
         </p>
       </section>
 
@@ -305,7 +324,7 @@ fleet board — decisions · lanes · tasks · stream   ← you, deciding</pre>
         </span>
         <span class="r">
           <a href="https://github.com/klh/suspenders">github.com/klh/suspenders</a> · extracted from the
-          <a href="https://github.com/klh/speedy-claude">speedy-claude</a> setup
+          <a href="https://github.com/klh/speedy-claude">speedy-claude</a> setup, which now runs on it
         </span>
       </footer>
     </div>

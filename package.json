@@ -1,7 +1,7 @@
 {
   "name": "suspenders",
-  "version": "0.1.0",
-  "description": "A governor for agent fleets — SQLite control plane, capability-aware dispatch, zombie lanes, decision forks with LLM advice, live fleet board",
+  "version": "0.2.0",
+  "description": "A control plane for agent fleets — SQLite state, capability-aware dispatch, zombie detection, decisions with LLM recommendations, a consult knowledge base, and a live fleet board",
   "type": "module",
   "license": "BUSL-1.1",
   "scripts": {
