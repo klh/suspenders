@@ -51,7 +51,9 @@ const RULES =
 	"continue OWNED before taking new; own an item (work take) before code " +
 	"work; never reconstruct mutable state from Markdown; parallelizable " +
 	"work gets work split. Stuck or need a colleague's context: " +
-	"coord consult/who-knows (questions, never ownership). Between items: " +
+	"coord consult/who-knows (questions, never ownership). Who-is-working: " +
+	"query the plane (sessions + claims, coord fleet) — never /tmp files. " +
+	"Between items: " +
 	"poll coord inbox --as <sid>; if READY work matches your capabilities, " +
 	"take it yourself — don't wait for dispatch; checkpoint each landed " +
 	"milestone (work done --sha / capsule) so preemption stays possible. " +

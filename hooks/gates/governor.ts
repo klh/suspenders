@@ -237,9 +237,22 @@ export function governorGate(hook: HookInput): void {
 
 /** The incoming agents' workload (owner 2026-09-22: "query incoming agents
  * workload and what it is delivering"): when a real external write blocks an
- * edit, name who is active and what each is delivering, from the progress
- * registry. Never blocks. */
+ * edit, name who is active and what each is delivering. DB-FIRST (owner
+ * 2026-09-26: "why are you ls-ing to get who's working — query the db"):
+ * claims are the roster; the /tmp progress bars are the fallback for
+ * fine-grained fractions only. Never blocks. */
 function activeRoster(): string {
+	try {
+		const db = openGovernorDb();
+		const rows = db
+			.query(
+				"SELECT substr(owner_sid, 1, 10) AS who, id, title FROM work_items WHERE state IN ('CLAIMED','RUNNING') AND owner_sid IS NOT NULL ORDER BY updated_at DESC LIMIT 5",
+			)
+			.all() as { who: string; id: string; title: string }[];
+		if (rows.length) {
+			return `\nActive lanes (governor.db claims): ${rows.map((r) => `${r.who} → ${r.id} ${r.title.slice(0, 40)}`).join("; ")}.`;
+		}
+	} catch {} // DB unavailable — fall through to the file bars
 	try {
 		const dir = "/tmp/agent-progress";
 		if (!existsSync(dir)) return "";
@@ -255,7 +268,7 @@ function activeRoster(): string {
 				rows.push(`${j.id ?? f.replace(/\.json$/, "")} — ${j.label ?? "working"} (${j.done ?? 0}/${j.total ?? 0})`);
 			} catch {}
 		}
-		return rows.length ? `\nActive agents right now: ${rows.join("; ")}.` : "";
+		return rows.length ? `\nActive agents right now (progress bars): ${rows.join("; ")}.` : "";
 	} catch {
 		return "";
 	}

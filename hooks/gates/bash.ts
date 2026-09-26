@@ -82,10 +82,13 @@ export function bashGate(hook: HookInput): never {
   const toks = parse(CMD) as Tok[];
   const SEGS = segments(toks).map((s) => words(s));
 
-  // ---- secrets (git commit / push) ----
+  // ---- secrets (git commit / push) — per git SEGMENT ----
+  // Each git verb is scanned in ITS OWN repo with the flags of THAT verb:
+  // `push repoA && commit repoB` used to carry isPush across segments and run
+  // the full-history scan against repoB (owner 2026-09-26: the deny was real
+  // output from the wrong repo — repoB holds secrets and must never push).
   if (have("gitleaks")) {
-    let isCommit = false, isPush = false;
-    let repoDir = CWD, segCwd = CWD;
+    let segCwd = CWD;
     for (const w of SEGS) {
       const v = verb(w);
       // track cd segments: `cd X && git push` must scan X, not hook.cwd
@@ -93,22 +96,20 @@ export function bashGate(hook: HookInput): never {
       if (v === "cd") {
         const target = w[w.length - 1];
         if (target && !target.startsWith("<op")) segCwd = target.startsWith("/") ? target : resolve(segCwd, target);
+        continue;
       }
       if (v !== "git") continue;
       if (w.includes("--no-verify"))
         deny("secrets-gate: --no-verify in an agent command is denied by policy. If you are the USER, run the git command in your own terminal.");
-      if (w.includes("commit")) isCommit = true;
-      if (w.includes("push")) isPush = true;
-      repoDir = segCwd;
+      let repoDir = segCwd;
       const c = w.indexOf("-C");
       if (c !== -1 && w[c + 1]) repoDir = w[c + 1].startsWith("/") ? w[c + 1] : resolve(repoDir, w[c + 1]);
       const gd = w.find((a) => a.startsWith("--git-dir="));
       if (gd) repoDir = gd.slice("--git-dir=".length);
-    }
-    if ((isCommit || isPush) && run("git", ["rev-parse", "--is-inside-work-tree"], { cwd: repoDir }).ok) {
-      if (isCommit && !run("gitleaks", ["protect", "--staged", "--redact", "--no-banner"], { cwd: repoDir }).ok)
+      const inRepo = run("git", ["rev-parse", "--is-inside-work-tree"], { cwd: repoDir }).ok;
+      if (w.includes("commit") && inRepo && !run("gitleaks", ["protect", "--staged", "--redact", "--no-banner"], { cwd: repoDir }).ok)
         deny("gitleaks found secrets in STAGED content. Remove the secret (rotate if real). --no-verify is not available to agents.");
-      if (isPush && !run("gitleaks", ["git", ".", "--redact", "--no-banner"], { cwd: repoDir }).ok)
+      if (w.includes("push") && inRepo && !run("gitleaks", ["git", ".", "--redact", "--no-banner"], { cwd: repoDir }).ok)
         deny("gitleaks found secrets in commit history headed for the remote. Rotate the credential and rewrite/purge history. --no-verify is not available to agents.");
     }
   }
