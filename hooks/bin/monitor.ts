@@ -9,7 +9,7 @@
 // known blind spot (backlog W9), surfaced by `work orphaned` instead.
 // usage: bun ~/.claude/bin/monitor.ts [--fix]
 import { statSync } from "node:fs";
-import { openGovernorDb } from "../lib/govdb.ts";
+import { openGovernorDb, sweepStaleSessions } from "../lib/govdb.ts";
 
 const db = openGovernorDb();
 const now = Date.now();
@@ -328,6 +328,14 @@ try {
 	const kbstats = db.query("SELECT COUNT(*) AS n2, COALESCE(SUM(hits), 0) AS n FROM consult_kb").get() as { n2: number; n: number };
 	console.log(`CONSULTS ${s("OPEN")} open · ${s("ANSWERED")} human-answered · ${s("KB")} kb-answered · kb ${kbstats.n2} solutions, ${kbstats.n} hits`);
 } catch {} // pre-v3 db — consult tracking not present yet
+
+// automagic hygiene: the shared liveness sweep rides along with --fix only —
+// a read-only pass closes nothing (monitor doctrine: alerts first). The
+// always-on sweep points are session-start, coord bootstrap, and coord gc.
+if (fix) {
+	const swept = sweepStaleSessions(db);
+	if (swept) fixed.push(`swept ${swept} stale session(s) (hb-stale + transcript-dead; coordinator/waiting kept)`);
+}
 
 if (fixed.length) console.log(fixed.map((f) => `✓ ${f}`).join("\n"));
 if (issues.length) {

@@ -20,7 +20,7 @@
 // with NEW information, never with history.
 import { Database } from "bun:sqlite";
 import { realpathSync, statSync } from "node:fs";
-import { openGovernorDb, projectIdentity, CAPABILITIES, workTiming, pruneDeltas, tokenUsage } from "../lib/govdb.ts";
+import { openGovernorDb, projectIdentity, CAPABILITIES, workTiming, pruneDeltas, tokenUsage, sweepStaleSessions } from "../lib/govdb.ts";
 import { resolve } from "node:path";
 
 interface Ev {
@@ -158,16 +158,13 @@ if (cmd === "emit") {
 	const source = arg("--as") ?? "owner";
 	const ts = Date.now();
 	const bid = `b${ts}`;
-	const targets = (db
-		.query("SELECT sid, state, hb FROM sessions WHERE state = 'RUNNING' OR hb > '' || (strftime('%s', 'now') * 1000 - 86400000)")
-		.all() as { sid: string; state: string; hb: number }[])
-		.filter((t) => t.state === "RUNNING" || Date.now() - t.hb < 86_400_000); // include swept-but-alive lanes
+	const targets = db.query("SELECT sid FROM sessions WHERE state = 'RUNNING' AND hb > ?").all(Date.now() - 30 * 60_000) as { sid: string }[]; // include swept-but-alive lanes
 	const insB = db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'BROADCAST', NULL, ?, ?)");
 	for (const t of targets) insB.run(ts, source, JSON.stringify({ id: bid, note }), t.sid);
 	const upF = db.query("INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts");
 	upF.run(`broadcast.${bid}`, note, ts);
 	upF.run("broadcast.latest", JSON.stringify({ id: bid, ts, note }), ts);
-	console.log(`${green("✓")} broadcast ${bid} → ${targets.length} running session(s) + SessionStart tail for future ones`);
+	console.log(`${green("✓")} broadcast ${bid} → ${targets.length} live session(s) (inbox; they poll) — everyone else gets it at SessionStart`);
 } else if (cmd === "lease-release") {
 	// explicit handover: a session done with a file releases it now instead of
 	// pinning it for its remaining TTL. Owner-predicated — only the caller's
@@ -453,7 +450,7 @@ if (cmd === "emit") {
 		const parentSid = arg("--parent");
 		if (parentSid) caps = (db.query("SELECT capabilities FROM sessions WHERE sid = ?").get(parentSid) as { capabilities: string | null } | null)?.capabilities ?? null;
 	}
-	sweepStaleSessions();
+	sweepStaleSessions(db);
 	db.query(
 		"INSERT INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities) VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?) ON CONFLICT(sid) DO UPDATE SET project = excluded.project, role = excluded.role, hb = excluded.hb, capabilities = COALESCE(excluded.capabilities, sessions.capabilities)",
 	).run(as, project, role, arg("--parent"), arg("--worktree") ?? null, Date.now(), Date.now(), caps);
@@ -947,7 +944,7 @@ if (cmd === "emit") {
 	// consults: open questions expire after 1h; closed threads age out
 	const x = db.query("UPDATE consults SET state = 'EXPIRED', answered_at = ? WHERE state = 'OPEN' AND created_at < ?").run(Date.now(), Date.now() - 3_600_000).changes;
 	const cd = db.query("DELETE FROM consults WHERE state IN ('ANSWERED','DECLINED','EXPIRED') AND answered_at < ? AND answered_at IS NOT NULL").run(cut).changes;
-	const sw = sweepStaleSessions();
+	const sw = sweepStaleSessions(db);
 	const lk = db.query("DELETE FROM locks WHERE ts < ?").run(Date.now() - 15 * 60_000).changes;
 	const d = pruneDeltas(db, days * 86_400_000);
 	console.log(`gc: ${e} events, ${s} closed sessions, ${sw} stale RUNNING sessions swept, ${lk} expired locks, ${c} stale cursors, ${f} lane facts, ${x} consults expired, ${cd} consult threads pruned, ${d} deltas (>${days}d; work ledger untouched)`);
@@ -968,37 +965,6 @@ function scopeCovers(a: string, b: string): boolean {
 // transcript-dead is the real signal for TOP-LEVEL sessions. LANES (parented
 // rows) have no transcript of their own, so they close only after 24h stale —
 // their real liveness design is backlog W9. Swept sessions keep owned work.
-function sweepStaleSessions(maxIdleMs = 20 * 60_000): number {
-	const now = Date.now();
-	let n = 0;
-	const rows = db.query("SELECT sid FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NULL AND hb < ?").all(now - maxIdleMs) as { sid: string }[];
-	for (const r of rows) {
-		if (liveTranscript(r.sid)) continue;
-		db.query("UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'").run(r.sid);
-		n++;
-	}
-	const lanes = db.query("SELECT sid FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NOT NULL AND hb < ?").all(now - 24 * 3_600_000) as { sid: string }[];
-	for (const r of lanes) {
-		db.query("UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'").run(r.sid);
-		n++;
-	}
-	return n;
-}
-
-function liveTranscript(sid: string): boolean {
-	const floor = Date.now() - 15 * 60_000;
-	try {
-		const glob = new Bun.Glob(`**/*${sid}*.jsonl`);
-		for (const rel of glob.scanSync({ cwd: `${process.env.HOME}/.claude/projects`, onlyFiles: true })) {
-			const f = `${process.env.HOME}/.claude/projects/${rel}`;
-			try {
-				if (statSync(f).mtimeMs > floor) return true;
-			} catch {}
-		}
-	} catch {}
-	return false;
-}
-
 // contextual expertise ranking for who-knows / consult --best. Score =
 // claims 40% / recent DONE work 25% / recent scope touches 20% / role 10% /
 // heartbeat recency 5%. Only live sessions in the project.

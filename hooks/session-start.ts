@@ -6,7 +6,7 @@
 // session context. CLAUDE_FLEET_BOOTSTRAP=0 opts out entirely.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { openGovernorDb, projectIdentity, CAPABILITIES } from "./lib/govdb.ts";
+import { openGovernorDb, projectIdentity, CAPABILITIES, sweepStaleSessions } from "./lib/govdb.ts";
 
 type In = { session_id?: string; source?: string; transcript_path?: string };
 
@@ -35,7 +35,6 @@ function pname(p: string): string {
 	const last = parts[parts.length - 1].replace(/\.git$/, "");
 	return last || parts[parts.length - 2] || p;
 }
-
 // CLIs ship in bin/ next to this hook (repo checkout and installed prefix
 // share the layout) — resolve there first; fall back to the pre-namespacing
 // ~/.claude/bin location for old installs.
@@ -87,6 +86,10 @@ const OWNED_SQL =
 const db = openGovernorDb();
 db.query(UPSERT).run(lane, project, isSubagent ? sid : null, now, now, CAPS, input.transcript_path ?? null);
 const out = [isSubagent ? `SUBAGENT LANE ${lane.slice(0, 24)}  project=${pname(project)}` : `SESSION ${sid.slice(0, 8)}  project=${pname(project)}`];
+
+// automagic hygiene: every bootstrap sweeps stale sessions fleet-wide
+const sweptN = sweepStaleSessions(db);
+if (sweptN) out.push(`SWEPT ${sweptN} stale session(s) — hb-stale + transcript-dead (coordinator/waiting kept)`);
 if (isSubagent) {
 	out.push(
 		`You share the parent's session id — claim and checkpoint as the lane id instead: ` +
