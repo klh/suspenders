@@ -5,7 +5,7 @@
 // journal_mode: under contention the connection waits instead of throwing;
 // WAL is persistent once set and verified on open.
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 const REG = `${process.env.HOME}/.cache/claude-governor`;
@@ -97,6 +97,101 @@ export function workTiming(db: Database, project: string, nowMs = Date.now()): I
 	}
 	for (const t of out.values()) if (t.firstClaim) t.wallMs = t.lastEvent - t.firstClaim;
 	return [...out.values()].sort((a, b) => (a.work < b.work ? -1 : 1));
+}
+
+// W24 — usage per task. APPROXIMATION: a transcript shared across items (one
+// session working several items serially) is attributed by claim-window
+// overlap in time, not causality. Windows replay from the same bus events as
+// workTiming: each work.claimed (payload `by` = owner sid) opens
+// [claim → closing work.released/done/failed], open claims run to nowMs;
+// multiple claims = sum of windowed sums. sid → sessions.transcript_path;
+// no resolvable transcript ⇒ null (rendered '-', never 0). Fresh parses
+// cache per (project, item) in facts (`metrics.tokens.<proj>.<id>`,
+// version-incremented, keyed by transcript mtime) — a DONE item skips
+// re-parse while its transcript is unchanged. Transcript errors fail soft.
+export interface ItemTokens {
+	work: string;
+	in: number; // Σ input_tokens (prompt, minus cache reads/creation)
+	out: number; // Σ output_tokens
+	cacheR: number; // Σ cache_read_input_tokens
+	cacheC: number; // Σ cache_creation_input_tokens
+}
+
+export function tokenUsage(db: Database, project: string, nowMs = Date.now()): Map<string, ItemTokens | null> {
+	const rows = db
+		.query(
+			"SELECT id, ts, kind, payload FROM events WHERE kind IN ('work.claimed','work.released','work.done','work.failed') AND json_extract(payload, '$.project') = ? ORDER BY ts, id",
+		)
+		.all(project) as { id: number; ts: number; kind: string; payload: string | null }[];
+	const wins = new Map<string, { start: number; end: number }[]>(); // work id → claim windows (end 0 = still open)
+	const sids = new Map<string, string[]>();
+	const done = new Set<string>();
+	for (const r of rows) {
+		let p: { work?: string; by?: string } = {};
+		try {
+			p = JSON.parse(r.payload ?? "{}") as { work?: string; by?: string };
+		} catch {}
+		if (!p.work) continue;
+		if (r.kind === "work.claimed") {
+			if (!wins.has(p.work)) wins.set(p.work, []);
+			wins.get(p.work)!.push({ start: r.ts, end: 0 });
+			if (p.by) (sids.get(p.work) ?? sids.set(p.work, []).get(p.work)!).push(p.by);
+		} else {
+			const w = wins.get(p.work)?.find((x) => x.end === 0); // claims close in order (FIFO)
+			if (w) w.end = r.ts;
+			if (r.kind === "work.done") done.add(p.work);
+		}
+	}
+	const out = new Map<string, ItemTokens | null>();
+	for (const [work, ws] of wins) {
+		out.set(work, null); // default: unresolvable → rendered '-', never 0
+		try {
+			const paths = new Set<string>();
+			for (const sid of sids.get(work) ?? []) {
+				const tp = (db.query("SELECT transcript_path FROM sessions WHERE sid = ?").get(sid) as { transcript_path?: string | null } | undefined)?.transcript_path;
+				if (tp) paths.add(tp);
+			}
+			if (!paths.size) continue;
+			let maxM = 0;
+			for (const tp of paths) maxM = Math.max(maxM, statSync(tp).mtimeMs); // missing file throws → fail soft below
+			const key = `metrics.tokens.${project.replace(/[^A-Za-z0-9._-]/g, "-")}.${work}`;
+			const cached = JSON.parse((db.query("SELECT value FROM facts WHERE key = ?").get(key) as { value?: string } | null)?.value ?? "null") as
+				| { in: number; out: number; cacheR: number; cacheC: number; at: number; tpMtime: number }
+				| null;
+			if (done.has(work) && cached?.tpMtime === maxM) {
+				// cache hit: item terminal and transcript untouched since last parse
+				out.set(work, { work, in: cached.in, out: cached.out, cacheR: cached.cacheR, cacheC: cached.cacheC });
+				continue;
+			}
+			const t: ItemTokens = { work, in: 0, out: 0, cacheR: 0, cacheC: 0 };
+			const n = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+			for (const tp of paths) {
+				for (const line of readFileSync(tp, "utf8").split("\n")) {
+					if (!line.includes('"type":"assistant"')) continue; // cheap pre-filter — only assistant lines carry usage
+					let ts = NaN;
+					let u: Record<string, unknown> | undefined;
+					try {
+						const o = JSON.parse(line) as { timestamp?: string; message?: { usage?: Record<string, unknown> } };
+						ts = Date.parse(o.timestamp ?? "");
+						u = o.message?.usage;
+					} catch {}
+					if (!u || !Number.isFinite(ts)) continue;
+					if (!ws.some((w) => ts >= w.start && ts <= (w.end || nowMs))) continue;
+					t.in += n(u.input_tokens);
+					t.out += n(u.output_tokens);
+					t.cacheR += n(u.cache_read_input_tokens);
+					t.cacheC += n(u.cache_creation_input_tokens);
+				}
+			}
+			out.set(work, t);
+			db.query(
+				"INSERT INTO facts (key, value, source, version, ts) VALUES (?, ?, 'coord', 1, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, source = excluded.source, version = version + 1, ts = excluded.ts",
+			).run(key, JSON.stringify({ in: t.in, out: t.out, cacheR: t.cacheR, cacheC: t.cacheC, at: nowMs, tpMtime: maxM }), nowMs);
+		} catch {
+			// fail soft: a bad/missing transcript never blocks metrics
+		}
+	}
+	return out;
 }
 
 export function openGovernorDb(): Database {

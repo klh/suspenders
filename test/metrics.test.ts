@@ -123,6 +123,11 @@ describe("W3 — coord metrics", () => {
 		expect(out).toContain("0 failed");
 	});
 
+	test("tokens: summary line + null column rendered as '-', never 0", () => {
+		expect(out).toContain("tokens (approx, window-attributed): in - · out -");
+		expect(out).toContain("tok      -");
+	});
+
 	test("writes the metrics.snapshot.<date> fact", () => {
 		expect(out).toContain("snapshot → metrics.snapshot.");
 		const rows = query(`SELECT value FROM facts WHERE key = 'metrics.snapshot.${new Date().toISOString().slice(0, 10)}'`);
@@ -133,5 +138,84 @@ describe("W3 — coord metrics", () => {
 		expect(snap.conflicts).toBe(1);
 		expect(snap.medianWallMs).toBe(40 * M);
 		expect(snap.dwell.PAUSED.ms).toBe(20 * M);
+	});
+});
+
+// W24 — tokenUsage: synthetic mini-transcript under cwd (never /tmp), windowed
+// summation, mtime-keyed cache hit/refresh, null handling for missing
+// transcripts. Whole-ms mtimes so the cache key round-trips exactly (utimes
+// stores ms; raw APFS mtimes carry ns).
+const TOKEN_DIR = join(process.cwd(), ".tmp-w24-tokens");
+const TOKKEY = ["metrics.tokens", PROJECT.replace(/[^A-Za-z0-9._-]/g, "-"), "T1"].join(".");
+
+afterAll(() => rmSync(TOKEN_DIR, { recursive: true, force: true }));
+
+const tokenScenario = (): {
+	r1: Record<string, { work: string; in: number; out: number; cacheR: number; cacheC: number } | null>;
+	r2: Record<string, { work: string; in: number; out: number; cacheR: number; cacheC: number } | null>;
+	r3: Record<string, { work: string; in: number; out: number; cacheR: number; cacheC: number } | null>;
+	fact: { in: number; out: number; cacheR: number; cacheC: number; at: number; tpMtime: number } | null;
+	mtime: number;
+} =>
+	JSON.parse(
+		runIn(`
+const { openGovernorDb, tokenUsage } = await import(${JSON.stringify(GOVDB)});
+const { mkdirSync, writeFileSync, statSync, utimesSync } = await import("node:fs");
+const db = openGovernorDb();
+const P = ${JSON.stringify(PROJECT)};
+const DIR = ${JSON.stringify(TOKEN_DIR)};
+const now = Date.now();
+const M = 60000;
+const T = (m) => now - m * M;
+const line = (m, i, o, cr, cc) => JSON.stringify({ type: "assistant", timestamp: new Date(T(m)).toISOString(), message: { usage: { input_tokens: i, output_tokens: o, cache_read_input_tokens: cr, cache_creation_input_tokens: cc } } });
+mkdirSync(DIR, { recursive: true });
+const tp = DIR + "/lane-t1.jsonl";
+writeFileSync(tp, [line(40, 5, 5, 5, 5), line(20, 1000, 100, 50, 25), line(5, 999, 999, 999, 999)].join("\\n") + "\\n");
+utimesSync(tp, new Date(now), new Date(now)); // normalize mtime to whole ms — cache key must round-trip exactly
+const ins = db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, ?, ?, ?, ?)");
+const w = (work, extra) => JSON.stringify({ work, project: P, ...extra });
+ins.run(T(30), "work", "work.claimed", "src/x", w("T1", { by: "lane-t1" }), null);
+ins.run(T(10), "work", "work.done", "src/x", w("T1", { sha: "abc" }), null);
+ins.run(T(20), "gone transcript", "work.claimed", "src/x", w("T2", { by: "lane-t2" }), null);
+ins.run(T(20), "no transcript", "work.claimed", "src/x", w("T3", { by: "lane-t3" }), null);
+const s = db.query("INSERT INTO sessions (sid, project, role, parent_sid, started_at, hb, state, transcript_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+s.run("lane-t1", P, "worker", null, T(120), now, "RUNNING", tp);
+s.run("lane-t2", "other-project", "worker", null, T(120), now, "RUNNING", DIR + "/missing.jsonl");
+s.run("lane-t3", P, "worker", null, T(120), now, "RUNNING", null);
+const dump = (m) => Object.fromEntries([...m].map(([k, v]) => [k, v && { ...v }]));
+const r1 = dump(tokenUsage(db, P, now));
+const st = statSync(tp);
+writeFileSync(tp, [line(40, 5, 5, 5, 5), line(20, 1000, 100, 50, 25), line(15, 5000, 500, 0, 0), line(5, 999, 999, 999, 999)].join("\\n") + "\\n");
+utimesSync(tp, new Date(st.atimeMs), new Date(st.mtimeMs)); // same mtime, new content — DONE item must NOT re-parse
+const r2 = dump(tokenUsage(db, P, now));
+utimesSync(tp, new Date(st.atimeMs + 1000), new Date(st.mtimeMs + 1000)); // bump mtime → re-parse and refresh
+const r3 = dump(tokenUsage(db, P, now));
+const fact = db.query("SELECT value FROM facts WHERE key = ?").get(${JSON.stringify(TOKKEY)});
+console.log(JSON.stringify({ r1, r2, r3, fact: fact ? JSON.parse(fact.value) : null, mtime: st.mtimeMs }));
+db.close();`),
+	);
+
+describe("W24 — tokenUsage: windowed summation + mtime cache", () => {
+	const { r1, r2, r3, fact, mtime } = tokenScenario();
+
+	test("windowed summation: only assistant usage inside the claim window (T(30)→T(10)) counts", () => {
+		expect(r1.T1).toEqual({ work: "T1", in: 1000, out: 100, cacheR: 50, cacheC: 25 });
+	});
+
+	test("null for missing transcript file (T2) and no-transcript session (T3) — never 0", () => {
+		expect(r1.T2).toBeNull();
+		expect(r1.T3).toBeNull();
+	});
+
+	test("cache: same mtime + DONE ⇒ no re-parse even though content changed", () => {
+		expect(r2.T1).toEqual(r1.T1);
+	});
+
+	test("mtime bump ⇒ re-parse and refresh", () => {
+		expect(r3.T1).toEqual({ work: "T1", in: 6000, out: 600, cacheR: 50, cacheC: 25 });
+	});
+
+	test("cache fact follows the version-increment upsert shape", () => {
+		expect(fact).toEqual({ in: 6000, out: 600, cacheR: 50, cacheC: 25, at: expect.any(Number), tpMtime: mtime + 1000 });
 	});
 });

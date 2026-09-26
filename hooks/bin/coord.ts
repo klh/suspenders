@@ -20,7 +20,7 @@
 // with NEW information, never with history.
 import { Database } from "bun:sqlite";
 import { realpathSync, statSync } from "node:fs";
-import { openGovernorDb, projectIdentity, CAPABILITIES, workTiming, pruneDeltas } from "../lib/govdb.ts";
+import { openGovernorDb, projectIdentity, CAPABILITIES, workTiming, pruneDeltas, tokenUsage } from "../lib/govdb.ts";
 import { resolve } from "node:path";
 
 interface Ev {
@@ -503,8 +503,26 @@ if (cmd === "emit") {
 		return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m` : `${m}m`;
 	};
 	console.log(`  items: ${doneItems.length} done, ${openN} open — median done item: wall ${fmt(med(doneItems.map((t) => t.wallMs)))}, agent ${fmt(med(doneItems.map((t) => t.agentMs)))}`);
-	for (const t of [...timing].sort((a, b) => b.wallMs - a.wallMs).slice(0, 8))
-		console.log(`    ${cyan(t.work.padEnd(8))} wall ${fmt(t.wallMs).padStart(6)}  agent ${fmt(t.agentMs).padStart(6)}  ${t.claims} claim${t.claims === 1 ? "" : "s"}${t.failed ? red(" FAILED") : t.done ? "" : amber(" open")}`);
+	// W24 — usage per task: windowed transcript tokens per item. Approximation —
+	// attribution is by claim-window overlap in time, not causality (a session
+	// working several items serially shares its transcript across windows).
+	const tokens = tokenUsage(db, project, now);
+	const shown = [...timing].sort((a, b) => b.wallMs - a.wallMs).slice(0, 8);
+	const fmtTok = (n: number): string => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`);
+	let sumIn = 0;
+	let sumOut = 0;
+	let tokN = 0;
+	for (const t of shown) {
+		const k = tokens.get(t.work);
+		if (k) {
+			tokN++;
+			sumIn += k.in + k.cacheR + k.cacheC;
+			sumOut += k.out;
+		}
+		const tok = k ? fmtTok(k.in + k.out + k.cacheR + k.cacheC) : "-";
+		console.log(`    ${cyan(t.work.padEnd(8))} wall ${fmt(t.wallMs).padStart(6)}  agent ${fmt(t.agentMs).padStart(6)}  tok ${tok.padStart(6)}  ${t.claims} claim${t.claims === 1 ? "" : "s"}${t.failed ? red(" FAILED") : t.done ? "" : amber(" open")}`);
+	}
+	if (shown.length) console.log(`  tokens (approx, window-attributed): in ${tokN ? fmtTok(sumIn) : "-"} · out ${tokN ? fmtTok(sumOut) : "-"} across ${shown.length} shown items`);
 	// dwell: PAUSED windows are evented (paused → resume_ready); WAIT_RATE /
 	// WAIT_DED leave no event trail, so ongoing dwell = now − lane.<sid>.state
 	// fact ts (the only state history facts keep is their own last ts).
