@@ -217,6 +217,7 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
     <div id="fleetBody" style="display:block"></div>
   </div>
   <div class="sec"><h2>Claims <span class="dim">(file -&gt; owner -&gt; waiting -&gt; lease)</span></h2><div class="feed" id="claims"></div></div>
+  <div class="sec"><h2>LLM telemetry <span class="dim">(routing log + model budgets)</span></h2><div class="feed" id="llmview"></div></div>
   <div class="sec"><h2>Completed</h2><div class="feed" id="done"></div></div>
   <div class="sec"><h2>Event stream</h2><div class="feed"><div class="filters" id="filters"></div><div id="events"></div></div></div>
 </section>
@@ -473,6 +474,28 @@ function renderFleet(){
   for (var ci = 0; ci < ss.length; ci++) chips += chipHtml(ss[ci], d.zombies || [], d.needs || {});
   var fsig = chips + zg;
   if (body.getAttribute('data-sig') !== fsig) { body.setAttribute('data-sig', fsig); body.innerHTML = chips + zg; }
+}
+// --- W28 LLM telemetry (Governor tab): per-model token sums vs budgets + routing log ---
+function renderLlm(d){
+  var el = byId('llmview');
+  if (!d.llm) { el.innerHTML = '<div class="dim">no llm telemetry in payload (older board build)</div>'; return; }
+  var h = '';
+  var u = d.llm.usage || [];
+  if (!u.length) h += '<div class="dim">no llm.call events today — advise round-trips will appear here</div>';
+  for (var i = 0; i < u.length; i++) {
+    var m = u[i];
+    var pct = m.budget ? Math.min(100, Math.round(m.tokens / m.budget * 100)) : null;
+    h += '<div class="llmrow"><b>' + esc(m.model) + '</b> · ' + m.tokens + ' tok · ' + m.calls + ' call' + (m.calls === 1 ? '' : 's') + (m.budget ? ' · budget ' + m.budget + ' <span class="dim">(' + pct + '%)</span><div style="height:4px;background:var(--ink-faint,#888);border-radius:2px;margin-top:2px"><div style="height:4px;width:' + pct + '%;background:var(--accent,#2c7);border-radius:2px"></div></div>' : ' · <span class="dim">no llm.budget.' + esc(m.model) + ' fact set</span>') + '</div>';
+  }
+  var calls = d.llm.calls || [];
+  if (calls.length) {
+    h += '<div class="dim" style="margin-top:8px">recent calls:</div>';
+    for (var j = 0; j < calls.length; j++) {
+      var c = calls[j];
+      h += '<div class="mono">' + esc(String(c.model)) + ' · ' + (c.error ? '<span style="color:var(--bad,#c33)">ERR ' + esc(String(c.error)) + '</span>' : c.tt + ' tok · ' + c.ms + 'ms') + ' · ' + new Date(c.ts).toLocaleTimeString() + '</div>';
+    }
+  }
+  el.innerHTML = h;
 }
 function renderClaims(d){
   var out = '';
@@ -1260,8 +1283,7 @@ function renderTab(){
   if (curTab === 'decisions') renderHist();
   else if (curTab === 'tasks') renderTasks();
   else if (curTab === 'activity') renderAct();
-  else if (curTab === 'governor') { if (lastData) { renderClaims(lastData); renderDone(lastData); renderEvents(lastData); } }
-  else if (curTab === 'setup') renderSetup();
+  else if (curTab === 'governor') { if (lastData) { renderFleet(); renderClaims(lastData); renderDone(lastData); renderEvents(lastData); renderLlm(lastData); } }  else if (curTab === 'setup') renderSetup();
 }
 var nav = document.querySelector('nav.tabs');
 function setTab(id, fromHash){

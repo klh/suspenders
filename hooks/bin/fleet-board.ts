@@ -576,6 +576,32 @@ function decisionsPayload(history: boolean): unknown {
 	return { ts: Date.now(), count: open.length, byProject, decisions: shown };
 }
 
+// W28 routing telemetry: today's llm.call events are the routing log;
+// per-model token sums vs optional llm.budget.<model> facts are the budgets.
+function llm(): unknown {
+	const dayStart = new Date();
+	dayStart.setHours(0, 0, 0, 0);
+	const calls = (
+		db.query("SELECT id, ts, payload FROM events WHERE kind = 'llm.call' AND ts >= ? ORDER BY id DESC LIMIT 20").all(dayStart.getTime()) as {
+			id: number;
+			ts: number;
+			payload: string;
+		}[]
+	).map((c) => ({ id: c.id, ts: c.ts, ...JSON.parse(c.payload) }));
+	const rows = db
+		.query(
+			"SELECT json_extract(payload,'$.model') AS model, COUNT(*) AS calls, SUM(json_extract(payload,'$.tt')) AS tokens FROM events WHERE kind = 'llm.call' AND ts >= ? GROUP BY model ORDER BY tokens DESC",
+		)
+		.all(dayStart.getTime()) as { model: string | null; calls: number; tokens: number | null }[];
+	const budgets = new Map(
+		(db.query("SELECT key, value FROM facts WHERE key LIKE 'llm.budget.%'").all() as { key: string; value: string }[]).map((r) => [r.key.slice("llm.budget.".length), Number(r.value)]),
+	);
+	return {
+		calls,
+		usage: rows.map((r) => ({ model: r.model ?? "(unknown)", calls: r.calls, tokens: r.tokens ?? 0, budget: budgets.get(r.model ?? "") ?? null })),
+	};
+}
+
 function payload(): unknown {
 	syncDecisions();
 	const ss = sessions();
@@ -607,6 +633,7 @@ function payload(): unknown {
 		decisionsTs: Date.now(),
 		zombies,
 		consults,
+		llm: llm(),
 	};
 }
 

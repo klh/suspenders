@@ -523,3 +523,34 @@ describe("demo mode (--demo)", () => {
 	});
 });
 
+// W28 — llm.call telemetry: advise.ts emits an llm.call event per LLM
+// round-trip (usage zeros if the server omits usage; failures carry error);
+// the board aggregates today's calls into per-model token sums, joined
+// against optional llm.budget.<model> facts.
+describe("W28 llm telemetry", () => {
+	test("routing log + per-model budgets reach /api/data", async () => {
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		const t = Date.now();
+		// insert oldest-first: the routing log orders by row id (insert order),
+		// not ts — backdated inserts must respect that or "newest" flips
+		db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)").run(t - 2000, JSON.stringify({ for: "D3", model: "test-b", host: "127.0.0.3:9", pt: 0, ct: 0, tt: 0, ms: 50, error: "LLM 500" }));
+		db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)").run(t - 1000, JSON.stringify({ for: "D2", model: "test-a", host: "127.0.0.2:9", pt: 50, ct: 10, tt: 60, ms: 400 }));
+		db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)").run(t, JSON.stringify({ for: "D1", model: "test-a", host: "127.0.0.1:9", pt: 100, ct: 20, tt: 120, ms: 900 }));
+		db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES ('llm.budget.test-a', '500', 'owner', 1, ?)").run(t);
+		db.close();
+		const d = await getData();
+		const u = d.llm.usage.find((x: any) => x.model === "test-a");
+		expect(u.tokens).toBe(180); // 120 + 60 — budget-joined
+		expect(u.budget).toBe(500);
+		expect(u.calls).toBe(2);
+		const b = d.llm.usage.find((x: any) => x.model === "test-b");
+		expect(b.tokens).toBe(0);
+		expect(b.budget).toBeNull();
+		expect(d.llm.calls.length).toBeGreaterThanOrEqual(3);
+		const last = d.llm.calls[0]; // newest first
+		expect(last.model).toBe("test-a");
+		expect(last.tt).toBe(120);
+		expect(d.llm.calls.some((c: any) => c.error === "LLM 500")).toBe(true); // failures are in the log
+	});
+});
+

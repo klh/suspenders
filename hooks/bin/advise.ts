@@ -88,6 +88,7 @@ RISK: <the main risk of your recommendation, one line>
 Be decisive. Never recommend "gather more information" unless the context is truly undecidable. Never invent facts.`;
 
 let text = "";
+const t0 = Date.now();
 try {
 	const r = await fetch(URL_, {
 		method: "POST",
@@ -104,10 +105,24 @@ try {
 		signal: AbortSignal.timeout(120_000),
 	});
 	if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text()).slice(0, 200)}`);
-	const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
+	const j = (await r.json()) as any;
 	text = j.choices?.[0]?.message?.content ?? "";
+	// W28 routing telemetry: every advise round-trip becomes an llm.call
+	// event — the board's LLM telemetry block sums today's tokens per model
+	// against optional llm.budget.<model> facts. Usage may be absent (some
+	// local servers omit it) — record zeros rather than skipping, so the
+	// routing log still shows the call. On failure: still logged, with error.
+	db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)").run(
+		Date.now(),
+		JSON.stringify({ for: id, model: MODEL, host: new URL(URL_).host, pt: j.usage?.prompt_tokens ?? 0, ct: j.usage?.completion_tokens ?? 0, tt: j.usage?.total_tokens ?? (j.usage?.prompt_tokens ?? 0) + (j.usage?.completion_tokens ?? 0), ms: Date.now() - t0 }),
+	);
 } catch (e) {
 	const msg = e instanceof Error ? e.message : String(e);
+	// telemetry even on failure — the routing log shows failed calls too (W28)
+	db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)").run(
+		Date.now(),
+		JSON.stringify({ for: id, model: MODEL, host: new URL(URL_).host, pt: 0, ct: 0, tt: 0, ms: Date.now() - t0, error: msg.slice(0, 200) }),
+	);
 	db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'advise', 1, ?)").run(`${fk}.error`, msg, Date.now());
 	console.error(`advise #${id} failed: ${msg}`);
 	process.exit(2);
