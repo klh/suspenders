@@ -136,6 +136,16 @@ coord resume <sid> --onto <new-head> --note "applyPreview: (x) → (x, ctx); Med
 - Lanes report `{base SHA, commit SHA, changed paths, test status}` — the coordinator operates on immutable commits, never working dirs
 - `claim doctor` after fleet drains
 
+### Audit trail: `coord diff` (deltas read model)
+- Row tables mutate in place; the `deltas` trigger log (schema v5) records every sessions/claims/locks/facts/work_items change as `(seq, ts, tbl, op, pk, before, after)` — "what changed between two points" becomes a query, not archaeology
+- `coord diff --since <seq|event-id>` — terse per-row lines (table · pk · op glyph · changed fields old→new); `--since e42` resolves a bus event to the nearest strictly-later delta seq; `--table work_items` filters; `--last N`; `--json` for machines
+- Use it for post-run audits ("what did that run touch?"), incident forensics, and coordinator after-action reports
+
+### Workgraph mirror (fresh-clone offline queue)
+- Every successful mutating `work` command atomically re-exports the project graph to `<repo>/.workgraph.jsonl` (beads-style): the queue is committed, git history is the audit trail, and a fresh clone sees the queue with zero server access
+- Read verbs (`list/ready/mine/owned/show/orphaned`) fall back to the committed mirror when the DB cannot serve the project — fresh machine, unreachable partition. The DB wins whenever it holds the project's rows; reads never write
+- The mirror lives at the repo root (PROJECT is the git common dir, shared by every worktree); tolerant parse — an absent, truncated, or hand-mangled mirror is never a hard failure
+
 ### Exit checklist (before EXIT)
 - Every actionable item exists as a Work Graph item (READY/BLOCKED) — never only in prose/Markdown; every WIP patch or worktree is referenced by an item
 - Claims released; state preserved in events/capsules; terse EXIT only: head, tree, work, wip, claims

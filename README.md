@@ -43,8 +43,8 @@ Every CLI is also usable from scripts — the board's answer box and the monitor
 |---|---|
 | **Control plane** (`lib/govdb.ts`) | SQLite/WAL — sessions, claims, locks, events, facts, cursors, work graph; one database serves every repo, partitioned per project |
 | **Hook gates** (`gate.ts`) | One entrypoint: secrets gate (gitleaks + inline detection, `cd`-aware), edit-enforce, file-lease governor, mutation-size cap (denies >40-line raw mutations on existing files; `SUSPENDERS_MAX_MUTATION`), operational-ledger marker guard (no new TODO/IN-FLIGHT/BLOCKED/NEXT markers in ledgers), config guard, claim-done stop gate — the Edit/Write gates chain in one process |
-| **Work graph** (`bin/work.ts`) | `add / split / take / done / ready / mine / orphaned / reclaim / release / migrate-ledger` — compare-and-swap claims, dependency gating, capability requirements; splits beyond 2 children must reference a registered plan item; `migrate-ledger` ingests a Markdown ledger's unresolved items into the graph (deduped, idempotent, tombstones the ledger) |
-| **Coordination bus** (`bin/coord.ts`) | bootstrap, inbox, emit, wait, pause/resume with continuation capsules, consults, facts, broadcasts, `lease-release`, `metrics` (per-item wall vs agent time, lane dwell, friction — daily snapshot facts for trend diffing) |
+| **Work graph** (`bin/work.ts`) | `add / split / take / done / ready / mine / orphaned / reclaim / release / migrate-ledger` — compare-and-swap claims, dependency gating, capability requirements; splits beyond 2 children must reference a registered plan item; every mutation re-exports the project graph to `.workgraph.jsonl` so the queue is committed and fresh clones see it offline (reads fall back to it when the DB cannot serve the project); `migrate-ledger` ingests a Markdown ledger's unresolved items into the graph (deduped, idempotent, tombstones the ledger) |
+| **Coordination bus** (`bin/coord.ts`) | bootstrap, inbox, emit, wait, pause/resume with continuation capsules, consults, facts, broadcasts, `lease-release`, `metrics` (per-item wall vs agent time, lane dwell, friction — daily snapshot facts for trend diffing), `diff` (deltas read model — see the audit-trail section of the protocol doc) |
 | **Consult knowledge base** (`coord kb`) | `consult-reply` harvests every answered consult as a (problem, solution) pair (FTS5); a new consult resolves against the store **before** routing to a live expert — the asker gets the stored solution instantly, with provenance and an `--no-kb` escape hatch. `kb stats\|search\|list` |
 | **Fleet board** (`bin/fleet-board.ts`) | Live dashboard — Decisions / Tasks / Activity / Governor / Setup views, project filter, task drawer, decision history; `--demo` seeds example data. Write endpoints for answering decisions, dismissing, and requesting recommendations (`/api/advise` → `bin/advise.ts`) |
 | **Advice worker** (`bin/advise.ts`) | An LLM (any OpenAI-compatible API; model autodiscovered from `/v1/models`) reads the decision with control-plane context and writes a recommendation the human can accept, edit, or ignore |
@@ -130,7 +130,7 @@ A worked session — bootstrap, register work, capability-gated dispatch, consul
 
 ## Docs
 
-- [Coordination protocol](docs/coordination-protocol.md) — a copy-paste CLAUDE.md section for a multi-agent repo: reporting discipline, integration steps, pause/resume, capability dispatch, zombie policy, usage windows.
+- [Coordination protocol](docs/coordination-protocol.md) — a copy-paste CLAUDE.md section for a multi-agent repo: reporting discipline, integration steps, pause/resume, capability dispatch, zombie policy, usage windows, audit trail (`coord diff`), workgraph mirror.
 
 ## Status
 
