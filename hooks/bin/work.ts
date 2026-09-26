@@ -22,7 +22,11 @@
 //   work block <id> --on <id2>           / work unblock <id> --on <id2>   (cycle-checked)
 //   work supersede <id> --by <new-id>
 //   work orphaned                        / work reclaim <id>
-import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
+//
+// workgraph mirror (beads-inspired): mutations re-export <repo>/.workgraph.jsonl
+// (atomic, best-effort); reads fall back to the committed mirror when
+// governor.db cannot serve the project — fresh clone / DB unreachable.
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { openGovernorDb, projectIdentity, CAPABILITIES } from "../lib/govdb.ts";
 
@@ -31,7 +35,6 @@ const die = (m: string): never => {
 	process.exit(2);
 };
 
-const db: Database = openGovernorDb();
 const [cmd, ...rest] = process.argv.slice(2);
 const arg = (name: string): string | null => {
 	const i = rest.indexOf(name);
@@ -109,6 +112,35 @@ function parseArgs(spec: Spec): { pos: string[]; flag: (name: string) => string 
 
 const { pos, flag } = parseArgs(spec);
 
+// LAZY DB open with per-command routing (was a module-top openGovernorDb()):
+// mutators need the real DB — die with a hint when it is unreachable; readers
+// may fall back to the committed .workgraph.jsonl mirror. An empty project
+// partition counts as unreachable for readers: items are never deleted, so
+// zero rows means this machine's DB has never seen this project's graph
+// (fresh clone / worktree on a new machine — the beads use case).
+let handle: Database | undefined;
+function db(): Database {
+	if (handle) return handle;
+	const isRead = READ_CMDS.has(cmd);
+	let d: Database;
+	try {
+		d = openGovernorDb();
+	} catch (e) {
+		if (isRead) {
+			const m = mirrorOrNull();
+			if (m) return (handle = m);
+		}
+		die(`governor.db unreachable (${e instanceof Error ? e.message : String(e)}) — mutations need the DB; the committed ${MIRROR_NAME} mirror keeps reads alive`);
+	}
+	if (isRead) {
+		const n = (d.query("SELECT COUNT(*) AS n FROM work_items WHERE project = ?").get(PROJECT) as { n: number }).n;
+		if (n === 0) {
+			const m = mirrorOrNull();
+			if (m) return (handle = m);
+		}
+	}
+	return (handle = d);
+}
 
 // project partitioning: shared identity from govdb (repo's common git dir) —
 // sessions in different projects never see or steal each other's work
@@ -125,6 +157,20 @@ const green = paint("32");
 const amber = paint("33");
 const red = paint("31");
 
+// ---- workgraph mirror (beads-inspired, W32) ------------------------------
+// beads commits its issue graph as JSONL so a fresh clone sees the queue with
+// zero server access and git history becomes the audit trail. governor.db is
+// centralized, so the work CLI mirrors it: every SUCCESSFUL mutating command
+// atomically re-exports this project's graph to <repo>/.workgraph.jsonl, and
+// read verbs fall back to that file when the DB cannot serve the project —
+// unreachable, or a fresh machine whose empty partition has never seen this
+// graph (items are never deleted, so an empty partition means "never seen").
+// The DB always wins when it holds the project's rows; reads never write.
+const MIRROR_NAME = ".workgraph.jsonl";
+const MIRROR_MAX_AGE = 15 * 60_000;
+const READ_CMDS = new Set(["list", "ready", "mine", "owned", "show", "orphaned"]);
+const MUTATING_CMDS = new Set(["add", "take", "release", "start", "done", "fail", "supersede", "block", "unblock", "split", "reclaim", "migrate-ledger"]);
+
 const GLYPH: Record<string, [string, (s: string) => string]> = {
 	READY: ["·", cyan],
 	CLAIMED: ["◐", cyan],
@@ -140,8 +186,66 @@ const GLYPH: Record<string, [string, (s: string) => string]> = {
 
 type Item = Record<string, string | number | null>;
 
+// PROJECT is the git COMMON dir (<repo>/.git for a normal checkout — shared by
+// every worktree), so the mirror belongs beside it in the repo working tree.
+const mirrorPath = (): string => {
+	const base = PROJECT.split("/").pop() ?? "";
+	return `${base === ".git" ? PROJECT.slice(0, -"/.git".length) : PROJECT}/${MIRROR_NAME}`;
+};
+
+// tolerant parse: an absent, truncated, or hand-mangled mirror is never a hard
+// failure — reads then just have nothing to fall back to
+function readMirror(): { items: Item[]; meta: Record<string, unknown> } | null {
+	try {
+		const lines = readFileSync(mirrorPath(), "utf8").split("\n").filter((l) => l.trim());
+		const meta = JSON.parse(lines[lines.length - 1] ?? "null");
+		if (meta?.type !== "meta") return null;
+		if (meta.project && meta.project !== PROJECT) return null; // someone else's mirror
+		return { meta, items: lines.slice(0, -1).map((l) => JSON.parse(l) as Item) };
+	} catch {
+		return null;
+	}
+}
+
+// rebuild the project graph in an in-memory SQLite shaped like the real one, so
+// read handlers run their normal SQL UNCHANGED against the mirror copy
+function mirrorDb(): Database | null {
+	const m = readMirror();
+	if (!m) return null;
+	const d = new Database(":memory:");
+	d.run("CREATE TABLE work_items (project TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT, state TEXT NOT NULL DEFAULT 'READY', priority INTEGER NOT NULL DEFAULT 0, owner_sid TEXT, created_by TEXT, scope TEXT, why_parallel TEXT, result_sha TEXT, required INTEGER NOT NULL DEFAULT 1, requires TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (project, id))");
+	d.run("CREATE TABLE work_deps (project TEXT NOT NULL, work_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (project, work_id, depends_on))");
+	const defaults: Partial<Record<string, string | number>> = { state: "READY", priority: 0, required: 1, created_at: 0, updated_at: 0 };
+	const cols = ["id", "parent_id", "title", "description", "state", "priority", "owner_sid", "created_by", "scope", "why_parallel", "result_sha", "required", "requires", "created_at", "updated_at"];
+	const ins = d.query(`INSERT INTO work_items (project, ${cols.join(", ")}) VALUES (?, ${cols.map(() => "?").join(", ")})`);
+	for (const it of m.items) {
+		try {
+			ins.run(PROJECT, ...cols.map((c) => it[c] ?? defaults[c] ?? null));
+		} catch {}
+	}
+	const insDep = d.query("INSERT INTO work_deps (project, work_id, depends_on) VALUES (?, ?, ?)");
+	for (const it of m.items) for (const dep of (it.deps as string[] | undefined) ?? []) {
+		try {
+			insDep.run(PROJECT, it.id, dep);
+		} catch {}
+	}
+	console.error(dim(`serving from ${MIRROR_NAME} mirror (governor.db unreachable) — read-only`));
+	const age = Date.now() - Number(m.meta.exported_at ?? 0);
+	if (age > MIRROR_MAX_AGE) console.error(dim(`mirror may be stale, exported ${Math.floor(age / 60_000)}m ago`));
+	return d;
+}
+
+// a broken mirror degrades to "no fallback" — never a crash on the read path
+function mirrorOrNull(): Database | null {
+	try {
+		return mirrorDb();
+	} catch {
+		return null;
+	}
+}
+
 function get(id: string): Item {
-	const r = db.query("SELECT * FROM work_items WHERE project = ? AND id = ?").get(PROJECT, id) as Item | undefined;
+	const r = db().query("SELECT * FROM work_items WHERE project = ? AND id = ?").get(PROJECT, id) as Item | undefined;
 	if (!r) die(`no such work item in this project: ${id}`);
 	return r;
 }
@@ -158,18 +262,17 @@ function setState(id: string, state: string, owner?: string | null, sha?: string
 		sets.push("result_sha = ?");
 		vals.push(sha);
 	}
-	db.query(`UPDATE work_items SET ${sets.join(", ")} WHERE project = ? AND id = ?`).run(...vals, PROJECT, id);
+	db().query(`UPDATE work_items SET ${sets.join(", ")} WHERE project = ? AND id = ?`).run(...vals, PROJECT, id);
 }
 
 function emit(kind: string, id: string, extra: Record<string, string> = {}, source = "work"): void {
-	db.query(
+	db().query(
 		"INSERT INTO events (ts, source, kind, scope, payload, target) SELECT ?, ?, ?, scope, ?, NULL FROM work_items WHERE project = ? AND id = ?",
 	).run(Date.now(), source, kind, JSON.stringify({ work: id, project: PROJECT, ...extra }), PROJECT, id);
 }
 
 function deps(id: string): { depends_on: string; state: string | null }[] {
-	return db
-		.query("SELECT d.depends_on, w.state FROM work_deps d LEFT JOIN work_items w ON w.id = d.depends_on AND w.project = d.project WHERE d.project = ? AND d.work_id = ?")
+	return db().query("SELECT d.depends_on, w.state FROM work_deps d LEFT JOIN work_items w ON w.id = d.depends_on AND w.project = d.project WHERE d.project = ? AND d.work_id = ?")
 		.all(PROJECT, id) as { depends_on: string; state: string | null }[];
 }
 
@@ -195,8 +298,7 @@ function reaches(id: string, target: string, seen = new Set<string>()): boolean 
 function rollUp(id: string): void {
 	const it = get(id);
 	if (it.state !== "SHATTERED") return;
-	const unsatisfied = db
-		.query("SELECT id, state FROM work_items WHERE project = ? AND parent_id = ? AND (required IS NULL OR required = 1) AND state NOT IN ('DONE','SUPERSEDED')")
+	const unsatisfied = db().query("SELECT id, state FROM work_items WHERE project = ? AND parent_id = ? AND (required IS NULL OR required = 1) AND state NOT IN ('DONE','SUPERSEDED')")
 		.all(PROJECT, id) as { id: string; state: string }[];
 	if (unsatisfied.length === 0) {
 		setState(id, "DONE");
@@ -208,7 +310,7 @@ function rollUp(id: string): void {
 
 function nextChildId(parent: string): string {
 	// max numeric suffix, not COUNT — a deleted child must not cause a collide
-	const n = (db.query("SELECT MAX(CAST(SUBSTR(id, length(?) + 2) AS INTEGER)) AS m FROM work_items WHERE project = ? AND parent_id = ?").get(parent, PROJECT, parent) as { m: number | null }).m;
+	const n = (db().query("SELECT MAX(CAST(SUBSTR(id, length(?) + 2) AS INTEGER)) AS m FROM work_items WHERE project = ? AND parent_id = ?").get(parent, PROJECT, parent) as { m: number | null }).m;
 	return `${parent}.${(n ?? 0) + 1}`;
 }
 
@@ -216,17 +318,17 @@ function nextRootId(): string {
 	// atomic per-project allocation: one upsert statement is the allocator, so
 	// concurrent `work add` races each get a distinct id instead of one losing
 	// to a UNIQUE error. Seeds from existing max, then increments.
-	const tx = db.transaction(() => {
-		db.query(
+	const tx = db().transaction(() => {
+		db().query(
 			"INSERT INTO work_sequences (project, next_id) SELECT ?, COALESCE(MAX(CAST(SUBSTR(id, 2) AS INTEGER)), 0) + 1 FROM work_items WHERE project = ? AND id GLOB 'W[0-9]*' AND id NOT LIKE '%.%' ON CONFLICT(project) DO UPDATE SET next_id = next_id + 1",
 		).run(PROJECT, PROJECT);
-		return (db.query("SELECT next_id FROM work_sequences WHERE project = ?").get(PROJECT) as { next_id: number }).next_id;
+		return (db().query("SELECT next_id FROM work_sequences WHERE project = ?").get(PROJECT) as { next_id: number }).next_id;
 	});
 	return `W${tx()}`;
 }
 
 function insertItem(id: string, parentId: string | null, title: string, scope: string | null, priority: number, by: string, why: string | null, requires: string | null = null): void {
-	db.query(
+	db().query(
 		"INSERT INTO work_items (id, parent_id, title, state, priority, created_by, scope, why_parallel, project, required, requires, created_at, updated_at) VALUES (?, ?, ?, 'READY', ?, ?, ?, ?, ?, 1, ?, ?, ?)",
 	).run(id, parentId, title, priority, by, scope, why, PROJECT, requires, Date.now(), Date.now());
 }
@@ -235,12 +337,12 @@ function insertItem(id: string, parentId: string | null, title: string, scope: s
 // one ownership system, not two that drift
 function autoClaim(sid: string, scope: string | null): void {
 	if (!scope) return;
-	db.query("INSERT OR REPLACE INTO claims (sid, scope, intent, hot, ts, tp) VALUES (?, ?, 'work-graph', 0, ?, ?)").run(sid, scope, Date.now(), liveTranscript(sid) ?? "");
+	db().query("INSERT OR REPLACE INTO claims (sid, scope, intent, hot, ts, tp) VALUES (?, ?, 'work-graph', 0, ?, ?)").run(sid, scope, Date.now(), liveTranscript(sid) ?? "");
 }
 function releaseClaim(sid: string, scope: string | null, itemId?: string): void {
 	// release the autoClaim (sid,scope) AND legacy/intent-scoped claims that
 	// reference this item — scopeless items otherwise leak claims on DONE
-	db.query("DELETE FROM claims WHERE sid = ? AND (scope = ? OR (? IS NOT NULL AND intent LIKE ? || ' %'))").run(
+	db().query("DELETE FROM claims WHERE sid = ? AND (scope = ? OR (? IS NOT NULL AND intent LIKE ? || ' %'))").run(
 		sid,
 		scope,
 		itemId ?? null,
@@ -273,10 +375,36 @@ function liveTranscript(sid: string): string | null {
 // (e.g. 'visual-c') must not become the owner of record — expand a unique
 // session-sid prefix to the full sid; unknown sids pass through untouched
 function resolveSid(as: string): string {
-	const sm = db.query("SELECT sid FROM sessions WHERE sid LIKE ? || '%'").all(as) as { sid: string }[];
+	const sm = db().query("SELECT sid FROM sessions WHERE sid LIKE ? || '%'").all(as) as { sid: string }[];
 	if (sm.length === 1) return sm[0].sid;
 	if (sm.length > 1) die(`ambiguous sid prefix: ${as} — use the full sid`);
 	return as;
+}
+
+// mirror export: FULL truth — every item of this project, one JSON object per
+// line (plus a deps array per item so `ready` filtering survives the round
+// trip), closed by a meta line {type, project, exported_at, count,
+// max_updated_at}. Atomic (temp file + rename) and best-effort: a failed
+// export warns dim on stderr and leaves the command's exit unchanged — the
+// mirror is never allowed to break the command that fed it.
+function exportMirror(): void {
+	try {
+		const d = db();
+		const items = d.query("SELECT * FROM work_items WHERE project = ? ORDER BY id").all(PROJECT) as Item[];
+		const edges = new Map<string, string[]>();
+		for (const e of d.query("SELECT work_id, depends_on FROM work_deps WHERE project = ?").all(PROJECT) as { work_id: string; depends_on: string }[]) {
+			edges.set(e.work_id, [...(edges.get(e.work_id) ?? []), e.depends_on]);
+		}
+		const lines = items.map((r) => JSON.stringify({ ...r, project: undefined, deps: edges.get(r.id as string) ?? [] }));
+		let maxUpdated = 0;
+		for (const r of items) maxUpdated = Math.max(maxUpdated, Number(r.updated_at) || 0);
+		lines.push(JSON.stringify({ type: "meta", project: PROJECT, exported_at: Date.now(), count: items.length, max_updated_at: maxUpdated }));
+		const tmp = `${mirrorPath()}.tmp-${process.pid}`;
+		writeFileSync(tmp, lines.join("\n") + "\n");
+		renameSync(tmp, mirrorPath()); // atomic — a concurrent reader sees old or new, never half
+	} catch (e) {
+		console.error(dim(`work: mirror export skipped (${e instanceof Error ? e.message : String(e)})`));
+	}
 }
 
 if (cmd === "add") {
@@ -300,20 +428,20 @@ if (cmd === "add") {
 	const mode = cmd === "ready" ? "ready" : rest[0] ?? "open";
 	let rows: Item[];
 	if (mode === "ready") {
-		rows = (db.query("SELECT * FROM work_items WHERE project = ? AND state = 'READY' ORDER BY priority DESC, id").all(PROJECT) as Item[]).filter((r) => depsMet(r.id as string));
+		rows = (db().query("SELECT * FROM work_items WHERE project = ? AND state = 'READY' ORDER BY priority DESC, id").all(PROJECT) as Item[]).filter((r) => depsMet(r.id as string));
 	} else if (mode === "all") {
-		rows = db.query("SELECT * FROM work_items WHERE project = ? ORDER BY id").all(PROJECT) as Item[];
+		rows = db().query("SELECT * FROM work_items WHERE project = ? ORDER BY id").all(PROJECT) as Item[];
 	} else {
-		rows = db.query("SELECT * FROM work_items WHERE project = ? AND state NOT IN ('DONE','SUPERSEDED') ORDER BY id").all(PROJECT) as Item[];
+		rows = db().query("SELECT * FROM work_items WHERE project = ? AND state NOT IN ('DONE','SUPERSEDED') ORDER BY id").all(PROJECT) as Item[];
 	}
 	console.log(rows.map(renderRow).join("\n") || dim("(none)"));
 } else if (cmd === "mine") {
 	const as = flag("--as");
 	if (!as) die("usage: mine --as <sid>");
-	const rows = db.query("SELECT * FROM work_items WHERE project = ? AND owner_sid = ? AND state NOT IN ('DONE','SUPERSEDED') ORDER BY id").all(PROJECT, as) as Item[];
+	const rows = db().query("SELECT * FROM work_items WHERE project = ? AND owner_sid = ? AND state NOT IN ('DONE','SUPERSEDED') ORDER BY id").all(PROJECT, as) as Item[];
 	console.log(rows.length ? rows.map(renderRow).join("\n") : dim("(nothing owned)"));
 } else if (cmd === "owned") {
-	const rows = db.query("SELECT * FROM work_items WHERE project = ? AND owner_sid IS NOT NULL AND state NOT IN ('DONE','SUPERSEDED') ORDER BY owner_sid, id").all(PROJECT) as Item[];
+	const rows = db().query("SELECT * FROM work_items WHERE project = ? AND owner_sid IS NOT NULL AND state NOT IN ('DONE','SUPERSEDED') ORDER BY owner_sid, id").all(PROJECT) as Item[];
 	console.log(rows.map(renderRow).join("\n") || dim("(nothing owned)"));
 } else if (cmd === "show") {
 	const id = pos[0];
@@ -323,7 +451,7 @@ if (cmd === "add") {
 	for (const k of ["scope", "owner_sid", "result_sha", "why_parallel", "requires", "description"] as const) {
 		if (it[k]) console.log(`  ${dim(`${k}:`)} ${it[k]}`);
 	}
-	const kids = db.query("SELECT * FROM work_items WHERE project = ? AND parent_id = ? ORDER BY id").all(PROJECT, id) as Item[];
+	const kids = db().query("SELECT * FROM work_items WHERE project = ? AND parent_id = ? ORDER BY id").all(PROJECT, id) as Item[];
 	if (kids.length) {
 		console.log(dim("  children:"));
 		console.log(kids.map(renderRow).join("\n"));
@@ -340,7 +468,7 @@ if (cmd === "add") {
 	const it = get(id);
 	// capability-aware dispatch (v2): requires ⊆ capabilities or refuse —
 	// kills the W28/W29-class NO-SHELL dead spawn at the CLI boundary
-	const caps = ((db.query("SELECT capabilities FROM sessions WHERE sid = ?").get(as) as { capabilities: string | null } | null)?.capabilities ?? "")
+	const caps = ((db().query("SELECT capabilities FROM sessions WHERE sid = ?").get(as) as { capabilities: string | null } | null)?.capabilities ?? "")
 		.split(",")
 		.filter(Boolean);
 	const missing = ((it.requires as string | null) ?? "").split(",").filter(Boolean).filter((r) => !caps.includes(r));
@@ -350,7 +478,7 @@ if (cmd === "add") {
 		);
 	if (!depsMet(id)) die(`${id} has unmet dependencies: ${deps(id).filter((d) => d.state !== "DONE").map((d) => d.depends_on).join(", ")}`);
 	// compare-and-set: two lanes racing for the last READY item → exactly one wins
-	const r = db.query("UPDATE work_items SET state = 'CLAIMED', owner_sid = ?, updated_at = ? WHERE project = ? AND id = ? AND state = 'READY'").run(as, Date.now(), PROJECT, id);
+	const r = db().query("UPDATE work_items SET state = 'CLAIMED', owner_sid = ?, updated_at = ? WHERE project = ? AND id = ? AND state = 'READY'").run(as, Date.now(), PROJECT, id);
 	if (r.changes === 0) die(`${id} was taken (or is not READY) — race lost, pick another from \`work ready\``);
 	autoClaim(as, it.scope as string | null);
 	emit("work.claimed", id, { by: as });
@@ -391,7 +519,7 @@ if (cmd === "add") {
 	// owner of record
 	if (!["CLAIMED", "RUNNING"].includes(it.state as string)) die(`${id} is ${it.state} — only CLAIMED/RUNNING work can be marked done`);
 	if (as && it.owner_sid !== resolveSid(String(as))) die(`${id} is owned by ${String(it.owner_sid ?? "?").slice(0, 8)} — ${String(as).slice(0, 8)} cannot complete it`);
-	const tx = db.transaction(() => {
+	const tx = db().transaction(() => {
 		setState(id, "DONE", null, sha);
 		emit("work.done", id, { sha: sha ?? "" });
 		releaseClaim((it.owner_sid as string) ?? "", it.scope as string | null, it.id as string);
@@ -424,13 +552,13 @@ if (cmd === "add") {
 	if (!id || !on) die("usage: block <id> --on <other-id>");
 	get(on ?? "");
 	if (reaches(on, id)) die(`dependency cycle: ${on} already (transitively) depends on ${id}`);
-	db.query("INSERT OR REPLACE INTO work_deps (project, work_id, depends_on) VALUES (?, ?, ?)").run(PROJECT, id, on);
+	db().query("INSERT OR REPLACE INTO work_deps (project, work_id, depends_on) VALUES (?, ?, ?)").run(PROJECT, id, on);
 	console.log(`${red("⚠")} ${id} blocked on ${on}`);
 } else if (cmd === "unblock") {
 	const id = pos[0];
 	const on = flag("--on");
 	if (!id || !on) die("usage: unblock <id> --on <id2>");
-	db.query("DELETE FROM work_deps WHERE project = ? AND work_id = ? AND depends_on = ?").run(PROJECT, id, on);
+	db().query("DELETE FROM work_deps WHERE project = ? AND work_id = ? AND depends_on = ?").run(PROJECT, id, on);
 	console.log(`${cyan("·")} ${id} unblocked from ${on}`);
 } else if (cmd === "split") {
 	// atomic shatter: parent → SHATTERED, children → READY; the splitter may
@@ -449,10 +577,10 @@ if (cmd === "add") {
 	const plan = flag("--plan");
 	if (titles.length > 2) {
 		if (!plan) die(`split fans out to ${titles.length} children — pass --plan <itemId> (the registered decomposition plan; 1-2 child splits stay free)`);
-		if (!db.query("SELECT 1 FROM work_items WHERE project = ? AND id = ?").get(PROJECT, plan))
+		if (!db().query("SELECT 1 FROM work_items WHERE project = ? AND id = ?").get(PROJECT, plan))
 			die(`--plan ${plan} does not exist in this project — register the plan with \`work add\` first`);
 	}
-	const tx = db.transaction(() => {
+	const tx = db().transaction(() => {
 		setState(id, "SHATTERED");
 		let n = 0;
 		for (const t of titles) {
@@ -465,13 +593,13 @@ if (cmd === "add") {
 	});
 	tx();
 	emit("work.shattered", id, { children: String(titles.length), reason });
-	const kids = db.query("SELECT * FROM work_items WHERE project = ? AND parent_id = ? ORDER BY id").all(PROJECT, id) as Item[];
+	const kids = db().query("SELECT * FROM work_items WHERE project = ? AND parent_id = ? ORDER BY id").all(PROJECT, id) as Item[];
 	console.log(`${cyan("⊞")} ${cyan(id)} SHATTERED → ${titles.length} children${keep ? `, child ${keep} kept by ${dim(String(it.owner_sid ?? "").slice(0, 8))}` : ""}`);
 	console.log(kids.map(renderRow).join("\n"));
 } else if (cmd === "orphaned") {
 	// CLAIMED/RUNNING items whose owner transcript is dead — inspect capsules
 	// before reclaiming (do NOT silently return work with uncommitted state)
-	const rows = db.query("SELECT * FROM work_items WHERE project = ? AND state IN ('CLAIMED','RUNNING') ORDER BY id").all(PROJECT) as Item[];
+	const rows = db().query("SELECT * FROM work_items WHERE project = ? AND state IN ('CLAIMED','RUNNING') ORDER BY id").all(PROJECT) as Item[];
 	const out = rows.filter((r) => !liveTranscript(String(r.owner_sid)));
 	console.log(out.length ? out.map(renderRow).join("\n") : dim("(no orphans)"));
 } else if (cmd === "reclaim") {
@@ -516,7 +644,7 @@ if (cmd === "add") {
 		console.log(dim(`(nothing to migrate in ${path})`));
 	} else {
 		const byTitle = new Map(
-			(db.query("SELECT id, title FROM work_items WHERE project = ?").all(PROJECT) as Item[]).map((r) => [String(r.title), String(r.id)]),
+			(db().query("SELECT id, title FROM work_items WHERE project = ?").all(PROJECT) as Item[]).map((r) => [String(r.title), String(r.id)]),
 		);
 		const seen = new Set<string>();
 		const rows: { title: string; id: string; fresh: boolean }[] = [];
@@ -528,7 +656,7 @@ if (cmd === "add") {
 		}
 		const fresh = rows.filter((r) => r.fresh);
 		for (const r of fresh) r.id = nextRootId(); // allocate ids before the tx — no nested transactions
-		db.transaction(() => {
+		db().transaction(() => {
 			for (const r of fresh) {
 				insertItem(r.id, null, r.title, null, 0, "migrate-ledger", null);
 				emit("work.added", r.id, { scope: "" });
@@ -565,3 +693,7 @@ if (cmd === "add") {
 } else {
 	die("unknown command — try add | list | ready | mine | owned | show | take | release | start | done | fail | supersede | split | block | unblock | orphaned | reclaim | migrate-ledger");
 }
+
+// reached ONLY after a successful mutating command — every failure path die()s
+// before this line, so a mirror refresh here is exactly "the graph changed".
+if (MUTATING_CMDS.has(cmd)) exportMirror();

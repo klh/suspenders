@@ -4,4 +4,6 @@ node_modules/
 .tmp-lease-repo-*/
 .tmp-kb-repo-*/
 .tmp-work-cli-repo*/
+.tmp-work-mirror-repo*/
+.gates-test-*/
 .gates-test-*/
