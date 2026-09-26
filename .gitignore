@@ -5,5 +5,5 @@ node_modules/
 .tmp-kb-repo-*/
 .tmp-work-cli-repo*/
 .tmp-work-mirror-repo*/
-.gates-test-*/
+.tmp-secrets-repo-*/
 .gates-test-*/

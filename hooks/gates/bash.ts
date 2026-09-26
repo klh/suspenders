@@ -59,6 +59,25 @@ function verb(w: string[]): string {
   return w[i] ?? "";
 }
 
+// the git SUBCOMMAND is the first non-flag token after "git" (skipping -C and
+// its value). "push"/"commit" as any OTHER token must not trigger the scans:
+// `git stash push` is a local op — the any-token check denied it in any repo
+// with history secrets (it is not a remote write; W40 incident 2026-09-26).
+function gitSub(w: string[]): string {
+  const gi = w.indexOf("git");
+  if (gi === -1) return "";
+  for (let i = gi + 1; i < w.length; i++) {
+    const t = w[i];
+    if (t === "-C") {
+      i++;
+      continue;
+    }
+    if (t.startsWith("-")) continue;
+    return t;
+  }
+  return "";
+}
+
 const throwaway = (p: string) =>
   p.startsWith("/tmp/") || p.startsWith("/private/tmp/") || p.startsWith("/dev/") || p.includes("$TMPDIR");
 
@@ -107,9 +126,9 @@ export function bashGate(hook: HookInput): never {
       const gd = w.find((a) => a.startsWith("--git-dir="));
       if (gd) repoDir = gd.slice("--git-dir=".length);
       const inRepo = run("git", ["rev-parse", "--is-inside-work-tree"], { cwd: repoDir }).ok;
-      if (w.includes("commit") && inRepo && !run("gitleaks", ["protect", "--staged", "--redact", "--no-banner"], { cwd: repoDir }).ok)
+      if (gitSub(w) === "commit" && inRepo && !run("gitleaks", ["protect", "--staged", "--redact", "--no-banner"], { cwd: repoDir }).ok)
         deny("gitleaks found secrets in STAGED content. Remove the secret (rotate if real). --no-verify is not available to agents.");
-      if (w.includes("push") && inRepo && !run("gitleaks", ["git", ".", "--redact", "--no-banner"], { cwd: repoDir }).ok)
+      if (gitSub(w) === "push" && inRepo && !run("gitleaks", ["git", ".", "--redact", "--no-banner"], { cwd: repoDir }).ok)
         deny("gitleaks found secrets in commit history headed for the remote. Rotate the credential and rewrite/purge history. --no-verify is not available to agents.");
     }
   }
