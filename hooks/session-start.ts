@@ -21,6 +21,15 @@ const src = input.source ?? "startup";
 const project = projectIdentity();
 const now = Date.now();
 
+// Subagent lanes: Claude Code gives a subagent the PARENT's session_id, so
+// anything it claims under the raw sid lands on the parent's account (W24 /
+// W30, 2026-09-26: the owner's id showed on lanes they never ran). Same
+// discriminator as the governor's laneId — register the subagent as its own
+// session row and hand it a lane id for claims, checkpoints, and emits.
+const laneMatch = (input.transcript_path ?? "").match(/\/subagents\/([^/]+?)(?:\.jsonl)?\/?$/);
+const isSubagent = !!laneMatch;
+const lane = laneMatch ? `${sid}#${laneMatch[1]}` : sid;
+
 function pname(p: string): string {
 	const parts = p.split("/");
 	const last = parts[parts.length - 1].replace(/\.git$/, "");
@@ -57,8 +66,8 @@ const RULES =
 const CAPS = CAPABILITIES.join(",");
 const UPSERT =
 	"INSERT INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, transcript_path) " +
-	"VALUES (?, ?, 'worker', NULL, NULL, ?, ?, 'RUNNING', ?, ?) " +
-	"ON CONFLICT(sid) DO UPDATE SET project = excluded.project, hb = excluded.hb, state = 'RUNNING', capabilities = COALESCE(excluded.capabilities, sessions.capabilities), transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path)";
+	"VALUES (?, ?, 'worker', ?, NULL, ?, ?, 'RUNNING', ?, ?) " +
+	"ON CONFLICT(sid) DO UPDATE SET project = excluded.project, parent_sid = excluded.parent_sid, hb = excluded.hb, state = 'RUNNING', capabilities = COALESCE(excluded.capabilities, sessions.capabilities), transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path)";
 
 const DEAD_SQL =
 	"SELECT s.sid FROM sessions s WHERE s.project = ? AND s.state = 'CLOSED' " +
@@ -71,13 +80,20 @@ const OWNED_SQL =
 	"AND state NOT IN ('DONE','SUPERSEDED','FAILED') ORDER BY id";
 
 const db = openGovernorDb();
-db.query(UPSERT).run(sid, project, now, now, CAPS, input.transcript_path ?? null);
-const out = [`SESSION ${sid.slice(0, 8)}  project=${pname(project)}`];
+db.query(UPSERT).run(lane, project, isSubagent ? sid : null, now, now, CAPS, input.transcript_path ?? null);
+const out = [isSubagent ? `SUBAGENT LANE ${lane.slice(0, 24)}  project=${pname(project)}` : `SESSION ${sid.slice(0, 8)}  project=${pname(project)}`];
+if (isSubagent) {
+	out.push(
+		`You share the parent's session id — claim and checkpoint as the lane id instead: ` +
+			`work take/done --as ${lane}, coord emit --as ${lane}. Raw-sid claims land on the parent's account.`,
+	);
+}
 
 // lineage: only `resume` may rebind — startup/clear/compact never touch
 // ownership. 0 closed owners → fresh start; 1 → deterministic rebind;
-// >1 → escalate, never guess.
-const dead = src === "resume" ? (db.query(DEAD_SQL).all(project) as { sid: string }[]) : [];
+// >1 → escalate, never guess. Subagent lanes never rebind: they are not
+// continuations of anything.
+const dead = src === "resume" && !isSubagent ? (db.query(DEAD_SQL).all(project) as { sid: string }[]) : [];
 if (dead.length === 1 && dead[0].sid !== sid) {
 	const p = Bun.spawnSync(["bun", COORD, "resume-session", "--as", sid, "--from", dead[0].sid], {
 		stdout: "pipe",
@@ -88,10 +104,10 @@ if (dead.length === 1 && dead[0].sid !== sid) {
 	out.push(`LINEAGE AMBIGUOUS: ${ids} — resolve with coord resume-session`);
 }
 
-const mine = db.query(OWNED_SQL).all(project, sid) as { id: string; title: string; state: string }[];
+const mine = db.query(OWNED_SQL).all(project, lane) as { id: string; title: string; state: string }[];
 const readyN = (db.query("SELECT COUNT(*) AS n FROM work_items WHERE project = ? AND state = 'READY'").get(project) as { n: number }).n;
-const cur = db.query("SELECT event_id FROM cursors WHERE sid = ?").get(sid) as { event_id: number } | null;
-const inbox = (db.query("SELECT COUNT(*) AS n FROM events WHERE target = ? AND id > ?").get(sid, cur?.event_id ?? 0) as { n: number }).n;
+const cur = db.query("SELECT event_id FROM cursors WHERE sid = ?").get(lane) as { event_id: number } | null;
+const inbox = (db.query("SELECT COUNT(*) AS n FROM events WHERE target = ? AND id > ?").get(lane, cur?.event_id ?? 0) as { n: number }).n;
 const head = (db.query("SELECT value FROM facts WHERE key = 'integration.head'").get() as { value: string } | null)?.value;
 
 if (mine.length || inbox > 0 || readyN > 0 || head) {

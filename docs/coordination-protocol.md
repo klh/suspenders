@@ -89,6 +89,7 @@ coord resume <sid> --onto <new-head> --note "applyPreview: (x) → (x, ctx); Med
 - resume_ready carries the delta summary — the lane updates its worktree onto the new integration HEAD, reruns targeted tests, continues. Reconciliation conflict → repair path.
 
 - **Spawn ritual: `coord bootstrap --as <lane-sid> --role worker --parent <coordinator-sid>` for EVERY lane at spawn** — lanes need session identity (full sid, never a display truncation) so liveness sweep / orphaned / doctor-session can see them; use the SAME sid for claims and `work take`.
+- **Subagent lanes claim under their injected lane id** — SessionStart prints `SUBAGENT LANE <parent#agent>` and that id is what `work take/done` and `coord emit` get as `--as`; a raw-sid claim lands on the parent's account (W24/W30). Named lanes get an explicit `--as <lane-name>` from the spawner instead.
 
 ### Work Graph (the task database)
 - Session start: `coord bootstrap --as <sid> --role coordinator|worker` → identity + OWNED + READY pool + inbox + head
