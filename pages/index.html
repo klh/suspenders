@@ -165,7 +165,8 @@
         </div>
         <p class="caption">
           Open decisions surface as red cards. <b>Get recommendation</b> has an LLM analyze the decision in
-          control-plane context; you edit or send. Lanes, completion stats, and the event stream stay live at 1s.
+          control-plane context; you edit or send. Lanes, completion stats, and the event stream stay live at 1s. The
+          Governor tab adds LLM telemetry: tokens per model against their budgets, and the recent advise routing log.
         </p>
         <div class="grid" style="margin-top: 14px">
           <figure class="shot" style="margin: 0">
@@ -233,8 +234,10 @@
         <h2>What it enforces</h2>
         <p style="font-size: 13px">
           secrets-gate before every Bash call &nbsp;·&nbsp; file leases on edits &nbsp;·&nbsp; capability-aware
-          dispatch &nbsp;·&nbsp; plan-gated fan-out &nbsp;·&nbsp; zombie detection that never mistakes a failed lookup for
-          death &nbsp;·&nbsp; no auto-reclaim — reclaiming a lane is your call
+          dispatch &nbsp;·&nbsp; plan-gated fan-out &nbsp;·&nbsp; tool activity advances a lane's heartbeat &nbsp;·&nbsp;
+          a liveness sweep at every entry point closes a session only when heartbeat and transcript are both dead —
+          coordinators and lanes waiting on a decision are exempt &nbsp;·&nbsp; COORDINATOR-DARK when a coordinator has
+          been quiet for two hours &nbsp;·&nbsp; no auto-reclaim — reclaiming a lane is your call
         </p>
       </section>
 
@@ -288,7 +291,9 @@ sequenceDiagram
         <p class="caption">
           Rendered with mermaid — the same diagram lives in the
           <a href="https://github.com/klh/suspenders#messaging-and-consults">README</a>. The database is the transport,
-          consults only carry answers between agents, and only you answer decisions or reclaim lanes.
+          consults only carry answers between agents, and only you answer decisions or reclaim lanes. Every answered
+          consult is stored as a problem→solution pair; a repeat question resolves against that store on the spot, with
+          provenance naming which agent solved it and whether that agent is still running.
         </p>
       </section>
 
@@ -297,11 +302,13 @@ sequenceDiagram
         <div class="arch">
           <pre>bun CLIs + hook gates
   │ SessionStart → bootstrap session, caps, transcript_path
-  │ PreToolUse   → secrets / edit-enforce / governor lease
+  │ PreToolUse   → secrets / edit-enforce / governor lease (+ lane heartbeat)
   ▼
 <b>governor.db</b> (SQLite/WAL) — sessions · claims · work graph · events · facts
+  │ every mutation mirrors the graph to .workgraph.jsonl — the queue lives in git,
+  │ fresh clones read it offline when the database cannot serve the project
   ▲ 1s poll (WAL = concurrent readers)
-fleet board — decisions · lanes · tasks · stream   ← you, deciding</pre>
+fleet board — decisions · lanes · tasks · stream · llm telemetry   ← you, deciding</pre>
         </div>
       </section>
 
