@@ -8,7 +8,7 @@
 // focusing a session shows its project's TODO / IN-FLIGHT / DONE board,
 // its claims, inbox, lane state, and the event tail.
 import { openGovernorDb } from "../lib/govdb.ts";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { HTML } from "./fleet-board-html.ts";
 
 // sibling CLIs resolve relative to this file — the board is relocatable
@@ -656,9 +656,21 @@ function payloadFor(sid: string): unknown {
 function seedDemo(): void {
 	const demo = `${REG_DIR}/demo`;
 	const demoSids = ["demo-wait", "demo-work", "demo-pause", "demo-zomb"];
-	if (db.query("SELECT 1 AS x FROM work_items WHERE project = ?").get(demo)) {
+	// demo-seal (2026-09-27, owner): after the demo partition was wiped from
+	// the real home, a stray --demo re-seeded it and its Bonjour registration
+	// stole the suspenders.local name — the owner watched their real board
+	// turn into the demo. Guard: once a home has EVER seeded demo (marker
+	// file), seeding an EMPTY partition again requires SUSPENDERS_DEMO=1.
+	// Existing partitions keep their idempotent heartbeat refresh.
+	const hasDemo = !!db.query("SELECT 1 AS x FROM work_items WHERE project = ?").get(demo);
+	if (!hasDemo && existsSync(`${REG_DIR}/.demo-sealed`) && process.env.SUSPENDERS_DEMO !== "1") {
+		console.error(`fleet board: --demo refused — this home sealed demo seeding after a wipe (delete ${REG_DIR}/.demo-sealed or set SUSPENDERS_DEMO=1 to override)`);
+		process.exit(3);
+	}
+	if (hasDemo) {
 		// re-runs keep the seeded fleet's heartbeats fresh without re-seeding
 		db.query(`UPDATE sessions SET hb = ? WHERE sid IN (${demoSids.map(() => "?").join(",")})`).run(Date.now(), ...demoSids);
+		writeFileSync(`${REG_DIR}/.demo-sealed`, "");
 		return;
 	}
 	const now = Date.now();
@@ -728,7 +740,10 @@ function seedDemo(): void {
 	console.log(`demo seeded → ${demo}`);
 }
 
-if (DEMO) seedDemo();
+if (DEMO) {
+	seedDemo();
+	writeFileSync(`${REG_DIR}/.demo-sealed`, ""); // any successful demo run seals this home against silent re-seeding after a wipe
+}
 
 Bun.serve({
 	port: PORT,
@@ -864,7 +879,10 @@ console.log(`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; wr
 // suspenders-2.local on conflict). Skip silently when neither tool exists.
 // SUSPENDERS_MDNS=0 opts out — on macOS the dns-sd registration claims the
 // service host name and poisons .local resolution for the very name it advertises
-if (process.env.SUSPENDERS_MDNS !== "0") {
+// demo boards never announce themselves as suspenders.local unless forced —
+// a screenshot board must not steal the name the real board owns
+const isDemo = process.argv.includes("--demo");
+if (process.env.SUSPENDERS_MDNS === "1" || (process.env.SUSPENDERS_MDNS !== "0" && !isDemo)) {
 	const mdnsCmd = process.platform === "darwin" ? ["dns-sd", "-R", "suspenders", "_http._tcp", ".", String(PORT)] : ["avahi-publish", "-s", "suspenders", "_http._tcp", String(PORT)];
 try {
 	const mdns = Bun.spawn(mdnsCmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
