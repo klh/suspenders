@@ -190,6 +190,7 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
     <select id="taskProj"><option value="all">all projects</option></select>
     <label class="plabel" for="taskOwner">session</label>
     <select id="taskOwner"><option value="all">all sessions</option></select>
+    <label class="plabel"><input type="checkbox" id="taskDone"> completed</label>
     <span id="taskCount" class="dim"></span>
   </div>
 
@@ -1095,7 +1096,12 @@ function renderTasks(){
   renderTaskOwnerOptions(ts);
   var byProj = taskProj === 'all' ? ts : ts.filter(function(t){ return projShort(t.project) === taskProj; });
   var own = taskOwner === 'all' ? byProj : byProj.filter(function(t){ return ownerKey(t) === taskOwner; });
-  var g = taskGroups(own); // fragments nest under their parent row
+  // completed items are opt-in (a healthy fleet buries live work under DONE rows)
+  var showDone = false;
+  try { showDone = localStorage.getItem('taskShowDone') === '1'; } catch(e) {}
+  var cb = byId('taskDone'); if (cb) cb.checked = showDone;
+  var pool = showDone ? own : own.filter(function(t){ return t.state !== 'DONE'; });
+  var g = taskGroups(pool); // fragments nest under their parent row
   sortTasks(g.roots);
   var html = '';
   for (var i = 0; i < g.roots.length; i++){
@@ -1106,7 +1112,7 @@ function renderTasks(){
   }
   if (!html) html = '<tr><td colspan="7" class="dim">' + (ts.length ? '(no tasks match the filters)' : '(no tasks)') + '</td></tr>';
   var cnt = byId('taskCount');
-  if (cnt) cnt.textContent = own.length === ts.length ? own.length + ' tasks' : own.length + ' of ' + ts.length + ' tasks';
+  if (cnt) cnt.textContent = pool.length === ts.length ? pool.length + ' tasks' : pool.length + ' of ' + ts.length + ' tasks';
   sigSetKeep(body, html, html, 'data-task'); // rebuild only on real change; refocus the row button if the table swapped under it
 }
 function openTask(id, proj, trigger){
@@ -1332,6 +1338,11 @@ var projSel = byId('taskProj');
 if (projSel) projSel.addEventListener('change', function(e){
   taskProj = e.target.value || 'all';
   saveTaskView(); renderTasks();
+});
+var doneCb = byId('taskDone');
+if (doneCb) doneCb.addEventListener('change', function(e){
+  try { localStorage.setItem('taskShowDone', e.target.checked ? '1' : '0'); } catch(err) {}
+  renderTasks();
 });
 paintSort();
 byId('drawerClose').addEventListener('click', closeTask);
