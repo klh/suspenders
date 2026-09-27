@@ -100,7 +100,12 @@ try {
 } catch {} // no decisions table yet — board never ran, nothing to surface
 for (const w of decisionGated) {
 	const label = `${w.project.split("/").pop()?.replace(".git", "")}/${w.id} is decision-gated but has no OPEN decision on the board`;
-	if (fix) {
+	{
+		// Emitting the missing NEED_DECISION is ALERTING (it floats the ruling
+		// request to the board), not repairing — so it happens on every pass,
+		// not only --fix. launchd runs read-only; a ruling that never floats is
+		// a ruling nobody sees (2026-09-27 W133). The detector's NOT EXISTS
+		// dedupes: an item with any prior NEED_DECISION event never re-lists.
 		// coordinator.sid is a GLOBAL fact — emit only when the coordinator
 		// serves this item's project; foreign-project items alert only (the
 		// .claude frozen backlog W2/W3/W21 must not ride the gaps coordinator)
@@ -118,8 +123,6 @@ for (const w of decisionGated) {
 		} else {
 			issues.push(`${label} (no project coordinator to route the NEED_DECISION to)`);
 		}
-	} else {
-		issues.push(label);
 	}
 }
 

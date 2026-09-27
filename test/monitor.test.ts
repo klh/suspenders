@@ -125,10 +125,12 @@ describe("waiting for you", () => {
 		db0.query("INSERT INTO facts (key, value, ts) VALUES ('coordinator.sid', 'coord-sess-cccccc', ?)").run(Date.now());
 		db0.query("INSERT OR REPLACE INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, transcript_path) VALUES ('coord-sess-cccccc', ?, 'coordinator', NULL, NULL, ?, ?, 'RUNNING', NULL, NULL)").run(REPO, OLD + 30 * 60_000, OLD + 30 * 60_000); // 1.5h stale — inside the quiet coordinator branch, off the W42 dark boundary
 		db0.close();
-		const r = run(); // read-only: alert only, no emission
-		expect(r.err).toContain("W-DEC is decision-gated");
-		const r2 = run(["--fix"]); // emits at the project coordinator, exactly once
-		expect(r2.out).toContain("emitted NEED_DECISION for W-DEC");
+		const r = run(); // read-only pass EMITS the missing NEED_DECISION — a ruling
+		// that never floats is a ruling nobody sees (launchd runs read-only)
+		expect(r.out).toContain("emitted NEED_DECISION for W-DEC");
+		expect(r.err).not.toContain("decision-gated");
+		const r2 = run(["--fix"]); // detector NOT EXISTS dedupes — no second emission
+		expect(r2.out).not.toContain("emitted NEED_DECISION for W-DEC");
 		const d = new Database(DB, { readonly: true });
 		const ev = one(d, "SELECT payload, target FROM events WHERE kind = 'NEED_DECISION' AND payload LIKE '%W-DEC%'") as { payload: string; target: string };
 		expect(JSON.parse(ev.payload).work).toBe("W-DEC");
