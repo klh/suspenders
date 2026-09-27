@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.suspenders.board</string>
+  <key>ProgramArguments</key><array>
+    <string>__BUN__</string>
+    <string>__PREFIX__/bin/fleet-board.ts</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>SUSPENDERS_BIND</key><string>0.0.0.0</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/tmp/fleet-board.log</string>
+  <key>StandardErrorPath</key><string>/tmp/fleet-board.log</string>
+</dict></plist>
