@@ -45,6 +45,51 @@ const gatePath = new URL("../gate.ts", import.meta.url).pathname;
 const sessionStartPath = new URL("../session-start.ts", import.meta.url)
   .pathname;
 
+// GET /llms.txt — plain-text orientation for LLM agents (the llms.txt
+// convention): what the control plane is and which endpoints this board
+// serves. Static; kept factual with the routes below.
+const LLMS_TXT = `# suspenders
+
+suspenders is an agent control plane for fleets of coding-agent sessions. A
+SQLite database (governor.db) is the single source of operational state: a
+work graph with compare-and-swap claims, a coord event bus (events, facts,
+cursors, inbox), decision forks with optional LLM advice, and this fleet
+board as the human + machine-readable view.
+
+Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's user-level Caddy)
+
+## GET endpoints
+
+- GET /               this board (HTML; polls /api/* every second)
+- GET /api/data       full control-plane state: sessions, projects, claims, events, zombies, consults, llm usage; ?session=<sid> adds lane focus (inbox, lane facts)
+- GET /api/decisions  decision forks; default OPEN only, ?history=1 adds resolved rows
+- GET /api/tasks      every work item, newest activity first (?project=<path> or all)
+- GET /api/task       one work item + its bus events + its decisions (?project=<path>&id=<id>)
+- GET /api/activity   newest-first coord bus feed (?project=<path>&limit=<n>; default 80, cap 300)
+- GET /api/setup      advisory wiring checks (hooks, monitor agent, advice LLM, bind)
+- GET /llms.txt       this file
+
+## Write endpoints (human at the board; origin/host guarded)
+
+- POST /api/answer    answer a decision fork (answer_token idempotency; stale token = 409)
+- POST /api/ack       dismiss an open fork (state to CANCELLED, idempotent)
+- POST /api/advise    fire the advice worker for a fork (async; lands as fact advice.<id>)
+
+## Advice LLM
+
+SUSPENDERS_LLM_URL points at an OpenAI-compatible chat endpoint used by the
+advice worker (default http://127.0.0.1:8901 — belt's code specialist). If
+the endpoint is unreachable, advice is marked unavailable and the fork stays
+open for the human; nothing else on the board depends on it.
+
+## Companion repos
+
+- suspenders (this repo): https://github.com/klh/suspenders
+- belt (the LLM fleet behind the advice endpoint): https://github.com/klh/belt
+- klh-local (serves suspenders.local over the LAN): https://github.com/klh/local
+
+a Threads thing — http://www.threads.dk`;
+
 // decision lifecycle (schema v2, board-owned `decisions` table), contract:
 // docs/decisions-api.md. NEED% events must not vanish when the recipient acks
 // their inbox — cursors track delivery, this table tracks the human decision.
@@ -1511,6 +1556,14 @@ Bun.serve({
       child.unref();
       return json({ ok: true, started: true });
     }
+    if (url.pathname === "/llms.txt")
+      // static plain-text agent contract (see LLMS_TXT above)
+      return new Response(LLMS_TXT, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
     if (url.pathname === "/")
       return new Response(HTML, {
         headers: {

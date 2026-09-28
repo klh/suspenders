@@ -150,6 +150,16 @@ describe("served page", () => {
     const script = page.match(/<script>([\s\S]*)<\/script>/)![1];
     expect(() => new Function(script)).not.toThrow();
   });
+
+  test("GET /llms.txt — plain-text agent contract", async () => {
+    const r = await fetch(BASE + "/llms.txt");
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("text/plain");
+    const txt = await r.text();
+    expect(txt).toContain("# suspenders");
+    expect(txt).toContain("/api/data");
+    expect(txt).toContain("http://www.threads.dk");
+  });
 });
 
 describe("decision lifecycle (docs/decisions-api.md)", () => {
