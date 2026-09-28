@@ -238,12 +238,21 @@ if (MODE === "dispatch") {
 		process.exit(1);
 	}
 	const sid = `autow${item.replace(/^W/, "").replace(/\./g, "")}`;
-	const branch = `lane/${sid}`;
-	const wt = `${REPO}/.worktrees/${sid}`;
-	if (existsSync(wt)) {
-		console.error(`lane ${sid} already running (pid ${live.pid})`);
-		process.exit(1);
-	} // an existing worktree without a live lane is reused
+	const wt = `${REPO}/.worktrees/${item}`;
+	// live-lane guard: a running lane still owns its worktree — refuse. An
+	// existing worktree with NO live lane is reused (resume path).
+	const live = lanes().find((l) => l.sid === sid);
+	if (live?.pid) {
+		let alive = false;
+		try {
+			process.kill(live.pid, 0);
+			alive = true;
+		} catch {}
+		if (alive) {
+			console.error(`lane ${sid} already running (pid ${live.pid})`);
+			process.exit(1);
+		}
+	}
 	const runTool = (args: string[]): { code: number; out: string } => {
 		const p = Bun.spawnSync([process.execPath, ...args], {
 			cwd: REPO,
@@ -273,15 +282,26 @@ if (MODE === "dispatch") {
 			process.exit(1);
 		} // claimed by us from a previous dispatch attempt — resume
 	}
-	const wtree = runTool([
-		`${process.env.HOME}/.claude/hooks/suspenders/bin/worktree.ts`,
-		"create",
-		item,
-	]);
-	if (wtree.code !== 0) {
-		console.error(`worktree create failed: ${wtree.out}`);
-		process.exit(1);
+	// reuse path: an existing worktree (dead lane's leftover) is used as-is —
+	// only a missing one is created
+	if (!existsSync(wt)) {
+		const wtree = runTool([
+			`${process.env.HOME}/.claude/hooks/suspenders/bin/worktree.ts`,
+			"create",
+			item,
+		]);
+		if (wtree.code !== 0) {
+			console.error(`worktree create failed: ${wtree.out}`);
+			process.exit(1);
+		}
 	}
+	const branch =
+		Bun.spawnSync(["git", "-C", wt, "branch", "--show-current"], {
+			cwd: REPO,
+			stdout: "pipe",
+		})
+			.stdout?.toString()
+			.trim() || `suspenders/${item}`;
 	const show = runTool([
 		`${process.env.HOME}/.claude/hooks/suspenders/bin/work.ts`,
 		"show",
