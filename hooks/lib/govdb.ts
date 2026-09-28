@@ -5,7 +5,14 @@
 // journal_mode: under contention the connection waits instead of throwing;
 // WAL is persistent once set and verified on open.
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	statSync,
+} from "node:fs";
 import { resolve } from "node:path";
 
 const REG = `${process.env.HOME}/.cache/claude-governor`;
@@ -15,7 +22,10 @@ const REG = `${process.env.HOME}/.cache/claude-governor`;
 // work.ts / coord.ts bootstrap / a future consult layer can never disagree
 export function projectIdentity(): string {
 	try {
-		const r = Bun.spawnSync(["git", "-C", process.cwd(), "rev-parse", "--git-common-dir"], { stdout: "pipe", stderr: "pipe" });
+		const r = Bun.spawnSync(
+			["git", "-C", process.cwd(), "rev-parse", "--git-common-dir"],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
 		if (r.exitCode === 0) {
 			const dir = new TextDecoder().decode(r.stdout).trim();
 			if (dir) return realpathSync(resolve(process.cwd(), dir));
@@ -26,7 +36,16 @@ export function projectIdentity(): string {
 
 // capability vocabulary for capability-aware dispatch (schema v2):
 // work_items.requires ⊆ sessions.capabilities or work take refuses
-export const CAPABILITIES = ["shell", "fs", "git", "build", "mcp", "vision", "browser", "network"];
+export const CAPABILITIES = [
+	"shell",
+	"fs",
+	"git",
+	"build",
+	"mcp",
+	"vision",
+	"browser",
+	"network",
+];
 
 // W54 — THE decision-kind gate, shared by every consumer of NEED% forks
 // (advise.ts, the board's /api/advise + /api/ack). coord emit passes kinds
@@ -62,18 +81,38 @@ export interface ItemTiming {
 // claim segment; the next work.released / work.done / work.failed closes it
 // (that duration is agent time). Items never claimed (auto-rollup parents)
 // get wallMs 0 — there is no claim→done interval to measure.
-export function workTiming(db: Database, project: string, nowMs = Date.now()): ItemTiming[] {
+export function workTiming(
+	db: Database,
+	project: string,
+	nowMs = Date.now(),
+): ItemTiming[] {
 	const rows = db
 		.query(
 			"SELECT id, ts, kind, payload FROM events WHERE kind IN ('work.claimed','work.released','work.done','work.failed') AND json_extract(payload, '$.project') = ? ORDER BY ts, id",
 		)
-		.all(project) as { id: number; ts: number; kind: string; payload: string | null }[];
+		.all(project) as {
+		id: number;
+		ts: number;
+		kind: string;
+		payload: string | null;
+	}[];
 	const open = new Map<string, number>(); // work id → open claim-segment start ts
 	const out = new Map<string, ItemTiming>();
 	const item = (work: string): ItemTiming => {
 		let t = out.get(work);
 		if (!t) {
-			t = { project, work, firstClaim: 0, lastEvent: 0, wallMs: 0, agentMs: 0, claims: 0, releases: 0, done: false, failed: false };
+			t = {
+				project,
+				work,
+				firstClaim: 0,
+				lastEvent: 0,
+				wallMs: 0,
+				agentMs: 0,
+				claims: 0,
+				releases: 0,
+				done: false,
+				failed: false,
+			};
 			out.set(work, t);
 		}
 		return t;
@@ -106,7 +145,8 @@ export function workTiming(db: Database, project: string, nowMs = Date.now()): I
 		t.agentMs += Math.max(0, nowMs - start);
 		t.lastEvent = nowMs;
 	}
-	for (const t of out.values()) if (t.firstClaim) t.wallMs = t.lastEvent - t.firstClaim;
+	for (const t of out.values())
+		if (t.firstClaim) t.wallMs = t.lastEvent - t.firstClaim;
 	return [...out.values()].sort((a, b) => (a.work < b.work ? -1 : 1));
 }
 
@@ -128,12 +168,21 @@ export interface ItemTokens {
 	cacheC: number; // Σ cache_creation_input_tokens
 }
 
-export function tokenUsage(db: Database, project: string, nowMs = Date.now()): Map<string, ItemTokens | null> {
+export function tokenUsage(
+	db: Database,
+	project: string,
+	nowMs = Date.now(),
+): Map<string, ItemTokens | null> {
 	const rows = db
 		.query(
 			"SELECT id, ts, kind, payload FROM events WHERE kind IN ('work.claimed','work.released','work.done','work.failed') AND json_extract(payload, '$.project') = ? ORDER BY ts, id",
 		)
-		.all(project) as { id: number; ts: number; kind: string; payload: string | null }[];
+		.all(project) as {
+		id: number;
+		ts: number;
+		kind: string;
+		payload: string | null;
+	}[];
 	const wins = new Map<string, { start: number; end: number }[]>(); // work id → claim windows (end 0 = still open)
 	const sids = new Map<string, string[]>();
 	const done = new Set<string>();
@@ -146,7 +195,8 @@ export function tokenUsage(db: Database, project: string, nowMs = Date.now()): M
 		if (r.kind === "work.claimed") {
 			if (!wins.has(p.work)) wins.set(p.work, []);
 			wins.get(p.work)!.push({ start: r.ts, end: 0 });
-			if (p.by) (sids.get(p.work) ?? sids.set(p.work, []).get(p.work)!).push(p.by);
+			if (p.by)
+				(sids.get(p.work) ?? sids.set(p.work, []).get(p.work)!).push(p.by);
 		} else {
 			const w = wins.get(p.work)?.find((x) => x.end === 0); // claims close in order (FIFO)
 			if (w) w.end = r.ts;
@@ -159,35 +209,61 @@ export function tokenUsage(db: Database, project: string, nowMs = Date.now()): M
 		try {
 			const paths = new Set<string>();
 			for (const sid of sids.get(work) ?? []) {
-				const tp = (db.query("SELECT transcript_path FROM sessions WHERE sid = ?").get(sid) as { transcript_path?: string | null } | undefined)?.transcript_path;
+				const tp = (
+					db
+						.query("SELECT transcript_path FROM sessions WHERE sid = ?")
+						.get(sid) as { transcript_path?: string | null } | undefined
+				)?.transcript_path;
 				if (tp) paths.add(tp);
 			}
 			if (!paths.size) continue;
 			let maxM = 0;
 			for (const tp of paths) maxM = Math.max(maxM, statSync(tp).mtimeMs); // missing file throws → fail soft below
 			const key = `metrics.tokens.${project.replace(/[^A-Za-z0-9._-]/g, "-")}.${work}`;
-			const cached = JSON.parse((db.query("SELECT value FROM facts WHERE key = ?").get(key) as { value?: string } | null)?.value ?? "null") as
-				| { in: number; out: number; cacheR: number; cacheC: number; at: number; tpMtime: number }
-				| null;
+			const cached = JSON.parse(
+				(
+					db.query("SELECT value FROM facts WHERE key = ?").get(key) as {
+						value?: string;
+					} | null
+				)?.value ?? "null",
+			) as {
+				in: number;
+				out: number;
+				cacheR: number;
+				cacheC: number;
+				at: number;
+				tpMtime: number;
+			} | null;
 			if (done.has(work) && cached?.tpMtime === maxM) {
 				// cache hit: item terminal and transcript untouched since last parse
-				out.set(work, { work, in: cached.in, out: cached.out, cacheR: cached.cacheR, cacheC: cached.cacheC });
+				out.set(work, {
+					work,
+					in: cached.in,
+					out: cached.out,
+					cacheR: cached.cacheR,
+					cacheC: cached.cacheC,
+				});
 				continue;
 			}
 			const t: ItemTokens = { work, in: 0, out: 0, cacheR: 0, cacheC: 0 };
-			const n = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+			const n = (x: unknown): number =>
+				typeof x === "number" && Number.isFinite(x) ? x : 0;
 			for (const tp of paths) {
 				for (const line of readFileSync(tp, "utf8").split("\n")) {
 					if (!line.includes('"type":"assistant"')) continue; // cheap pre-filter — only assistant lines carry usage
 					let ts = NaN;
 					let u: Record<string, unknown> | undefined;
 					try {
-						const o = JSON.parse(line) as { timestamp?: string; message?: { usage?: Record<string, unknown> } };
+						const o = JSON.parse(line) as {
+							timestamp?: string;
+							message?: { usage?: Record<string, unknown> };
+						};
 						ts = Date.parse(o.timestamp ?? "");
 						u = o.message?.usage;
 					} catch {}
 					if (!u || !Number.isFinite(ts)) continue;
-					if (!ws.some((w) => ts >= w.start && ts <= (w.end || nowMs))) continue;
+					if (!ws.some((w) => ts >= w.start && ts <= (w.end || nowMs)))
+						continue;
 					t.in += n(u.input_tokens);
 					t.out += n(u.output_tokens);
 					t.cacheR += n(u.cache_read_input_tokens);
@@ -197,7 +273,18 @@ export function tokenUsage(db: Database, project: string, nowMs = Date.now()): M
 			out.set(work, t);
 			db.query(
 				"INSERT INTO facts (key, value, source, version, ts) VALUES (?, ?, 'coord', 1, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, source = excluded.source, version = version + 1, ts = excluded.ts",
-			).run(key, JSON.stringify({ in: t.in, out: t.out, cacheR: t.cacheR, cacheC: t.cacheC, at: nowMs, tpMtime: maxM }), nowMs);
+			).run(
+				key,
+				JSON.stringify({
+					in: t.in,
+					out: t.out,
+					cacheR: t.cacheR,
+					cacheC: t.cacheC,
+					at: nowMs,
+					tpMtime: maxM,
+				}),
+				nowMs,
+			);
 		} catch {
 			// fail soft: a bad/missing transcript never blocks metrics
 		}
@@ -212,14 +299,20 @@ export function openGovernorDb(): Database {
 	try {
 		db.run("PRAGMA journal_mode=WAL");
 	} catch {
-		const mode = (db.query("PRAGMA journal_mode").get() as { journal_mode?: string })?.journal_mode;
-		if (mode?.toLowerCase() !== "wal") throw new Error(`governor.db WAL unavailable (got: ${mode ?? "unknown"})`);
+		const mode = (
+			db.query("PRAGMA journal_mode").get() as { journal_mode?: string }
+		)?.journal_mode;
+		if (mode?.toLowerCase() !== "wal")
+			throw new Error(
+				`governor.db WAL unavailable (got: ${mode ?? "unknown"})`,
+			);
 	}
 	db.run("PRAGMA synchronous=NORMAL");
 	db.run("PRAGMA foreign_keys=ON"); // composite FKs guard work_deps against cross-project/orphan edges
 	// schema versioning via PRAGMA user_version: baseline 1 = composite-PK work
 	// graph. Future migrations must be explicit steps (v1→v2), never inferred.
-	const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+	const uv = (db.query("PRAGMA user_version").get() as { user_version: number })
+		.user_version;
 	if (uv < 1) db.run("PRAGMA user_version = 1");
 	db.run(
 		"CREATE TABLE IF NOT EXISTS claims (sid TEXT NOT NULL, scope TEXT NOT NULL, intent TEXT, hot INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL, tp TEXT, PRIMARY KEY (sid, scope))",
@@ -232,9 +325,14 @@ export function openGovernorDb(): Database {
 	db.run(
 		"CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, scope TEXT, payload TEXT, target TEXT)",
 	);
-	const evCols = (db.query("PRAGMA table_info(events)").all() as { name: string }[]).map((c) => c.name);
-	if (!evCols.includes("target")) db.run("ALTER TABLE events ADD COLUMN target TEXT");
-	db.run("CREATE TABLE IF NOT EXISTS cursors (sid TEXT PRIMARY KEY, event_id INTEGER NOT NULL)");
+	const evCols = (
+		db.query("PRAGMA table_info(events)").all() as { name: string }[]
+	).map((c) => c.name);
+	if (!evCols.includes("target"))
+		db.run("ALTER TABLE events ADD COLUMN target TEXT");
+	db.run(
+		"CREATE TABLE IF NOT EXISTS cursors (sid TEXT PRIMARY KEY, event_id INTEGER NOT NULL)",
+	);
 	// work graph: hierarchical, claimable, shatterable work items (bin/work.ts).
 	// project = repo root realpath — partitions the graph per project so
 	// sessions in different repos never see (or steal) each other's work.
@@ -249,16 +347,22 @@ export function openGovernorDb(): Database {
 	try {
 		db.run("BEGIN IMMEDIATE");
 		for (const name of ["work_deps", "work_items"]) {
-			const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
-				| { sql?: string }
-				| undefined;
+			const row = db
+				.query(
+					"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+				)
+				.get(name) as { sql?: string } | undefined;
 			if (!row?.sql || /PRIMARY KEY\s*\(\s*project/.test(row.sql)) continue; // absent or current shape
-			const n = (db.query(`SELECT COUNT(*) AS n FROM "${name}"`).get() as { n: number }).n;
+			const n = (
+				db.query(`SELECT COUNT(*) AS n FROM "${name}"`).get() as { n: number }
+			).n;
 			if (n === 0) db.run(`DROP TABLE "${name}"`);
 			else {
 				const backup = `${name}_legacy_${Date.now()}`;
 				db.run(`ALTER TABLE "${name}" RENAME TO "${backup}"`);
-				console.error(`[govdb] legacy ${name} held ${n} rows — preserved in ${backup} (project mapping ambiguous, not auto-converted)`);
+				console.error(
+					`[govdb] legacy ${name} held ${n} rows — preserved in ${backup} (project mapping ambiguous, not auto-converted)`,
+				);
 			}
 		}
 		db.run("COMMIT");
@@ -266,7 +370,12 @@ export function openGovernorDb(): Database {
 		try {
 			db.run("ROLLBACK");
 		} catch {}
-		throw e instanceof Error ? new Error(`govdb work-graph migration refused (no data touched): ${e.message}`, { cause: e }) : e;
+		throw e instanceof Error
+			? new Error(
+					`govdb work-graph migration refused (no data touched): ${e.message}`,
+					{ cause: e },
+				)
+			: e;
 	} finally {
 		db.run("PRAGMA foreign_keys=ON");
 	}
@@ -276,7 +385,9 @@ export function openGovernorDb(): Database {
 	db.run(
 		"CREATE TABLE IF NOT EXISTS work_deps (project TEXT NOT NULL, work_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (project, work_id, depends_on), FOREIGN KEY (project, work_id) REFERENCES work_items(project, id) ON DELETE CASCADE, FOREIGN KEY (project, depends_on) REFERENCES work_items(project, id) ON DELETE CASCADE)",
 	);
-	db.run("CREATE TABLE IF NOT EXISTS work_sequences (project TEXT PRIMARY KEY, next_id INTEGER NOT NULL)");
+	db.run(
+		"CREATE TABLE IF NOT EXISTS work_sequences (project TEXT PRIMARY KEY, next_id INTEGER NOT NULL)",
+	);
 	// consults: quick questions between sessions — never claims, ownership, or
 	// lane state. WORK = implement, CONSULT = answer, HANDOFF = take ownership.
 	db.run(
@@ -289,11 +400,24 @@ export function openGovernorDb(): Database {
 	// v2 — capability-aware dispatch: work declares requires (csv), sessions
 	// advertise capabilities (csv); work take refuses requires ⊄ capabilities.
 	// NULL on either side = legacy = no constraint. Explicit migration step.
-	const sessCols = (db.query("PRAGMA table_info(sessions)").all() as { name: string }[]).map((c) => c.name);
-	if (!sessCols.includes("capabilities")) db.run("ALTER TABLE sessions ADD COLUMN capabilities TEXT");
-	if (!sessCols.includes("transcript_path")) db.run("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
-	const wiCols = (db.query("PRAGMA table_info(work_items)").all() as { name: string }[]).map((c) => c.name);
-	if (!wiCols.includes("requires")) db.run("ALTER TABLE work_items ADD COLUMN requires TEXT");
+	const sessCols = (
+		db.query("PRAGMA table_info(sessions)").all() as { name: string }[]
+	).map((c) => c.name);
+	if (!sessCols.includes("capabilities"))
+		db.run("ALTER TABLE sessions ADD COLUMN capabilities TEXT");
+	if (!sessCols.includes("transcript_path"))
+		db.run("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
+	const wiCols = (
+		db.query("PRAGMA table_info(work_items)").all() as { name: string }[]
+	).map((c) => c.name);
+	if (!wiCols.includes("requires"))
+		db.run("ALTER TABLE work_items ADD COLUMN requires TEXT");
+	// origin (multi-machine readiness, owner 2026-09-28): "<host>:<agent>"
+	// stamped at dispatch via `work take --origin` — which machine and which
+	// agent backend claimed the item; surfaced on board cards. COALESCE at
+	// take keeps the first dispatch's stamp across resume re-takes.
+	if (!wiCols.includes("origin"))
+		db.run("ALTER TABLE work_items ADD COLUMN origin TEXT");
 	if (uv < 2) db.run("PRAGMA user_version = 2");
 	// v4 — consult knowledge base: (problem → solution) pairs harvested from
 	// answered consults; new consults resolve against it before routing to a
@@ -304,7 +428,9 @@ export function openGovernorDb(): Database {
 		db.run(
 			"CREATE TABLE IF NOT EXISTS consult_kb (id INTEGER PRIMARY KEY AUTOINCREMENT, problem TEXT NOT NULL, solution TEXT NOT NULL, project TEXT NOT NULL, asked_by TEXT NOT NULL, answered_by TEXT NOT NULL, consult_id INTEGER, hits INTEGER NOT NULL DEFAULT 0, last_hit_at INTEGER, created_at INTEGER NOT NULL)",
 		);
-		db.run("CREATE VIRTUAL TABLE IF NOT EXISTS consult_kb_fts USING fts5(problem)");
+		db.run(
+			"CREATE VIRTUAL TABLE IF NOT EXISTS consult_kb_fts USING fts5(problem)",
+		);
 		db.run("PRAGMA user_version = 4");
 	}
 	db.run(
@@ -330,7 +456,9 @@ export function openGovernorDb(): Database {
 	// measured in the noise either way (~5-7 µs/op, op-only vs full-image);
 	// the other four tables carry full row images.
 	const deltaImg = (cols: string[], r: "OLD" | "NEW"): string =>
-		cols.length ? `json_object(${cols.map((c) => `'${c}', ${r}.${c}`).join(", ")})` : "NULL";
+		cols.length
+			? `json_object(${cols.map((c) => `'${c}', ${r}.${c}`).join(", ")})`
+			: "NULL";
 	// ms clock: deltas must interleave with events.ts (--since <event-id> picks
 	// the nearest later seq by ts), so second-granular strftime('%s') would
 	// order same-second rows wrongly. unixepoch('subsec') is SQLite ≥3.42.
@@ -340,11 +468,55 @@ export function openGovernorDb(): Database {
 		deltaNow = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
 	} catch {}
 	const deltaTables: { tbl: string; pk: string; cols: string[] }[] = [
-		{ tbl: "sessions", pk: "$.sid", cols: ["sid", "project", "role", "parent_sid", "worktree", "started_at", "hb", "state", "capabilities", "transcript_path"] },
-		{ tbl: "claims", pk: "$.sid || '/' || $.scope", cols: ["sid", "scope", "intent", "hot", "ts", "tp"] },
+		{
+			tbl: "sessions",
+			pk: "$.sid",
+			cols: [
+				"sid",
+				"project",
+				"role",
+				"parent_sid",
+				"worktree",
+				"started_at",
+				"hb",
+				"state",
+				"capabilities",
+				"transcript_path",
+			],
+		},
+		{
+			tbl: "claims",
+			pk: "$.sid || '/' || $.scope",
+			cols: ["sid", "scope", "intent", "hot", "ts", "tp"],
+		},
 		{ tbl: "locks", pk: "$.path", cols: [] },
-		{ tbl: "facts", pk: "$.key", cols: ["key", "value", "source", "version", "ts"] },
-		{ tbl: "work_items", pk: "$.project || '/' || $.id", cols: ["project", "id", "parent_id", "title", "description", "state", "priority", "owner_sid", "created_by", "scope", "why_parallel", "result_sha", "required", "created_at", "updated_at", "requires"] },
+		{
+			tbl: "facts",
+			pk: "$.key",
+			cols: ["key", "value", "source", "version", "ts"],
+		},
+		{
+			tbl: "work_items",
+			pk: "$.project || '/' || $.id",
+			cols: [
+				"project",
+				"id",
+				"parent_id",
+				"title",
+				"description",
+				"state",
+				"priority",
+				"owner_sid",
+				"created_by",
+				"scope",
+				"why_parallel",
+				"result_sha",
+				"required",
+				"created_at",
+				"updated_at",
+				"requires",
+			],
+		},
 	];
 	for (const { tbl, pk, cols } of deltaTables)
 		for (const op of ["insert", "update", "delete"] as const) {
@@ -360,7 +532,9 @@ export function openGovernorDb(): Database {
 // W33 retention: the delta log is a ring, not an archive — coord gc trims it
 // on the same window as events. Returns rows removed.
 export function pruneDeltas(db: Database, olderThanMs: number): number {
-	return db.query("DELETE FROM deltas WHERE ts < ?").run(Date.now() - olderThanMs).changes;
+	return db
+		.query("DELETE FROM deltas WHERE ts < ?")
+		.run(Date.now() - olderThanMs).changes;
 }
 
 // JSON registries → SQL, once, idempotently (whoever runs first migrates; the
@@ -371,13 +545,29 @@ function migrateJSON(db: Database): void {
 	if (existsSync(CJ)) {
 		try {
 			const legacy = JSON.parse(readFileSync(CJ, "utf8")) as Record<
-				string, { sid?: string; scopes?: string[]; intent?: string; ts?: number; tp?: string; hot?: boolean }
+				string,
+				{
+					sid?: string;
+					scopes?: string[];
+					intent?: string;
+					ts?: number;
+					tp?: string;
+					hot?: boolean;
+				}
 			>;
 			const ins = db.query(
 				"INSERT OR REPLACE INTO claims (sid, scope, intent, hot, ts, tp) VALUES (?, ?, ?, ?, ?, ?)",
 			);
 			for (const [cid, c] of Object.entries(legacy)) {
-				for (const s of c?.scopes ?? []) ins.run(c?.sid ?? cid, s, c?.intent ?? null, c?.hot ? 1 : 0, c?.ts ?? Date.now(), c?.tp ?? null);
+				for (const s of c?.scopes ?? [])
+					ins.run(
+						c?.sid ?? cid,
+						s,
+						c?.intent ?? null,
+						c?.hot ? 1 : 0,
+						c?.ts ?? Date.now(),
+						c?.tp ?? null,
+					);
 			}
 			renameSync(CJ, `${CJ}.migrated`);
 		} catch {}
@@ -386,13 +576,29 @@ function migrateJSON(db: Database): void {
 	if (existsSync(LJ)) {
 		try {
 			const locks = JSON.parse(readFileSync(LJ, "utf8")) as Record<
-				string, { sid: string; tool?: string; ts: number; tp?: string; hash?: string; seen?: string[] }
+				string,
+				{
+					sid: string;
+					tool?: string;
+					ts: number;
+					tp?: string;
+					hash?: string;
+					seen?: string[];
+				}
 			>;
 			const ins = db.query(
 				"INSERT OR REPLACE INTO locks (path, sid, tool, ts, tp, hash, seen) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			);
 			for (const [p, l] of Object.entries(locks)) {
-				ins.run(p, l.sid, l.tool ?? null, l.ts ?? 0, l.tp ?? null, l.hash ?? null, l.seen ? JSON.stringify(l.seen) : null);
+				ins.run(
+					p,
+					l.sid,
+					l.tool ?? null,
+					l.ts ?? 0,
+					l.tp ?? null,
+					l.hash ?? null,
+					l.seen ? JSON.stringify(l.seen) : null,
+				);
 			}
 			renameSync(LJ, `${LJ}.migrated`);
 		} catch {}
@@ -404,28 +610,56 @@ function migrateJSON(db: Database): void {
 // + transcript-dead for TOP-LEVEL rows; parented lanes close at 24h. Never
 // sweeps the coordinator (it sleeps between waves) or sessions waiting on an
 // open decision. Swept sessions keep owned work — reclaim stays a human call.
-export function sweepStaleSessions(db: Database, maxIdleMs = 20 * 60_000): number {
+export function sweepStaleSessions(
+	db: Database,
+	maxIdleMs = 20 * 60_000,
+): number {
 	const now = Date.now();
-	const coordinatorSid = (db.query("SELECT value FROM facts WHERE key = 'coordinator.sid'").get() as { value: string } | null)?.value ?? null;
+	const coordinatorSid =
+		(
+			db
+				.query("SELECT value FROM facts WHERE key = 'coordinator.sid'")
+				.get() as { value: string } | null
+		)?.value ?? null;
 	let waiting: Set<string>;
 	try {
-		waiting = new Set((db.query("SELECT answer_to AS sid FROM decisions WHERE state = 'OPEN' AND answer_to IS NOT NULL").all() as { sid: string }[]).map((r) => r.sid));
+		waiting = new Set(
+			(
+				db
+					.query(
+						"SELECT answer_to AS sid FROM decisions WHERE state = 'OPEN' AND answer_to IS NOT NULL",
+					)
+					.all() as { sid: string }[]
+			).map((r) => r.sid),
+		);
 	} catch {
 		waiting = new Set(); // no decisions table yet — board never ran
 	}
 	let n = 0;
-	for (const r of db.query("SELECT sid, role FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NULL AND hb < ?").all(now - maxIdleMs) as {
+	for (const r of db
+		.query(
+			"SELECT sid, role FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NULL AND hb < ?",
+		)
+		.all(now - maxIdleMs) as {
 		sid: string;
 		role: string;
 	}[]) {
 		if (r.role === "coordinator" || r.sid === coordinatorSid) continue;
 		if (waiting.has(r.sid)) continue;
 		if (liveTranscript(r.sid)) continue;
-		db.query("UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'").run(r.sid);
+		db.query(
+			"UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'",
+		).run(r.sid);
 		n++;
 	}
-	for (const r of db.query("SELECT sid FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NOT NULL AND hb < ?").all(now - 24 * 3_600_000) as { sid: string }[]) {
-		db.query("UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'").run(r.sid);
+	for (const r of db
+		.query(
+			"SELECT sid FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NOT NULL AND hb < ?",
+		)
+		.all(now - 24 * 3_600_000) as { sid: string }[]) {
+		db.query(
+			"UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'",
+		).run(r.sid);
 		n++;
 	}
 	return n;
@@ -436,9 +670,16 @@ function liveTranscript(sid: string): boolean {
 	const floor = Date.now() - 15 * 60_000;
 	try {
 		const glob = new Bun.Glob(`**/*${sid}*.jsonl`);
-		for (const rel of glob.scanSync({ cwd: `${process.env.HOME}/.claude/projects`, onlyFiles: true })) {
+		for (const rel of glob.scanSync({
+			cwd: `${process.env.HOME}/.claude/projects`,
+			onlyFiles: true,
+		})) {
 			try {
-				if (statSync(`${process.env.HOME}/.claude/projects/${rel}`).mtimeMs > floor) return true;
+				if (
+					statSync(`${process.env.HOME}/.claude/projects/${rel}`).mtimeMs >
+					floor
+				)
+					return true;
 			} catch {}
 		}
 	} catch {}

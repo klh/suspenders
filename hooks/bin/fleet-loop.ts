@@ -26,6 +26,7 @@ import {
 	readFileSync,
 	writeFileSync,
 } from "node:fs";
+import { hostname } from "node:os";
 
 const argv = process.argv.slice(2);
 const MODE = argv[0];
@@ -312,6 +313,8 @@ if (MODE === "dispatch") {
 		item,
 		"--as",
 		sid,
+		"--origin",
+		`${hostname()}:${AGENT}`,
 	]);
 	if (take.code !== 0) {
 		const mine = runTool([
@@ -462,6 +465,7 @@ if (MODE === "dispatch") {
 		branch,
 		worktree: wt,
 		agent: AGENT,
+		host: hostname(),
 		launchedAt: Date.now(),
 	};
 	const all = lanes().filter((l) => l.sid !== sid);

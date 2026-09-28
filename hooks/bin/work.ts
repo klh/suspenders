@@ -120,7 +120,7 @@ const SCHEMA: Record<string, Spec> = {
 		flags: ITEM_FLAGS,
 		minPos: 1,
 		reqFlags: ["--as"],
-		usage: "usage: take <id> --as <sid>",
+		usage: "usage: take <id> --as <sid> [--origin <host:agent>]",
 	},
 	release: {
 		flags: ITEM_FLAGS,
@@ -884,7 +884,8 @@ if (cmd === "add") {
 } else if (cmd === "take") {
 	const id = pos[0];
 	let as = flag("--as");
-	if (!id || !as) die("usage: take <id> --as <sid>");
+	const origin = flag("--origin");
+	if (!id || !as) die("usage: take <id> --as <sid> [--origin <host:agent>]");
 	// truncated-sid guard: a display slice (e.g. 'visual-c') must not become
 	// the owner of record — expand a unique session-sid prefix to the full sid
 	as = resolveSid(as);
@@ -920,9 +921,9 @@ if (cmd === "add") {
 	// compare-and-set: two lanes racing for the last READY item → exactly one wins
 	const r = db()
 		.query(
-			"UPDATE work_items SET state = 'CLAIMED', owner_sid = ?, updated_at = ? WHERE project = ? AND id = ? AND state = 'READY'",
+			"UPDATE work_items SET state = 'CLAIMED', owner_sid = ?, origin = COALESCE(?, origin), updated_at = ? WHERE project = ? AND id = ? AND state = 'READY'",
 		)
-		.run(as, Date.now(), PROJECT, id);
+		.run(as, origin ?? null, Date.now(), PROJECT, id);
 	if (r.changes === 0)
 		die(
 			`${id} was taken (or is not READY) — race lost, pick another from \`work ready\``,

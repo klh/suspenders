@@ -55,6 +55,12 @@ detached lane using the selected backend. The lane is recorded in
 verb cover the rest of its lifecycle. Dispatch refuses to start another
 process while that lane's recorded pid is alive.
 
+Each claim is stamped with an **origin** — `<hostname>:<agent>` via
+`work take --origin` — recorded on the work item and shown on board cards.
+That is the multi-machine seam: today every dispatch is this machine; when a
+second coordinator joins, items already carry who ran them, where, and on
+which backend, and the board renders it without schema changes.
+
 ### Selecting the agent backend
 
 `--agent` accepts `claude` (the default) or `codex`. The selected CLI must

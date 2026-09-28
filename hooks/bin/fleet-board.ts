@@ -892,7 +892,7 @@ function board(): Record<string, unknown>[] {
 	return projects.map(({ project }) => {
 		const items = db
 			.query(
-				"SELECT id, state, owner_sid, title, priority, result_sha, requires, updated_at FROM work_items WHERE project = ? ORDER BY priority DESC, id",
+				"SELECT id, state, owner_sid, origin, title, priority, result_sha, requires, updated_at FROM work_items WHERE project = ? ORDER BY priority DESC, id",
 			)
 			.all(project) as any[];
 		const doneIds = new Set(
@@ -910,6 +910,7 @@ function board(): Record<string, unknown>[] {
 			id: w.id,
 			state: w.state,
 			owner: w.owner_sid,
+			origin: w.origin,
 			title: w.title,
 			sha: w.result_sha,
 			requires: w.requires,

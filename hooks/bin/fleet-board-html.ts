@@ -1277,7 +1277,7 @@ function kanbanCard(t){
     (od ? '<span class="kdec">needs you</span>' : '') +
     '<span class="kage dim">' + agoShort(t.age_s) + '</span></div>';
   html += '<div class="ktitle">' + esc(String(t.title || '(untitled)')).slice(0, 140) + '</div>';
-  html += '<div class="klane dim">lane ' + esc(t.owner_label || t.owner_sid || 'unclaimed') + '</div>';
+  html += '<div class="klane dim">lane ' + esc(t.owner_label || t.owner_sid || 'unclaimed') + (t.origin ? ' · ' + esc(String(t.origin)) : '') + '</div>';
   if (t.tail && t.tail.text) html += '<div class="ktail">' + esc(t.tail.text) + '</div>';
   if (startable) html += '<button type="button" class="kstart" data-start="' + esc(t.id) + '" data-startproj="' + esc(t.project || '') + '">▶ start lane</button>';
   return html + '</div>';
@@ -1362,6 +1362,7 @@ function renderDrawer(){
   var t = d.task;
   var meta = '<div class="r"><span class="dim">state</span> ' + taskPill(t.state) + '</div>' +
     '<div class="r"><span class="dim">owner</span> ' + esc(t.owner_label || (t.owner_sid ? String(t.owner_sid).slice(0, 12) : '') || 'unclaimed') + '</div>' +
+    (t.origin ? '<div class="r"><span class="dim">origin</span> <span class="mono">' + esc(String(t.origin)) + '</span></div>' : '') +
     '<div class="r"><span class="dim">project</span> <span class="mono">' + esc(t.project || '?') + '</span></div>' +
     (t.requires ? '<div class="r"><span class="dim">needs</span> <span class="rq mono">' + esc(String(t.requires)) + '</span></div>' : '') +
     (t.scope ? '<div class="r"><span class="dim">scope</span> <span class="mono">' + esc(String(t.scope)) + '</span></div>' : '') +
