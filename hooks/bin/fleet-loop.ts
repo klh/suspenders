@@ -420,7 +420,7 @@ if (MODE === "dispatch") {
 					"-s",
 					"workspace-write",
 					"-c",
-					`sandbox_workspace_write.writable_roots=${JSON.stringify([REPO, `${process.env.HOME}/.cache/claude-governor`, `${process.env.HOME}/.cache/qlty`])}`,
+					`sandbox_workspace_write.writable_roots=${JSON.stringify([REPO, `${process.env.HOME}/.cache/claude-governor`, `${process.env.HOME}/.qlty`])}`,
 					"-c",
 					"sandbox_workspace_write.network_access=true",
 					prompt,
