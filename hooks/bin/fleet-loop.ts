@@ -314,12 +314,14 @@ if (MODE === "dispatch") {
 		show.out,
 		``,
 		`STEPS:`,
-		`1. Work in the EXISTING worktree ${wt} (branch ${branch}).`,
-		`2. Implement per the mission. SMALL anchored edits; spec-first on the repo's qlty config; co-situated tests for new logic; never hand-edit files another live lane owns.`,
-		`3. GATES: qlty fmt + qlty check on changed files → "No issues"; bun test on the files you touched → green.`,
-		`4. Commit on ${branch} (subject = the item title), push the branch. NO tags.`,
-		`5. Finish: bun ~/.claude/hooks/suspenders/bin/work.ts done ${item} --sha <branch-head>.`,
-		`Final line: DONE <sha> (or BLOCKED after 3 honest attempts, tree restored).`,
+		`0. PLAN FIRST (cheap, before any edit): inventory the impact surface — rg the areas the mission names, read the files you would edit and the repo's qlty config, note what any live lane already owns.`,
+		`1. SHATTER JUDGMENT: if the mission decomposes into 2+ genuinely independent scopes, do NOT implement it all here: bun ~/.claude/hooks/suspenders/bin/work.ts split ${item} "child one title" "child two title" --reason independent-scopes --keep 1 (a split beyond 2 children needs a registered plan item first: work add "plan: ..." then split --plan <id>). Work only the kept child; final line SPLIT ${item} — the fleet refills the rest.`,
+		`2. Work in the EXISTING worktree ${wt} (branch ${branch}).`,
+		`3. Implement per the mission and your step-0 plan. SMALL anchored edits; spec-first on the repo's qlty config; co-situated tests for new logic; never hand-edit files another live lane owns.`,
+		`4. GATES: qlty fmt + qlty check on changed files → "No issues"; bun test on the files you touched → green.`,
+		`5. Commit on ${branch} (subject = the item title), push the branch. NO tags.`,
+		`6. Finish: bun ~/.claude/hooks/suspenders/bin/work.ts done ${item} --sha <branch-head>.`,
+		`Final line: DONE <sha> | SPLIT ${item} | BLOCKED (after 3 honest attempts, tree restored).`,
 	].join("\n");
 	mkdirSync(`${REPO}/.fleet`, { recursive: true });
 	const briefFile = `${REPO}/.fleet/brief-${sid}.md`;
