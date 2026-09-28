@@ -71,6 +71,27 @@ checks, never throw:
 | llm           | Advice LLM endpoint     | `GET $SUSPENDERS_LLM_URL/v1/models` (default `http://127.0.0.1:8901`) answers within 1.5 s | local LLM stack docs          |
 | bind          | LAN binding             | informational: SUSPENDERS_BIND value                                                       | —                             |
 
+## POST /api/start
+
+`{ project, id }` required. Starts (dispatches) a lane on a READY work item by
+spawning `fleet-loop.ts dispatch --repo <project minus a trailing /.git> --item <id>`
+detached. Validation order — first failure wins:
+
+| condition                               | status |
+| --------------------------------------- | ------ |
+| missing `project` or `id`               | 400    |
+| demo board (`--demo`)                   | 409    |
+| `claude` binary not on the board's PATH | 409    |
+| unknown work item                       | 404    |
+| item already claimed (`owner_sid` set)  | 409    |
+| item not READY                          | 409    |
+| project directory missing on disk       | 409    |
+
+Success: `{ ok: true, item, sid }` — the lane sid is deterministic
+(`autow<n>`); the actual CAS claim happens inside dispatch's `work take`, so a
+racing claim loses cleanly (dispatch exits nonzero, nothing spawned). The
+board never spawns from `--demo`.
+
 ## Demo mode — `--demo` CLI flag
 
 `fleet-board.ts --demo` seeds an idempotent demo partition before serving (skip when
@@ -82,7 +103,9 @@ product-page screenshot. Never seeds into real projects; `--demo` also prints th
 
 ## Frontend owns
 
-Tab shell (Decisions · Tasks · Activity · Governor · Setup) driven by location.hash,
+Tab shell (Decisions · Tasks · Lanes · Activity · Governor · Setup) driven by location.hash,
 global project `<select>`, decision history (collapsed under OPEN), task drawer
-(click a task row), named state labels, a11y (buttons not divs, aria-live on toasts
+(click a task row), lanes kanban (work items as cards in state columns, live
+tails, ▶ start on unclaimed READY cards → POST /api/start; card click opens the
+drawer directly), named state labels, a11y (buttons not divs, aria-live on toasts
 and decision counter, focus-visible, ≥4.5:1 text contrast), no decorative controls.

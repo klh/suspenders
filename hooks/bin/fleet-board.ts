@@ -7,17 +7,19 @@
 // then open http://127.0.0.1:<port> — dropdown lists every known session;
 // focusing a session shows its project's TODO / IN-FLIGHT / DONE board,
 // its claims, inbox, lane state, and the event tail.
-import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
+
 import {
 	closeSync,
 	existsSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	readSync,
-	readdirSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { dirname } from "node:path";
+import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
 import { HTML } from "./fleet-board-html.ts";
 
 // sibling CLIs resolve relative to this file — the board is relocatable
@@ -76,6 +78,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/ack       dismiss an open fork (state to CANCELLED, idempotent)
 - POST /api/advise    fire the advice worker for a fork (async; lands as fact advice.<id>)
 - POST /api/comment   route a review line-comment to a work item's owning lane (coord NOTE; id, file, line, note required — note capped at 2000)
+- POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not READY, demo, or claude missing)
 
 ## Advice LLM
 
@@ -334,7 +337,7 @@ function json(data: unknown, status = 200): Response {
 //    names (default_server 444), so a non-loopback Host here is the proxy.
 //  • non-browser (no Origin — curl, hooks): Host must be loopback or the
 //    configured bind (DNS-rebind protection).
-function writeGuard(req: Request, url: URL): Response | null {
+function writeGuard(req: Request, _url: URL): Response | null {
 	const host = (req.headers.get("host") ?? "").toLowerCase().replace(/\.$/, "");
 	if (req.headers.get("origin")) {
 		let ohost = "";
@@ -493,8 +496,7 @@ function transcriptTail(
 			continue;
 		}
 		const msg = j?.message;
-		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content))
-			continue;
+		if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (let k = msg.content.length - 1; k >= 0; k--) {
 			const b = msg.content[k];
 			if (b?.type === "text" && typeof b.text === "string" && b.text.trim())
@@ -532,7 +534,7 @@ function unblockedBy(): Map<string, string | null> {
 		.all() as any[]) {
 		const pl = payloadOf(r.payload);
 		if (!pl?.work) continue;
-		const key = String(pl.project ?? "") + "\u0000" + String(pl.work);
+		const key = `${String(pl.project ?? "")}\u0000${String(pl.work)}`;
 		if (!m.has(key))
 			m.set(key, pl.unblocked_by != null ? String(pl.unblocked_by) : null);
 	}
@@ -559,7 +561,7 @@ function taskShape(
 		tail: transcriptTail(w.owner_sid),
 		unblocked_by:
 			w.state === "READY"
-				? (unblocked.get(String(w.project) + "\u0000" + String(w.id)) ?? null)
+				? (unblocked.get(`${String(w.project)}\u0000${String(w.id)}`) ?? null)
 				: null,
 	};
 }
@@ -592,10 +594,10 @@ function tasks(p: string | null): unknown[] {
 		task_id: string;
 		n: number;
 	}[])
-		openByTask.set(r.project + "\u0000" + r.task_id, r.n);
+		openByTask.set(`${r.project}\u0000${r.task_id}`, r.n);
 	const unblocked = unblockedBy();
 	return rows.map((w) =>
-		taskShape(w, openByTask.get(w.project + "\u0000" + w.id) ?? 0, unblocked),
+		taskShape(w, openByTask.get(`${w.project}\u0000${w.id}`) ?? 0, unblocked),
 	);
 }
 
@@ -893,7 +895,7 @@ function events(): unknown[] {
 			try {
 				note = e.payload
 					? Object.entries(JSON.parse(e.payload))
-							.map(([k, v]) => k + "=" + String(v).slice(0, 40))
+							.map(([k, v]) => `${k}=${String(v).slice(0, 40)}`)
 							.join(" ")
 					: "";
 			} catch {
@@ -914,7 +916,7 @@ function events(): unknown[] {
 function laneFacts(sid: string): Record<string, unknown> {
 	const rows = db
 		.query("SELECT key, value FROM facts WHERE key = ? OR key = ?")
-		.all("lane." + sid + ".state", "lane." + sid + ".capsule") as any[];
+		.all(`lane.${sid}.state`, `lane.${sid}.capsule`) as any[];
 	const out: Record<string, unknown> = {};
 	for (const r of rows) out[r.key.split(".").pop()!] = r.value;
 	return out;
@@ -963,7 +965,7 @@ function decisionRecords(): Record<string, unknown>[] {
 		let adviceError: string | undefined;
 		const a = db
 			.query("SELECT value FROM facts WHERE key = ?")
-			.get("advice." + d.event_id) as { value: string } | null;
+			.get(`advice.${d.event_id}`) as { value: string } | null;
 		if (a) {
 			try {
 				advice = JSON.parse(a.value);
@@ -1487,7 +1489,7 @@ Bun.serve({
 				.get(id) as any;
 			// reject unknown ids instead of silently answering nothing
 			if (!row)
-				return json({ ok: false, error: "unknown decision id: " + id }, 404);
+				return json({ ok: false, error: `unknown decision id: ${id}` }, 404);
 			if (row.state === "ANSWERED" || row.state === "ACKNOWLEDGED")
 				return row.answer_note === note
 					? json({ ok: true, replay: true, to: row.answer_to })
@@ -1504,7 +1506,7 @@ Bun.serve({
 				const cands = db
 					.query("SELECT sid FROM sessions WHERE sid LIKE ? || '%'")
 					.all(to) as { sid: string }[];
-				if (cands.length === 1) to = cands[0]!.sid;
+				if (cands.length === 1) to = cands[0]?.sid;
 				else {
 					const alias = !!db
 						.query("SELECT 1 AS x FROM events WHERE source = ? LIMIT 1")
@@ -1515,8 +1517,8 @@ Bun.serve({
 								ok: false,
 								error:
 									cands.length > 1
-										? "ambiguous sid: " + to
-										: "unknown target session: " + to,
+										? `ambiguous sid: ${to}`
+										: `unknown target session: ${to}`,
 							},
 							400,
 						);
@@ -1540,7 +1542,7 @@ Bun.serve({
 					stderr: "pipe",
 				},
 			);
-			const out = (p.stdout.toString() + " " + p.stderr.toString()).trim();
+			const out = `${p.stdout.toString()} ${p.stderr.toString()}`.trim();
 			if (p.exitCode !== 0)
 				return json({ ok: false, output: out.slice(0, 400), to }, 500);
 			// answered — lifecycle state, correlated to the fork's event id; the
@@ -1568,9 +1570,9 @@ Bun.serve({
 				kind: string;
 			} | null;
 			if (!ev)
-				return json({ ok: false, error: "unknown event id: " + id }, 404);
+				return json({ ok: false, error: `unknown event id: ${id}` }, 404);
 			if (!isDecisionKind(ev.kind))
-				return json({ ok: false, error: "not a decision event: " + id }, 400);
+				return json({ ok: false, error: `not a decision event: ${id}` }, 400);
 			syncDecisions();
 			const row = db
 				.query("SELECT state FROM decisions WHERE event_id = ?")
@@ -1595,9 +1597,9 @@ Bun.serve({
 				kind: string;
 			} | null;
 			if (!ev)
-				return json({ ok: false, error: "unknown event id: " + id }, 404);
+				return json({ ok: false, error: `unknown event id: ${id}` }, 404);
 			if (!isDecisionKind(ev.kind))
-				return json({ ok: false, error: "not a decision event: " + id }, 400);
+				return json({ ok: false, error: `not a decision event: ${id}` }, 400);
 			const child = Bun.spawn(
 				[process.execPath, CLI("advise.ts"), String(id)],
 				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
@@ -1666,6 +1668,90 @@ Bun.serve({
 				);
 			return json({ ok: true, to: w.owner_sid });
 		}
+		if (req.method === "POST" && url.pathname === "/api/start") {
+			// W65 — start-on-READY: the board dispatches a fresh lane on a READY
+			// item via fleet-loop's dispatch mode (CAS claim → worktree → briefed
+			// headless claude). This endpoint only validates; the claim race
+			// belongs to dispatch's work take. Detached spawn: the HTTP answer
+			// returns while the lane boots.
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			const parsed = await readJson(req);
+			if (!parsed.ok) return parsed.resp;
+			const project = String(parsed.body?.project ?? "");
+			const id = String(parsed.body?.id ?? "");
+			if (!project || !id)
+				return json({ ok: false, error: "missing project or id" }, 400);
+			if (DEMO)
+				return json({ ok: false, error: "demo board — no real lanes" }, 409);
+			const claude = Bun.which("claude");
+			if (!claude)
+				return json(
+					{ ok: false, error: "claude binary not found on the board's PATH" },
+					409,
+				);
+			const w = db
+				.query(
+					"SELECT state, owner_sid, project FROM work_items WHERE project = ? AND id = ?",
+				)
+				.get(project, id) as {
+				state: string;
+				owner_sid: string | null;
+				project: string;
+			} | null;
+			if (!w)
+				return json(
+					{ ok: false, error: `no work item ${id} in ${project}` },
+					404,
+				);
+			if (w.owner_sid)
+				return json(
+					{ ok: false, error: `${id} already claimed by ${w.owner_sid}` },
+					409,
+				);
+			if (w.state !== "READY")
+				return json(
+					{
+						ok: false,
+						error: `${id} is ${w.state} — only READY items start a lane`,
+					},
+					409,
+				);
+			const repo = w.project.replace(/\/\.git$/, "");
+			if (!existsSync(repo))
+				return json(
+					{ ok: false, error: `project directory missing: ${repo}` },
+					409,
+				);
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					CLI("fleet-loop.ts"),
+					"dispatch",
+					"--repo",
+					repo,
+					"--item",
+					id,
+				],
+				{
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "ignore",
+					// a launchd board can miss the user PATH — hand the lane's
+					// `claude` spawn the dir we just resolved it from
+					env: {
+						...process.env,
+						PATH: `${dirname(claude)}:${process.env.PATH ?? ""}`,
+					},
+				},
+			);
+			child.unref();
+			return json({
+				ok: true,
+				item: id,
+				sid: `autow${id.replace(/^W/, "").replace(/\./g, "")}`,
+			});
+		}
 		if (url.pathname === "/llms.txt")
 			// static plain-text agent contract (see LLMS_TXT above)
 			return new Response(LLMS_TXT, {
@@ -1685,7 +1771,7 @@ Bun.serve({
 	},
 });
 console.log(
-	`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise /api/comment)`,
+	`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise /api/comment /api/start)`,
 );
 
 // best-effort Bonjour/mDNS: while the board runs, http://suspenders.local:PORT
