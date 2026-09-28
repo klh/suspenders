@@ -87,7 +87,12 @@ bun fleet-loop.ts lanes --repo <dir>
   them; the coordinator does not commit on its behalf. A fresh workspace also
   gets the repo's gitignored build dirs (`node_modules`, `.venv`, `vendor`,
   `target`) symlinked in — same as `worktree.ts` create — so codex lanes skip
-  reinstalls.
+  reinstalls. Gates ride the codex hook adapter (W73): dispatch stamps
+  `SUSPENDERS_SID` into the lane env and merges the five gate registrations
+  into `~/.codex/hooks.json` (merge-not-clobber, `gate-wire-codex.ts --check`
+  to inspect); unresolved lane identity fail-opens with a line in
+  `~/.cache/claude-governor/codex-drift.jsonl`. A failed wire aborts
+  dispatch — never a silent gate-less lane.
 
 Both backends receive the same brief and must follow `AGENTS.md`, including
 quality gates, commit/push, and the Work Graph completion protocol. The

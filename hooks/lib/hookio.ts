@@ -1,45 +1,98 @@
 // hooks/lib/hookio.ts — the ONE definition of hook input/output contracts.
 // Every gate imports from here; no gate builds its own JSON or exit codes.
 export type HookInput = {
-  tool_name?: string;
-  tool_input?: { command?: string; file_path?: string; notebook_path?: string; old_string?: string; new_string?: string };
-  cwd?: string;
-  stop_hook_active?: boolean;
-  hook_event_name?: string;
+	tool_name?: string;
+	tool_input?: {
+		command?: string;
+		file_path?: string;
+		notebook_path?: string;
+		old_string?: string;
+		new_string?: string;
+	};
+	cwd?: string;
+	stop_hook_active?: boolean;
+	hook_event_name?: string;
 };
 
+// Codex dialect seam (W73): gates keep ZERO codex knowledge — helpers route
+// through the installed dialect when gate.ts binds one (`bun gate.ts codex
+// <event>`); Claude behavior is the default (null).
+export type DialectDecision = {
+	stdout?: string;
+	stderr?: string;
+	exit: number;
+};
+export type HookDialect = {
+	decide(kind: string, event: string, arg: string): DialectDecision;
+};
+let DIALECT: HookDialect | null = null;
+export function setDialect(d: HookDialect): void {
+	DIALECT = d;
+}
+
+function outD(d: DialectDecision): never {
+	if (d.stdout !== undefined) process.stdout.write(d.stdout);
+	if (d.stderr !== undefined) process.stderr.write(d.stderr);
+	process.exit(d.exit);
+}
+
 export async function readHook(): Promise<HookInput> {
-  try {
-    return JSON.parse(await new Response(Bun.stdin).text());
-  } catch {
-    return {};
-  }
+	try {
+		return JSON.parse(await new Response(Bun.stdin).text());
+	} catch {
+		return {};
+	}
 }
 
 export function allow(): never {
-  process.stdout.write("{}");
-  process.exit(0);
+	if (DIALECT) outD(DIALECT.decide("allow", "", ""));
+	process.stdout.write("{}");
+	process.exit(0);
 }
 export function deny(reason: string): never {
-  out({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
+	if (DIALECT) outD(DIALECT.decide("deny", "", reason));
+	out({
+		hookSpecificOutput: {
+			hookEventName: "PreToolUse",
+			permissionDecision: "deny",
+			permissionDecisionReason: reason,
+		},
+	});
 }
 export function ask(reason: string): never {
-  out({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: reason } });
+	if (DIALECT) outD(DIALECT.decide("ask", "", reason));
+	out({
+		hookSpecificOutput: {
+			hookEventName: "PreToolUse",
+			permissionDecision: "ask",
+			permissionDecisionReason: reason,
+		},
+	});
 }
 export function nudge(message: string): never {
-  out({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: message } });
+	if (DIALECT) outD(DIALECT.decide("nudge", "", message));
+	out({
+		hookSpecificOutput: {
+			hookEventName: "PreToolUse",
+			additionalContext: message,
+		},
+	});
 }
 export function context(message: string, event = "SessionStart"): never {
-  out({ hookSpecificOutput: { hookEventName: event, additionalContext: message } });
+	if (DIALECT) outD(DIALECT.decide("context", event, message));
+	out({
+		hookSpecificOutput: { hookEventName: event, additionalContext: message },
+	});
 }
 export function feedback(message: string): never {
-  // PostToolUse / Stop: exit 2 feeds stderr back to the agent (non-blocking,
-  // the tool already ran) — the ONE definition of the feedback channel.
-  process.stderr.write(message + "\n");
-  process.exit(2);
+	// PostToolUse / Stop: exit 2 feeds stderr back to the agent (non-blocking,
+	// the tool already ran) — the ONE definition of the feedback channel.
+	if (DIALECT) outD(DIALECT.decide("feedback", "", message));
+	process.stderr.write(`${message}\n`);
+	process.exit(2);
 }
 
 function out(obj: unknown): never {
-  process.stdout.write(JSON.stringify(obj));
-  process.exit(0);
+	process.stdout.write(JSON.stringify(obj));
+	process.exit(0);
 }

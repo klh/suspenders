@@ -14,46 +14,54 @@
 //   bun gate.ts session     SessionStart (optional operator motd)
 import { readHook, allow } from "./lib/hookio.ts";
 import { bashGate } from "./gates/bash.ts";
-import { configGate } from "./gates/config.ts";
 import { filesGate } from "./gates/files.ts";
 import { governorGate } from "./gates/governor.ts";
 import { stopGate } from "./gates/stop.ts";
-import { mutationSizeGate } from "./gates/mutation-size.ts";
-import { ledgerGate } from "./gates/ledger.ts";
+import { preFilesChain } from "./gates/chain.ts";
 
 const hook = await readHook();
 const event = process.argv[2] ?? "";
 
 switch (event) {
-  case "pre-bash": bashGate(hook); // exits: single-gate event (deny/nudge/allow)
-  case "pre-files": {
-    // W14: one bun process per Edit/Write — gates chain in-process; each
-    // exits on deny/ask, returning falls through to the next; allow() closes.
-    governorGate(hook);
-    mutationSizeGate(hook); // W5: payload cap on existing files (SUSPENDERS_MAX_MUTATION)
-    ledgerGate(hook); // W8: no NEW TODO/IN-FLIGHT/BLOCKED/NEXT markers in ledgers
-    configGate(hook);
-    allow();
-  }
-  case "post-files": filesGate(hook);
-  case "governor":
-    governorGate(hook); // standalone registration (MultiEdit matcher) — no longer chains
-    allow();
-  case "stop": stopGate(hook);
-  case "session": {
-    // optional operator motd — drop a file at ~/.cache/claude-governor/motd.md
-    // and it surfaces at every session start; absent file = silent no-op
-    const { existsSync, statSync, readFileSync } = await import("node:fs");
-    const motd = `${process.env.HOME ?? ""}/.cache/claude-governor/motd.md`;
-    if (existsSync(motd) && statSync(motd).size > 0) {
-      const { context } = await import("./lib/hookio.ts");
-      context(readFileSync(motd, "utf8").slice(0, 2000), "SessionStart");
-    } else {
-      process.stdout.write("{}");
-      process.exit(0);
-    }
-  }
-  default:
-    process.stdout.write("{}");
-    process.exit(0);
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: gates are `: never` — the call ends the case
+	case "pre-bash":
+		bashGate(hook); // exits: single-gate event (deny/nudge/allow)
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: preFilesChain is `: never` — the call ends the case
+	case "pre-files":
+		preFilesChain(hook); // W14 chain — one process, allow() closes
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: filesGate is `: never` — the call ends the case
+	case "post-files":
+		filesGate(hook);
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: governorGate is `: never` — the call ends the case
+	case "governor":
+		governorGate(hook); // standalone registration (MultiEdit matcher) — no longer chains
+		allow();
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: stopGate is `: never` — the call ends the case
+	case "stop":
+		stopGate(hook);
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: codexGate never resolves — await parks the case
+	case "codex": {
+		// W73 codex adapter — dialect bound by argv (`gate.ts codex <mode>`):
+		// payload normalization + decision translation + fleet sid resolution
+		// live in gates/codex.ts + lib/codex.ts; gates keep zero codex knowledge.
+		const { codexGate } = await import("./gates/codex.ts");
+		await codexGate(process.argv[3] ?? "", hook as Record<string, unknown>);
+	}
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: context()/exit is `: never` — the case always exits
+	case "session": {
+		// optional operator motd — drop a file at ~/.cache/claude-governor/motd.md
+		// and it surfaces at every session start; absent file = silent no-op
+		const { existsSync, statSync, readFileSync } = await import("node:fs");
+		const motd = `${process.env.HOME ?? ""}/.cache/claude-governor/motd.md`;
+		if (existsSync(motd) && statSync(motd).size > 0) {
+			const { context } = await import("./lib/hookio.ts");
+			context(readFileSync(motd, "utf8").slice(0, 2000), "SessionStart");
+		} else {
+			process.stdout.write("{}");
+			process.exit(0);
+		}
+	}
+	default:
+		process.stdout.write("{}");
+		process.exit(0);
 }
