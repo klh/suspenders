@@ -7,3 +7,5 @@ node_modules/
 .tmp-work-mirror-repo*/
 .tmp-secrets-repo-*/
 .gates-test-*/
+
+.worktrees/
