@@ -43,10 +43,6 @@ const die = (m: string): never => {
 };
 
 const [cmd, ...rest] = process.argv.slice(2);
-const arg = (name: string): string | null => {
-	const i = rest.indexOf(name);
-	return i >= 0 ? (rest[i + 1] ?? null) : null;
-};
 
 // --help anywhere wins before any parsing that could create state
 if (
@@ -224,7 +220,10 @@ function db(): Database {
 	} catch (e) {
 		if (isRead) {
 			const m = mirrorOrNull();
-			if (m) return (handle = m);
+			if (m) {
+				handle = m;
+				return m;
+			}
 		}
 		die(
 			`governor.db unreachable (${e instanceof Error ? e.message : String(e)}) — mutations need the DB; the committed ${MIRROR_NAME} mirror keeps reads alive`,
@@ -238,10 +237,14 @@ function db(): Database {
 		).n;
 		if (n === 0) {
 			const m = mirrorOrNull();
-			if (m) return (handle = m);
+			if (m) {
+				handle = m;
+				return m;
+			}
 		}
 	}
-	return (handle = d);
+	handle = d;
+	return d;
 }
 
 // project partitioning: shared identity from govdb (repo's common git dir) —
@@ -756,7 +759,7 @@ function exportMirror(): void {
 			}),
 		);
 		const tmp = `${mirrorPath()}.tmp-${process.pid}`;
-		writeFileSync(tmp, lines.join("\n") + "\n");
+		writeFileSync(tmp, `${lines.join("\n")}\n`);
 		renameSync(tmp, mirrorPath()); // atomic — a concurrent reader sees old or new, never half
 	} catch (e) {
 		console.error(
@@ -1228,33 +1231,31 @@ if (cmd === "add") {
 			`${green("✓")} migrated ${fresh.length} — ${rows.length - fresh.length} already in the graph`,
 		);
 		if (!ledger.includes(TOMBSTONE) && fresh.length) {
-			appendFileSync(
-				path,
-				[
-					"",
-					"---",
-					"",
-					`## Migrated to the Work Graph — this ledger is HISTORICAL ${TOMBSTONE}`,
-					"",
-					"<!-- `work migrate-ledger` imported the unresolved items above into the Work Graph",
-					"(governor.db, work CLI) on " +
-						new Date().toISOString().slice(0, 10) +
-						". Import creates — a human closes:",
-					"`work done <id> --sha <sha>`. Re-running migrate-ledger adds nothing new. -->",
-					"",
-					"| ledger line | work item |",
-					"| --- | --- |",
-					...rows.map(
-						(r) =>
-							`| ${r.title.replaceAll("|", "\\|")} | ` +
-							"`" +
-							r.id +
-							"`" +
-							(r.fresh ? "" : " (already in graph)") +
-							" |",
-					),
-				].join("\n") + "\n",
-			);
+			const note = [
+				"",
+				"---",
+				"",
+				`## Migrated to the Work Graph — this ledger is HISTORICAL ${TOMBSTONE}`,
+				"",
+				"<!-- `work migrate-ledger` imported the unresolved items above into the Work Graph",
+				"(governor.db, work CLI) on " +
+					new Date().toISOString().slice(0, 10) +
+					". Import creates — a human closes:",
+				"`work done <id> --sha <sha>`. Re-running migrate-ledger adds nothing new. -->",
+				"",
+				"| ledger line | work item |",
+				"| --- | --- |",
+				...rows.map(
+					(r) =>
+						`| ${r.title.replaceAll("|", "\\|")} | ` +
+						"`" +
+						r.id +
+						"`" +
+						(r.fresh ? "" : " (already in graph)") +
+						" |",
+				),
+			].join("\n");
+			appendFileSync(path, `${note}\n`);
 		}
 	}
 } else {
