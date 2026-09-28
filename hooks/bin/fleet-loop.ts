@@ -408,12 +408,6 @@ if (MODE === "dispatch") {
 					stderr: "ignore",
 				});
 			};
-			g([
-				"update-ref",
-				`refs/heads/suspenders/${item}`,
-				sh(["git", "-C", REPO, "rev-parse", MAIN]),
-			]);
-			g(["checkout", "-q", `suspenders/${item}`]);
 			g(["config", "core.bare", "false"]);
 			g(["config", "core.worktree", wt]);
 			writeFileSync(
@@ -421,11 +415,32 @@ if (MODE === "dispatch") {
 				`${REPO}/.git/objects\n`,
 			);
 			g([
+				"update-ref",
+				`refs/heads/suspenders/${item}`,
+				sh(["git", "-C", REPO, "rev-parse", MAIN]),
+			]);
+			g(["symbolic-ref", "HEAD", `refs/heads/suspenders/${item}`]);
+			g(["reset", "--hard", "--quiet"]);
+			g([
 				"remote",
 				"add",
 				"origin",
 				sh(["git", "-C", REPO, "remote", "get-url", "origin"]),
 			]);
+			// loud, never silent: verify the store landed on the lane's branch
+			// before spawning anyone (unborn main = lane can push origin main)
+			const head = Bun.spawnSync(
+				["git", "--git-dir", store, "symbolic-ref", "--short", "HEAD"],
+				{ stdout: "pipe" },
+			)
+				.stdout?.toString()
+				.trim();
+			if (head !== `suspenders/${item}`) {
+				console.error(
+					`codex store init failed: HEAD=${head || "unborn"} — inspect ${store}`,
+				);
+				process.exit(1);
+			}
 		}
 		writeFileSync(`${wt}/.git`, `gitdir: ${store}\n`);
 	}
