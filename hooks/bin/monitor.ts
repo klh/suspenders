@@ -8,7 +8,7 @@
 // here are therefore ts-based or pure-DB; ownership liveness for lanes is a
 // known blind spot (backlog W9), surfaced by `work orphaned` instead.
 // usage: bun ~/.claude/bin/monitor.ts [--fix]
-import { statSync } from "node:fs";
+import { statSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
 import { openGovernorDb, sweepStaleSessions } from "../lib/govdb.ts";
 
 const db = openGovernorDb();
@@ -243,10 +243,11 @@ for (const [key, kids] of bursts) {
 
 // 7. zombie lanes: CLAIMED items whose owner went silent — usage-limit
 // deaths freeze subagents silently while the claim and the wall clock keep
-// going (2026-09-24: 47 frozen, 6h blackout). THREE-STATE multi-signal rule
+// going (2026-09-24: 47 frozen, 6h blackout). FOUR-STATE multi-signal rule
 // (lookup failure is NEVER death):
 //   ZOMBIE  = hb stale + transcript stale (2 independent signals)
 //   SUSPECT = one signal stale, other UNKNOWN
+//   STALLED = alive but quiet — hb fresh, transcript's newest entry old (W51)
 //   UNKNOWN = telemetry missing — never claims death
 // Threshold from fact fleet.zombie_after_ms (default 45min). WAIT_RATE /
 // PAUSED sessions are expected-silent, never zombies. Remediation (reclaim
@@ -255,6 +256,32 @@ for (const [key, kids] of bursts) {
 const ZOMBIE_MS = Number(
 	(db.query("SELECT value FROM facts WHERE key = 'fleet.zombie_after_ms'").get() as { value: string } | null)?.value ?? 45 * 60_000,
 );
+const STALL_MS = Number(
+	(db.query("SELECT value FROM facts WHERE key = 'fleet.stall_after_ms'").get() as { value: string } | null)?.value ?? 15 * 60_000,
+);
+// W51: transcript liveness by CONTENT — the newest entry's own `timestamp`
+// (mtime alone can lie: compaction or a partial-line flush touches the file
+// without a new entry). Tail-read only; a mid-write unparseable last line is
+// UNKNOWN, never a stall (lookup failure is never death — same doctrine).
+function transcriptTailTs(path: string): number | null {
+	try {
+		const fh = openSync(path, "r");
+		try {
+			const size = fstatSync(fh).size;
+			const len = Math.min(size, 65_536);
+			const buf = Buffer.alloc(len);
+			readSync(fh, buf, 0, len, size - len);
+			const tail = buf.toString("utf8").replace(/\s+$/, "");
+			const line = tail.slice(tail.lastIndexOf("\n") + 1).trim();
+			if (!line) return null;
+			return Date.parse(String(JSON.parse(line).timestamp)) || null;
+		} finally {
+			closeSync(fh);
+		}
+	} catch {
+		return null;
+	}
+}
 const zProjects = db.query("SELECT DISTINCT project FROM work_items WHERE state IN ('CLAIMED','RUNNING')").all() as { project: string }[];
 for (const { project } of zProjects) {
 	const claimed = db
@@ -297,6 +324,32 @@ for (const { project } of zProjects) {
 		}
 		const verdict = signals.length >= 2 ? "ZOMBIE" : signals.length === 1 ? "SUSPECT" : known === 0 ? "UNKNOWN" : "ACTIVE";
 		const label = `${w.owner_sid.slice(0, 10)} ${verdict}${signals.length ? ` (${signals.join(", ")})` : " (no telemetry)"}`;
+		// W51: STALLED — alive but quiet: hb fresh (hooks firing) while the
+		// transcript's newest entry is old and nothing waits on a decision
+		// (waiting/PAUSED/WAIT_RATE exited above) — alive, producing nothing.
+		// Not death, so no reclaim: one STALL_NUDGE per quiet episode to the
+		// lane, deduped via fact stall.<sid> (the nudged watermark); the
+		// transcript advancing again re-arms it.
+		if (verdict === "ACTIVE" && sess?.transcript_path) {
+			const lastTs = transcriptTailTs(sess.transcript_path);
+			const fk = `stall.${w.owner_sid}`;
+			const seen = db.query("SELECT value, ts FROM facts WHERE key = ?").get(fk) as { value: string; ts: number } | null;
+			if (lastTs !== null && now - lastTs > STALL_MS) {
+				const quiet = Math.round((now - lastTs) / 60000);
+				if (seen?.value === String(lastTs)) {
+					issues.push(`stalled ${w.id}: ${w.owner_sid.slice(0, 10)} STALLED (transcript quiet ${quiet}min, nudged ${Math.round((now - seen.ts) / 60000)}min ago)`);
+				} else {
+					db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, String(lastTs), now);
+					db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'monitor', 'STALL_NUDGE', ?, ?, ?)").run(
+						now,
+						w.id,
+						JSON.stringify({ work: w.id, note: `transcript quiet ${quiet}m — per the work graph, next step is ${w.title}` }),
+						w.owner_sid,
+					);
+					fixed.push(`${w.owner_sid.slice(0, 10)} STALLED ${w.id} — transcript quiet ${quiet}min, STALL_NUDGE sent (next: ${w.title.slice(0, 50)})`);
+				}
+			} else if (seen) db.query("DELETE FROM facts WHERE key = ?").run(fk);
+		}
 		if (verdict === "ACTIVE") continue;
 		const fk = `zombie.${w.id}`;
 		const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as { ts: number } | null;

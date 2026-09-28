@@ -323,3 +323,83 @@ describe("monitor 5c — drive-by fan-outs", () => {
 		expect(r.code).toBe(0);
 	});
 });
+
+// W51 — STALLED: the fourth verdict. hb fresh (hooks firing) but the
+// transcript's newest entry is quiet past fleet.stall_after_ms (default
+// 15min) while the lane holds a claim and nothing waits on a decision —
+// alive and producing nothing. One STALL_NUDGE per quiet episode, deduped
+// via fact stall.<sid>; the transcript advancing again re-arms the nudge.
+describe("monitor W51 — stalled lanes", () => {
+	const STALL_SID = "stall-lane-bbbbbbbb";
+	const transP = join(HOME2, ".claude", "projects", "t", `${STALL_SID}.jsonl`);
+	const QUIET_TS = NOW2 - 20 * M2;
+	const TITLE2 = "W51 stall fixture work item";
+	const seedStall = (ts: number): void => {
+		mkdirSync(dirname(transP), { recursive: true });
+		writeFileSync(transP, JSON.stringify({ timestamp: new Date(ts).toISOString() }) + "\n");
+		seed2((db) => {
+			db.query("INSERT OR REPLACE INTO sessions (sid, project, role, parent_sid, started_at, hb, state, transcript_path) VALUES (?, ?, 'worker', NULL, ?, ?, 'RUNNING', ?)").run(STALL_SID, PROJ2, ts, NOW2, transP);
+			db.query("INSERT OR REPLACE INTO work_items (project, id, title, state, owner_sid, created_at, updated_at) VALUES (?, ?, ?, 'CLAIMED', ?, ?, ?)").run(PROJ2, "W51T", TITLE2, STALL_SID, ts, ts);
+		});
+	};
+	const stallCounts = (): { ev: number; fk: { value: string } | null } => {
+		const d = new Database(DB2, { readonly: true });
+		const ev = (d.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'STALL_NUDGE'").get() as { n: number }).n;
+		const fk = d.query("SELECT value FROM facts WHERE key = ?").get(`stall.${STALL_SID}`) as { value: string } | null;
+		d.close();
+		return { ev, fk };
+	};
+
+	test("quiet transcript + fresh hb → STALLED: one STALL_NUDGE per episode, re-armed when the transcript moves", () => {
+		fresh2(); // own DB2 cycle — no ordering dependency on the suites above
+		seedStall(QUIET_TS); // hb fresh (NOW2), transcript's newest entry 20min old
+		const r = run2();
+		expect(r.out).toContain("STALL_NUDGE sent");
+		expect(r.out).toContain("next: W51 stall fixture work item");
+		const first = stallCounts();
+		expect(first.ev).toBe(1);
+		expect(first.fk?.value).toBe(String(QUIET_TS)); // watermark = nudged last-entry ts
+		const r2 = run2();
+		expect(r2.err).toContain("stalled W51T"); // re-alerts, but no second nudge
+		expect(stallCounts().ev).toBe(1);
+		seedStall(NOW2); // transcript advances → episode over, fact cleared
+		const r3 = run2();
+		expect(r3.err).not.toContain("stalled W51T");
+		const mid = stallCounts();
+		expect(mid.ev).toBe(1);
+		expect(mid.fk).toBeNull();
+		seedStall(NOW2 - 25 * M2); // quiet again at a NEW watermark → re-nudge
+		const r4 = run2();
+		expect(r4.out).toContain("STALL_NUDGE sent");
+		expect(stallCounts().ev).toBe(2);
+	});
+
+	test("expected-silent lanes are never nudged: waiting on an OPEN decision, PAUSED, WAIT_RATE", () => {
+		fresh2();
+		mkdirSync(dirname(transP), { recursive: true });
+		writeFileSync(transP, JSON.stringify({ timestamp: new Date(QUIET_TS).toISOString() }) + "\n");
+		seed2((db) => {
+			db.run(
+				"CREATE TABLE IF NOT EXISTS decisions (id INTEGER PRIMARY KEY, project TEXT, task_id TEXT, asked_by TEXT, question TEXT, options TEXT, state TEXT NOT NULL DEFAULT 'OPEN', delivery TEXT, answer_note TEXT, answer_to TEXT, answer_token TEXT, created_ts INTEGER, answered_ts INTEGER, ack_ts INTEGER)",
+			);
+			db.query("INSERT INTO decisions (project, asked_by, question, state, answer_to, created_ts) VALUES (?, 'human', 'rule on this?', 'OPEN', ?, ?)").run(PROJ2, "stall-wait-cccccccc", NOW2);
+			for (const [sid, state, item] of [
+				["stall-wait-cccccccc", "RUNNING", "W51W"],
+				["stall-pause-dddddddd", "PAUSED", "W51P"],
+				["stall-rate-eeeeeeee", "WAIT_RATE", "W51R"],
+			] as const) {
+				db.query("INSERT INTO sessions (sid, project, role, parent_sid, started_at, hb, state, transcript_path) VALUES (?, ?, 'worker', NULL, ?, ?, ?, ?)").run(sid, PROJ2, NOW2, NOW2, state, transP);
+				db.query("INSERT INTO work_items (project, id, title, state, owner_sid, created_at, updated_at) VALUES (?, ?, ?, 'CLAIMED', ?, ?, ?)").run(PROJ2, item, `fixture ${item}`, sid, NOW2, NOW2);
+			}
+		});
+		const r = run2();
+		expect(r.out).not.toContain("STALL_NUDGE");
+		expect(r.err).not.toContain("stalled W51");
+		expect(r.code).toBe(0);
+		expect(r.out).toContain("health clean");
+		const d = new Database(DB2, { readonly: true });
+		expect((d.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'STALL_NUDGE'").get() as { n: number }).n).toBe(0);
+		expect((d.query("SELECT COUNT(*) AS n FROM facts WHERE key LIKE 'stall.%'").get() as { n: number }).n).toBe(0);
+		d.close();
+	});
+});
