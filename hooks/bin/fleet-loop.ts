@@ -24,6 +24,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
@@ -227,6 +228,15 @@ function mergeOne(b: string): void {
 		retireMerged(b);
 		return;
 	}
+	// liveness marker: a crash between --no-commit and commit leaves
+	// MERGE_HEAD + staged debris that plain merge --abort cannot clear (the
+	// 2026-09-28 gaps stall). The marker tells the next cycle whether a
+	// merge runner is genuinely alive or the state is debris.
+	const marker = `${REPO}/.fleet/merge-active`;
+	writeFileSync(
+		marker,
+		JSON.stringify({ pid: process.pid, branch: b, ts: Date.now() }),
+	);
 	const before = sh(["git", "rev-parse", "--short", "HEAD"]);
 	const mv = LADDER
 		? runTemplate(LADDER, b, LADDER_TIMEOUT_MS)
@@ -241,14 +251,36 @@ function mergeOne(b: string): void {
 	} else {
 		mergeFail(b, mv.tail);
 	}
+	try {
+		rmSync(`${REPO}/.fleet/merge-active`);
+	} catch {}
 	retireMerged(b);
 }
 
+/** pid of a live merge runner, or null. A stale marker (dead pid, or older
+ * than 30 min — a watchdog-killed runner whose unlink never ran) reads as
+ * debris. */
+function mergeRunnerAlive(): number | null {
+	try {
+		const j = JSON.parse(
+			readFileSync(`${REPO}/.fleet/merge-active`, "utf8"),
+		) as { pid: number; ts: number };
+		if (Date.now() - j.ts > 30 * 60_000) return null;
+		process.kill(j.pid, 0);
+		return j.pid;
+	} catch {
+		return null;
+	}
+}
+
 async function cycle(): Promise<void> {
-	// 1. never enter a cycle with leftover merge state
+	// 1. never enter a cycle with leftover merge state. MERGE_HEAD is either
+	// a LIVE merge (another runner mid-flight — hands off) or crashed-run
+	// debris (heal: surgical abort, guarded reset as last resort).
 	if (existsSync(`${REPO}/.git/MERGE_HEAD`)) {
-		run(["git", "merge", "--abort"]);
-		log("ABORT leftover MERGE_HEAD");
+		const live = mergeRunnerAlive();
+		if (live) log(`MERGE in progress by pid ${live} — cycle leaves it alone`);
+		else healCrashedMerge();
 	}
 
 	// 2. merge every ahead branch through the ladder (fail-isolated per branch)
@@ -266,6 +298,38 @@ async function cycle(): Promise<void> {
 
 	// 3. refill the fleet — policy lives in the repo's dispatch script
 	if (DISPATCH) runTemplate(DISPATCH, "", LADDER_TIMEOUT_MS);
+}
+
+/** Recover a crashed merge: a dead runner left MERGE_HEAD + staged debris.
+ * SURGICAL FIRST — restore only STAGED paths (index column of porcelain) to
+ * the index, which is what blocks merge --abort; unstaged paths may be a
+ * bystander session's WIP and are never touched. Guarded reset --hard is
+ * the last resort, loud, and only when no live runner exists. */
+function healCrashedMerge(): void {
+	const head = sh(["git", "rev-parse", "--short", "MERGE_HEAD"]) || "?";
+	const branch = sh(["git", "name-rev", "--name-only", "MERGE_HEAD"]) || head;
+	const staged = sh(["git", "status", "--porcelain"])
+		.split("\n")
+		.filter((l) => l.length > 3 && l[0] !== " " && l[0] !== "?")
+		.map((l) => l.slice(3).trim());
+	if (staged.length)
+		run([
+			"git",
+			"checkout",
+			"--",
+			...staged.map((p) => p.split(" -> ").pop() ?? p),
+		]);
+	const ab = runCap(["git", "merge", "--abort"]);
+	if (ab.code === 0) {
+		log(
+			`SELF-HEAL crashed merge of ${branch} (${head}): restored ${staged.length} staged path(s) to the index, aborted cleanly`,
+		);
+		return;
+	}
+	run(["git", "reset", "--hard"]);
+	log(
+		`SELF-HEAL crashed merge of ${branch} (${head}): surgical abort failed (${ab.out.slice(0, 120)}), discarded staged debris via guarded reset --hard`,
+	);
 }
 
 // dispatch: one Work Graph item → claimed, worktree, briefed headless lane.
