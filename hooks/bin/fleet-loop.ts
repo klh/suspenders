@@ -31,11 +31,11 @@ const argv = process.argv.slice(2);
 const MODE = argv[0];
 if (
 	!MODE ||
-	!["once", "watch", "lanes"].includes(MODE) ||
+	!["once", "watch", "lanes", "dispatch"].includes(MODE) ||
 	!argv.includes("--repo")
 ) {
 	console.error(
-		`usage: fleet-loop once|watch|lanes --repo <dir> [--glob lane/autow*] [--main main]\n` +
+		`usage: fleet-loop once|watch|lanes|dispatch --repo <dir> [--glob lane/autow*] [--main main]\n` +
 			`          [--ladder <cmd template with {branch}>]  default: plain git merge --no-ff\n` +
 			`          [--ladder-timeout 10]                    minutes; watchdog-kills a hung ladder\n` +
 			`          [--dispatch-cmd <template>]              optional policy script\n` +
@@ -226,6 +226,109 @@ async function cycle(): Promise<void> {
 
 	// 3. refill the fleet — policy lives in the repo's dispatch script
 	if (DISPATCH) runTemplate(DISPATCH, "", LADDER_TIMEOUT_MS);
+}
+
+// dispatch: one Work Graph item → claimed, worktree, briefed headless lane.
+// The fleet's own spawner — the coordinator dispatches a single item; the
+// loop's pid guard, lanes verb, and retire lifecycle cover the result.
+if (MODE === "dispatch") {
+	const item = val("--item");
+	if (!item) {
+		console.error("dispatch requires --item <Wn>");
+		process.exit(1);
+	}
+	const sid = `autow${item.replace(/^W/, "").replace(/\./g, "")}`;
+	const branch = `lane/${sid}`;
+	const wt = `${REPO}/.worktrees/${sid}`;
+	if (existsSync(wt)) {
+		console.error(
+			`worktree already exists: ${wt} — a lane may own it; inspect first`,
+		);
+		process.exit(1);
+	}
+	const runTool = (args: string[]): { code: number; out: string } => {
+		const p = Bun.spawnSync([process.execPath, ...args], {
+			cwd: REPO,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		return {
+			code: p.exitCode ?? 1,
+			out: `${p.stdout ? new TextDecoder().decode(p.stdout) : ""}${p.stderr ? new TextDecoder().decode(p.stderr) : ""}`.trim(),
+		};
+	};
+	const take = runTool([
+		`${process.env.HOME}/.claude/hooks/suspenders/bin/work.ts`,
+		"take",
+		item,
+		"--as",
+		sid,
+	]);
+	if (take.code !== 0) {
+		console.error(`work take failed: ${take.out}`);
+		process.exit(1);
+	}
+	const wtree = runTool([
+		`${process.env.HOME}/.claude/hooks/suspenders/bin/worktree.ts`,
+		"create",
+		item,
+	]);
+	if (wtree.code !== 0) {
+		console.error(`worktree create failed: ${wtree.out}`);
+		process.exit(1);
+	}
+	const show = runTool([
+		`${process.env.HOME}/.claude/hooks/suspenders/bin/work.ts`,
+		"show",
+		item,
+	]);
+	const brief = [
+		`You are lane "${sid}", Work Graph item ${item}, repo ${REPO}.`,
+		``,
+		`MISSION (from work show):`,
+		show.out,
+		``,
+		`STEPS:`,
+		`1. Work in the EXISTING worktree ${wt} (branch ${branch}).`,
+		`2. Implement per the mission. SMALL anchored edits; spec-first on the repo's qlty config; co-situated tests for new logic; never hand-edit files another live lane owns.`,
+		`3. GATES: qlty fmt + qlty check on changed files → "No issues"; bun test on the files you touched → green.`,
+		`4. Commit on ${branch} (subject = the item title), push the branch. NO tags.`,
+		`5. Finish: bun ~/.claude/hooks/suspenders/bin/work.ts done ${item} --sha <branch-head>.`,
+		`Final line: DONE <sha> (or BLOCKED after 3 honest attempts, tree restored).`,
+	].join("\n");
+	mkdirSync(`${REPO}/.fleet`, { recursive: true });
+	const briefFile = `${REPO}/.fleet/brief-${sid}.md`;
+	writeFileSync(briefFile, brief);
+	const env = { ...process.env };
+	delete env.ANTHROPIC_BASE_URL;
+	delete env.ANTHROPIC_AUTH_TOKEN;
+	const proc = Bun.spawn(
+		[
+			"claude",
+			"-p",
+			`Read ${briefFile} and execute it fully.`,
+			"--allowedTools",
+			"Bash(git:*) Bash(bun:*) Bash(qlty:*) Bash(rg:*) Bash(ls:*) Bash(mkdir:*) Bash(sd:*) Bash(sed:*) Bash(diff) Edit Write",
+			"--permission-mode",
+			"acceptEdits",
+		],
+		{ cwd: wt, env, stdout: "ignore", stderr: "ignore", stdin: "ignore" },
+	);
+	proc.unref();
+	const entry = {
+		sid,
+		item,
+		pid: proc.pid,
+		branch,
+		worktree: wt,
+		launchedAt: Date.now(),
+	};
+	const all = lanes().filter((l) => l.sid !== sid);
+	all.push(entry);
+	writeFileSync(`${REPO}/.fleet/lanes.json`, JSON.stringify(all, null, 2));
+	log(`DISPATCHED ${item} → ${sid} (pid ${proc.pid}, ${branch})`);
+	console.log(`dispatched ${item} → ${sid} (pid ${proc.pid})`);
+	process.exit(0);
 }
 
 // lanes: the liveness table from .fleet/lanes.json — who's alive, who died
