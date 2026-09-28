@@ -2,7 +2,7 @@
 
 How far the fleet's agent-CLI coupling — currently hardwired to `claude` —
 would stretch to the OpenAI `codex` CLI, across the repo quartet:
-**speedy-claude** (config layer), **belt** (LLM fleet), **suspenders**
+**speedy** (config layer), **belt** (LLM fleet), **suspenders**
 (control plane), **klh/local** (LAN serving).
 
 - 2026-09-28, lane autow66 (Work Graph W66)
@@ -10,7 +10,7 @@ would stretch to the OpenAI `codex` CLI, across the repo quartet:
   Codex capabilities verified against the official docs the same day —
   `developers.openai.com/codex` + `openai/codex` repo docs (first-tier, but
   docs-tier only: **the codex binary is not installed here, nothing was run**).
-  speedy-claude / belt / klh-local internals are **secondary** (role docs in
+  speedy / belt / klh-local internals are **secondary** (role docs in
   this repo's README + fleet doctrine) — marked as such below.
 
 ## Verdict
@@ -83,7 +83,7 @@ backend branch: command, flags, output capture) and `gate.ts` (a codex
 stdin/stdout dialect adapter beside the Claude one). Plus one config
 emitter for codex hook wiring (TOML) next to `settings.example.json`.
 
-### speedy-claude (secondary — role docs)
+### speedy (secondary — role docs)
 
 The config layer: hook wiring, permissions, statusline, skills, bin/ CLIs,
 CLAUDE.md. The **CLIs port as-is** (agent-agnostic bun). The **statusline
@@ -154,5 +154,5 @@ days-long job instead of a rewrite.
 - Codex docs, fetched 2026-09-28: developers.openai.com/codex
   (noninteractive, config-reference, config-basic, sandbox, auth) and
   openai/codex repo docs (exec.md, advanced.md, hooks.md)
-- speedy-claude / belt / klh-local roles: this repo's README.md
+- speedy / belt / klh-local roles: this repo's README.md
   (companions table) + docs/coordination-protocol.md — secondary sources

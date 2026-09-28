@@ -3,7 +3,7 @@
 Agent control plane: governor.db (SQLite/WAL) work graph, coord bus, fleet
 board (:7799), launchd agents, hook gates. Docs: docs/, board API at
 http://suspenders.local/llms.txt. Companions: belt (LLM fleet), klh/local
-(Caddy .local services), speedy-claude (config layer).
+(Caddy .local services), speedy (config layer).
 
 ## qlty Quality Doctrine
 
