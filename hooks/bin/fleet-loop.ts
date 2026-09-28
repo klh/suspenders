@@ -39,6 +39,7 @@ if (
 			`          [--ladder <cmd template with {branch}>]  default: plain git merge --no-ff\n` +
 			`          [--ladder-timeout 10]                    minutes; watchdog-kills a hung ladder\n` +
 			`          [--dispatch-cmd <template>]              optional policy script\n` +
+			`          [--agent claude|codex]                   dispatch backend (default claude)\n` +
 			`          [--every 120] [--cycle-timeout 15] [--log <file>]   (watch mode)\n`,
 	);
 	process.exit(MODE ? 1 : 0);
@@ -55,6 +56,7 @@ if (!REPO) process.exit(1); // usage block above already explained
 const MAIN = val("--main", "main");
 const GLOB = val("--glob", "lane/autow*");
 const LADDER = val("--ladder");
+const AGENT = val("--agent", "claude");
 const LADDER_TIMEOUT_MS = num("--ladder-timeout", 10) * 60_000;
 const DISPATCH = val("--dispatch-cmd");
 const EVERY_MS = num("--every", 120) * 1000;
@@ -89,6 +91,7 @@ type Lane = {
 	pid: number;
 	branch: string;
 	worktree: string;
+	agent?: string;
 };
 
 function readJsonSync<T>(p: string): T | null {
@@ -261,6 +264,10 @@ if (MODE === "dispatch") {
 		console.error("dispatch requires --item <Wn>");
 		process.exit(1);
 	}
+	if (AGENT !== "claude" && AGENT !== "codex") {
+		console.error("dispatch --agent must be claude or codex");
+		process.exit(1);
+	}
 	const sid = `autow${item.replace(/^W/, "").replace(/\./g, "")}`;
 	const wt = `${REPO}/.worktrees/${item}`;
 	// live-lane guard: a running lane still owns its worktree — refuse. An
@@ -348,18 +355,43 @@ if (MODE === "dispatch") {
 	const env = { ...process.env };
 	delete env.ANTHROPIC_BASE_URL;
 	delete env.ANTHROPIC_AUTH_TOKEN;
-	const proc = Bun.spawn(
-		[
-			"claude",
-			"-p",
-			`Read ${briefFile} and execute it fully.`,
-			"--allowedTools",
-			"Bash(git:*) Bash(bun:*) Bash(qlty:*) Bash(rg:*) Bash(eza:*) Bash(ls:*) Bash(mkdir:*) Bash(sd:*) Bash(sed:*) Bash(diff) Edit Write",
-			"--permission-mode",
-			"acceptEdits",
-		],
-		{ cwd: wt, env, stdout: "ignore", stderr: "ignore", stdin: "ignore" },
-	);
+	const prompt = `Read ${briefFile} and execute it fully.`;
+	// the agent binary resolves at dispatch time — a bare name ENOENTs under
+	// launchd, where PATH is minimal
+	const bin = Bun.which(AGENT);
+	if (!bin) {
+		console.error(`${AGENT} binary not found on PATH`);
+		process.exit(1);
+	}
+	const agentArgs =
+		AGENT === "codex"
+			? // workspace-write + network (the brief pushes the branch) + writable
+				// roots for the work-graph state the lane's done-protocol touches
+				[
+					"exec",
+					"-s",
+					"workspace-write",
+					"-c",
+					`sandbox_workspace_write.writable_roots=${JSON.stringify([REPO, `${process.env.HOME}/.cache/claude-governor`])}`,
+					"-c",
+					"sandbox_workspace_write.network_access=true",
+					prompt,
+				]
+			: [
+					"-p",
+					prompt,
+					"--allowedTools",
+					"Bash(git:*) Bash(bun:*) Bash(qlty:*) Bash(rg:*) Bash(eza:*) Bash(ls:*) Bash(mkdir:*) Bash(sd:*) Bash(sed:*) Bash(diff) Edit Write",
+					"--permission-mode",
+					"acceptEdits",
+				];
+	const proc = Bun.spawn([bin, ...agentArgs], {
+		cwd: wt,
+		env,
+		stdout: "ignore",
+		stderr: "ignore",
+		stdin: "ignore",
+	});
 	proc.unref();
 	const entry = {
 		sid,
@@ -367,6 +399,7 @@ if (MODE === "dispatch") {
 		pid: proc.pid,
 		branch,
 		worktree: wt,
+		agent: AGENT,
 		launchedAt: Date.now(),
 	};
 	const all = lanes().filter((l) => l.sid !== sid);
@@ -392,7 +425,7 @@ if (MODE === "lanes") {
 			alive = true;
 		} catch {}
 		console.log(
-			`${alive ? "ALIVE" : "dead "}  ${l.item.padEnd(10)} ${l.sid.padEnd(16)} pid ${String(l.pid).padEnd(8)} ${l.branch}`,
+			`${alive ? "ALIVE" : "dead "}  ${l.item.padEnd(10)} ${l.sid.padEnd(16)} pid ${String(l.pid).padEnd(8)} ${(l.agent ?? "claude").padEnd(7)} ${l.branch}`,
 		);
 	}
 	process.exit(0);
