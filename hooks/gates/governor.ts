@@ -14,10 +14,17 @@
 // are arbitrated by the DB, single-statement reads are always fresh, and the
 // old lost-update dance (atomic rename + fresh-reload-before-deny) is gone.
 // Gates FAIL OPEN: a dead/contended registry never blocks an edit.
-import { allow, deny, type HookInput } from "../lib/hookio.ts";
+import { deny, type HookInput } from "../lib/hookio.ts";
+import { gateWroteSince } from "./files.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
 import type { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 
@@ -115,7 +122,11 @@ export function governorGate(hook: HookInput): void {
 		// the DELETE is never touched. No renewal here: ts advances only through
 		// real touches of that file (the acquire/upsert below), so the denial
 		// message's age reports the holder's last real touch.
-		const rows = db.query("SELECT path, sid, ts FROM locks").all() as { path: string; sid: string; ts: number }[];
+		const rows = db.query("SELECT path, sid, ts FROM locks").all() as {
+			path: string;
+			sid: string;
+			ts: number;
+		}[];
 		const del = db.query("DELETE FROM locks WHERE path = ? AND sid = ?");
 		for (const r of rows) {
 			if (now - r.ts > TTL_MS) del.run(r.path, r.sid);
@@ -126,8 +137,15 @@ export function governorGate(hook: HookInput): void {
 	// ---- coarse-claim layer: soft unless hot; own-claim touches heartbeat ----
 	if (db) {
 		try {
-			const rows = db.query("SELECT sid, scope, intent, hot, ts, tp FROM claims").all() as {
-				sid: string; scope: string; intent: string | null; hot: number; ts: number; tp: string | null;
+			const rows = db
+				.query("SELECT sid, scope, intent, hot, ts, tp FROM claims")
+				.all() as {
+				sid: string;
+				scope: string;
+				intent: string | null;
+				hot: number;
+				ts: number;
+				tp: string | null;
 			}[];
 			const upd = db.query("UPDATE claims SET ts = ?, tp = ? WHERE sid = ?");
 			let hitScope: string | null = null;
@@ -155,13 +173,23 @@ export function governorGate(hook: HookInput): void {
 						`GOVERNOR: ${P} is inside a HOT claimed area (${hitScope}) — session ${hitRow.sid.slice(0, 8)}` +
 							`${hitRow.intent ? `, delivering: ${hitRow.intent}` : ""}. A collision was already observed here; ` +
 							`edits inside this area are serialized until the coordinator cools it. ` +
-							`Work elsewhere or SendMessage "main" for arbitration.` + activeRoster(),
+							`Work elsewhere or SendMessage "main" for arbitration.` +
+							activeRoster(),
 					);
 				}
 				// advisory by default: allow the edit, log the cross-area touch for the
 				// coordinator's conflict monitor (it re-scopes, hot-marks, or orders the merge)
 				try {
-					appendFileSync(DRIFT, JSON.stringify({ at: now, lane: lane.slice(0, 12), path: P, area: hitScope, owner: hitRow.sid.slice(0, 12) }) + "\n");
+					appendFileSync(
+						DRIFT,
+						`${JSON.stringify({
+							at: now,
+							lane: lane.slice(0, 12),
+							path: P,
+							area: hitScope,
+							owner: hitRow.sid.slice(0, 12),
+						})}\n`,
+					);
 				} catch {}
 			}
 		} catch {
@@ -171,14 +199,27 @@ export function governorGate(hook: HookInput): void {
 
 	// ---- per-file lease layer ----
 	if (db) {
-		const row = db.query("SELECT path, sid, tool, ts, tp, hash, seen FROM locks WHERE path = ?").get(P) as {
-			path: string; sid: string; tool: string | null; ts: number; tp: string | null; hash: string | null; seen: string | null;
+		const row = db
+			.query(
+				"SELECT path, sid, tool, ts, tp, hash, seen FROM locks WHERE path = ?",
+			)
+			.get(P) as {
+			path: string;
+			sid: string;
+			tool: string | null;
+			ts: number;
+			tp: string | null;
+			hash: string | null;
+			seen: string | null;
 		} | null;
 		if (row && row.sid !== lane) {
 			if (now - row.ts > TTL_MS) {
 				// expired but not yet swept (another gate's sweep lost the race) —
 				// reclaimable right now
-				db.query("DELETE FROM locks WHERE path = ? AND sid = ?").run(P, row.sid);
+				db.query("DELETE FROM locks WHERE path = ? AND sid = ?").run(
+					P,
+					row.sid,
+				);
 			} else {
 				deny(
 					`GOVERNOR: ${P} is leased to another agent (session ${row.sid.slice(0, 8)}, ` +
@@ -187,7 +228,8 @@ export function governorGate(hook: HookInput): void {
 						`state in one line WHY your edit matters now and SendMessage to "main" for access — ` +
 						`the governor integrates requests rather than denying them. ` +
 						`A lease expires 15 min after the holder's last touch of THIS file; a holder done ` +
-						`with the file releases it now: coord lease-release ${P} --as <its sid>.` + activeRoster(),
+						`with the file releases it now: coord lease-release ${P} --as <its sid>.` +
+						activeRoster(),
 				);
 			}
 		}
@@ -200,7 +242,10 @@ export function governorGate(hook: HookInput): void {
 		let hash: string | null = null;
 		if (existsSync(P)) {
 			try {
-				hash = createHash("sha256").update(readFileSync(P)).digest("hex").slice(0, 16);
+				hash = createHash("sha256")
+					.update(readFileSync(P))
+					.digest("hex")
+					.slice(0, 16);
 			} catch {
 				// unreadable — skip the version check rather than block
 			}
@@ -211,7 +256,18 @@ export function governorGate(hook: HookInput): void {
 				seen = row.seen ? (JSON.parse(row.seen) as string[]) : [];
 			} catch {}
 			if (seen.includes(hash)) {
-				db.query("UPDATE locks SET hash = ?, ts = ? WHERE path = ? AND sid = ?").run(hash, now, P, lane);
+				db.query(
+					"UPDATE locks SET hash = ?, ts = ? WHERE path = ? AND sid = ?",
+				).run(hash, now, P, lane);
+				return;
+			}
+			// the gate's own fmt rewrite (journaled by files.ts, W58) is not an
+			// outside write — bless the lease with the new hash instead of
+			// denying; kills the every-other-edit hash-guard loop
+			if (gateWroteSince(P, new Date(now - 60_000).toISOString())) {
+				db.query(
+					"UPDATE locks SET hash = ?, ts = ? WHERE path = ? AND sid = ?",
+				).run(hash, now, P, lane);
 				return;
 			}
 			db.query("DELETE FROM locks WHERE path = ? AND sid = ?").run(P, lane);
@@ -228,15 +284,18 @@ export function governorGate(hook: HookInput): void {
 		// read-then-upsert raced: two first-writers both saw no lock and both
 		// allowed. Owner-conditional upsert: a lost race yields changes = 0 and
 		// the caller is denied instead of silently stealing the lease.
-		const got = db.query(
-			"INSERT INTO locks (path, sid, tool, ts, tp, hash) VALUES (?, ?, ?, ?, ?, ?) " +
-				"ON CONFLICT(path) DO UPDATE SET tool = excluded.tool, ts = excluded.ts, tp = excluded.tp, hash = excluded.hash " +
-				"WHERE locks.sid = excluded.sid",
-		).run(P, lane, hook.tool_name ?? "?", now, tpSelf || null, hash);
+		const got = db
+			.query(
+				"INSERT INTO locks (path, sid, tool, ts, tp, hash) VALUES (?, ?, ?, ?, ?, ?) " +
+					"ON CONFLICT(path) DO UPDATE SET tool = excluded.tool, ts = excluded.ts, tp = excluded.tp, hash = excluded.hash " +
+					"WHERE locks.sid = excluded.sid",
+			)
+			.run(P, lane, hook.tool_name ?? "?", now, tpSelf || null, hash);
 		if (got.changes === 0) {
 			deny(
 				`GOVERNOR: ${P} was leased to another agent mid-check (lost the acquire race) — ` +
-					`do NOT edit it in parallel; SendMessage to "main" for access if essential.` + activeRoster(),
+					`do NOT edit it in parallel; SendMessage to "main" for access if essential.` +
+					activeRoster(),
 			);
 		}
 	}
@@ -269,13 +328,21 @@ function activeRoster(): string {
 			if (!f.endsWith(".json")) continue;
 			try {
 				const j = JSON.parse(readFileSync(`${dir}/${f}`, "utf8")) as {
-					at?: number; id?: string; label?: string; done?: number; total?: number;
+					at?: number;
+					id?: string;
+					label?: string;
+					done?: number;
+					total?: number;
 				};
 				if (!j.at || now - j.at > 15 * 60_000) continue;
-				rows.push(`${j.id ?? f.replace(/\.json$/, "")} — ${j.label ?? "working"} (${j.done ?? 0}/${j.total ?? 0})`);
+				rows.push(
+					`${j.id ?? f.replace(/\.json$/, "")} — ${j.label ?? "working"} (${j.done ?? 0}/${j.total ?? 0})`,
+				);
 			} catch {}
 		}
-		return rows.length ? `\nActive agents right now (progress bars): ${rows.join("; ")}.` : "";
+		return rows.length
+			? `\nActive agents right now (progress bars): ${rows.join("; ")}.`
+			: "";
 	} catch {
 		return "";
 	}
