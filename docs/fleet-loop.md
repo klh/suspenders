@@ -84,7 +84,10 @@ bun fleet-loop.ts lanes --repo <dir>
   trust class as Claude lanes. Dispatch sets `GIT_DIR` to the lane's private
   `.gitstore` and `GIT_WORK_TREE` to its workspace; main-repo objects are
   shared through Git alternates. The lane writes its own commits and pushes
-  them; the coordinator does not commit on its behalf.
+  them; the coordinator does not commit on its behalf. A fresh workspace also
+  gets the repo's gitignored build dirs (`node_modules`, `.venv`, `vendor`,
+  `target`) symlinked in — same as `worktree.ts` create — so codex lanes skip
+  reinstalls.
 
 Both backends receive the same brief and must follow `AGENTS.md`, including
 quality gates, commit/push, and the Work Graph completion protocol. The
