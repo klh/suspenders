@@ -74,12 +74,11 @@ bun fleet-loop.ts lanes --repo <dir>
 
 - **Claude:** launches `claude -p` in `acceptEdits`, with the dispatcher's
   allowed-tool list for shell commands and Edit/Write.
-- **Codex:** launches `codex exec -s workspace-write`, with network access
-  enabled and additional writable roots for the repo and
-  `~/.cache/claude-governor`. Dispatch sets `GIT_DIR` to the lane's private
-  `.gitstore` and `GIT_WORK_TREE` to its worktree so lane commits can be
-  written inside the sandbox; main-repo objects are shared through Git
-  alternates.
+- **Codex:** launches `codex exec --sandbox danger-full-access`, in the same
+  trust class as Claude lanes. Dispatch sets `GIT_DIR` to the lane's private
+  `.gitstore` and `GIT_WORK_TREE` to its workspace; main-repo objects are
+  shared through Git alternates. The lane writes its own commits and pushes
+  them; the coordinator does not commit on its behalf.
 
 Both backends receive the same brief and must follow `AGENTS.md`, including
 quality gates, commit/push, and the Work Graph completion protocol. The
@@ -89,6 +88,48 @@ quality gates, commit/push, and the Work Graph completion protocol. The
 Backend selection applies to `dispatch`. A policy script supplied through
 `--dispatch-cmd` must pass `--agent codex` on its own dispatch calls if it
 wants Codex lanes; the loop does not inject that flag into the script.
+
+## Operations: dispatch through lane completion
+
+Run coordinator commands from the parent checkout. Before dispatch, check
+`bun hooks/bin/fleet-loop.ts lanes --repo <repo>` for an existing live lane.
+After dispatch, inspect `.fleet/brief-<sid>.md`, `.fleet/lanes.json`, and
+`.fleet/lane-<sid>.log` for the assigned item, branch, backend, pid, and
+progress. A live pid proves liveness, not successful completion.
+
+In the assigned workspace, verify `git rev-parse --verify HEAD`,
+`git branch --show-current`, and `git status --short` before editing. A Codex
+workspace uses a private Git store rather than a registered Git worktree;
+do not stage `.gitstore/`. If HEAD is unborn or source files are absent,
+resolve initialization before proceeding. The private store must be able
+to read the parent objects before creating its branch and checking it out.
+W69 encountered this initialization failure and required checkout recovery;
+its completion is not evidence that fresh dispatch initialization works.
+
+Both backends follow the same delivery sequence:
+
+1. Read `AGENTS.md`, inventory the scope, and apply its split judgment.
+2. Make the scoped change, run `qlty fmt` and `qlty check` on changed files,
+   then run the relevant `bun test` suite. Record actual gate results.
+3. Commit with the work-item title and push the assigned branch. Capture
+   `git rev-parse HEAD` and verify the remote branch has that SHA.
+4. Mark the item done with that SHA. For a private-store Codex workspace,
+   run the command from the parent checkout with Git environment overrides
+   removed so Work Graph resolves the original project:
+
+   ```bash
+   # Working directory: the parent checkout, not .worktrees/<item>.
+   env -u GIT_DIR -u GIT_WORK_TREE bun ~/.claude/hooks/suspenders/bin/work.ts done Wn --sha <lane-head>
+   env -u GIT_DIR -u GIT_WORK_TREE bun ~/.claude/hooks/suspenders/bin/work.ts show Wn
+   ```
+
+5. End with the `AGENTS.md` completion line. A commit, matching remote SHA,
+   and Work Graph `DONE` record establish lane delivery; they do not prove
+   that the merge ladder ran or that Codex hook enforcement matches Claude.
+
+Use `loop.log` for merge/retire evidence. Investigate the last three ladder
+output lines on `FAIL`; after three failures the branch is parked for repair.
+Do not remove a live lane's workspace to force retirement.
 
 ## Migrating a project onto it
 
