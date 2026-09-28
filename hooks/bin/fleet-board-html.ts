@@ -156,6 +156,29 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
 #drawerClose:hover { color:#e8e6e1; border-color:rgba(255,255,255,.4); }
 .dd { padding:4px 0; border-bottom:1px solid rgba(255,255,255,.07); font-size:12px; }
 .dd:last-child { border-bottom:none; }
+#taskDiff { margin-top:10px; }
+.diffbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+.diffbtn { background:none; border:1px solid rgba(255,255,255,.22); color:#98958e; border-radius:2px; padding:3px 10px; font:inherit; font-size:10px; text-transform:uppercase; letter-spacing:.06em; cursor:pointer; }
+.diffbtn:hover { color:#e8e6e1; border-color:rgba(255,255,255,.4); }
+.diffbtn.on { color:#d8900f; border-color:#d8900f; }
+.diffcap { font-size:10.5px; color:#98958e; word-break:break-all; }
+.diffmsg { font-size:11px; color:#7da652; }
+.diffmsg.risk { color:#c96a4f; }
+.diffwrap { border:1px solid rgba(255,255,255,.12); border-radius:2px; background:#141413; }
+.diffview { margin:0; padding:6px 0; font-size:10.5px; line-height:1.5; max-height:340px; overflow:auto; display:block; }
+.dline { display:block; white-space:pre; padding:0 8px; }
+.dline.add { background:rgba(92,122,53,.18); color:#a9c47f; }
+.dline.del { background:rgba(175,47,18,.16); color:#c96a4f; }
+.dline.hunk { color:#8cbbad; }
+.dline.meta { color:#98958e; }
+.dlnum { display:inline-block; width:34px; text-align:right; padding-right:6px; color:#98958e; cursor:pointer; }
+.dlnum:hover { color:#d8900f; }
+.dnote { display:flex; gap:6px; margin-top:6px; align-items:center; }
+.dnote .dtgt { font-size:10.5px; color:#d8900f; word-break:break-all; }
+.dnote input { flex:1; min-width:140px; background:#141413; color:#e8e6e1; border:1px solid rgba(255,255,255,.12); border-radius:2px; padding:3px 8px; font:inherit; font-size:11px; }
+.dnote input:focus { outline:1px solid #d8900f; }
+button.diffsend { background:#d8900f; color:#141413; border:1px solid #d8900f; border-radius:2px; padding:3px 10px; font:inherit; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; cursor:pointer; }
+button.diffsend:disabled { opacity:.45; cursor:default; }
 #toasts { position:fixed; bottom:16px; right:16px; display:flex; flex-direction:column; gap:6px; z-index:40; max-width:min(380px, 90vw); }
 .toast { background:#221f1c; border:1px solid #af2f12; border-left-width:3px; color:#e8e6e1; padding:8px 12px; font-size:12px; border-radius:2px; box-shadow:0 2px 12px rgba(0,0,0,.5); }
 </style></head><body>
@@ -240,6 +263,7 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
 <aside id="drawer" role="dialog" aria-modal="false" aria-labelledby="drawerTitle" hidden>
   <div class="dwhead"><h2 id="drawerTitle">Task</h2><button id="drawerClose" type="button" aria-label="close task details">&times;</button></div>
   <div id="drawerBody"></div>
+  <div id="taskDiff"></div>
 </aside>
 <div id="toasts" aria-live="polite"></div>
 <script>
@@ -268,6 +292,9 @@ var actData = null; var actOkAt = 0; var actErr = null; var actBusy = false; var
 var histOpen = false; var histData = null; var histOkAt = 0; var histErr = null; var histBusy = false; var histLoaded = false;
 var setupData = null; var setupOkAt = 0; var setupErr = null; var setupBusy = false; var setupLoaded = false;
 var task = { id: null, proj: null, data: null, err: null, busy: false, okAt: 0, trigger: null }; // open drawer state
+// W55 per-item diff + line comments (state outlives the drawer's 5s rebuilds;
+// the drawer body sig-changes every poll, #taskDiff keeps its own sig)
+var diffView = { open: false, busy: false, err: null, data: null, okAt: 0, target: null, draft: '', msg: '', msgErr: false };
 // --- #filter=<text> deep-link (statusline worker indicators link here) ---
 var hashFilter = ''; // raw needle from the hash; '' = no filtering
 function hashNeedle(){
@@ -1160,6 +1187,7 @@ function openTask(id, proj, trigger){
   byId('drawer').hidden = false;
   setText(byId('drawerTitle'), 'task ' + id);
   sigSet(byId('drawerBody'), '', '<div class="state dim">loading task...</div>');
+  resetDiff();
   pollTask(true);
   byId('drawerClose').focus();
 }
@@ -1234,6 +1262,140 @@ function renderDrawer(){
     '<div class="feed"><h2>Timeline</h2>' + tl + '</div>';
   if (task.err) html += '<div class="derr">refresh failed — ' + esc(String(task.err).slice(0, 120)) + '</div>';
   sigSet(body, String(task.okAt) + '|' + (task.err || ''), html);
+  renderTaskDiff();
+}
+// --- 4b: per-item diff + inline review comments (W55, /api/diff + /api/comment) ---
+// #taskDiff sits OUTSIDE the sigSet'd drawer body: the drawer rebuilds on every
+// good poll and would otherwise blow away the note input mid-typing. It keeps
+// its own signature; only real diff/comment state changes rebuild it.
+function resetDiff(){
+  diffView.open = false; diffView.busy = false; diffView.err = null; diffView.data = null; diffView.okAt = 0;
+  diffView.target = null; diffView.draft = ''; diffView.msg = ''; diffView.msgErr = false;
+}
+function fetchDiff(){
+  if (diffView.busy || !task.id) return;
+  diffView.busy = true; diffView.err = null;
+  fetch('/api/diff?id=' + encodeURIComponent(task.id), { signal: AbortSignal.timeout(8000) })
+    .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(j){ return { status: r.status, j: j || {} }; }); })
+    .then(function(res){
+      diffView.busy = false;
+      if (res.status === 200 && res.j && res.j.ok) { diffView.data = res.j; diffView.okAt = Date.now(); }
+      else diffView.err = (res.j && res.j.error) || 'HTTP ' + res.status;
+      renderTaskDiff();
+    })
+    .catch(function(e){ diffView.busy = false; diffView.err = String((e && e.message) || e); renderTaskDiff(); });
+}
+function toggleDiff(){
+  diffView.open = !diffView.open;
+  if (diffView.open && !diffView.data && !diffView.err) fetchDiff();
+  renderTaskDiff();
+}
+function diffRow(cls, file, num, text){
+  var attrs = 'data-line="' + num + '"';
+  if (file) attrs += ' data-file="' + esc(file) + '" title="comment on ' + esc(file) + ':' + num + '"';
+  return '<span class="dline ' + cls + '"><span class="dlnum" ' + attrs + '>' + num + '</span>' + esc(text) + '</span>';
+}
+function buildDiffRows(diffText){
+  // parse the unified patch: track the current file (+++ b/<path>) and line
+  // counters (@@ -o,n +n,n @@). Clickable numbers address the NEW file; on
+  // removed lines the OLD number is what a reviewer references.
+  var lines = String(diffText || '').split('\n');
+  var file = null; var newLn = 0; var oldLn = 0; var out = '';
+  var MAX = 5000;
+  for (var i = 0; i < lines.length; i++){
+    var ln = lines[i];
+    if (i >= MAX) { out += '<span class="dline meta">… truncated at ' + MAX + ' rendered lines</span>'; break; }
+    var c = ln.slice(0, 1);
+    if (ln.slice(0, 4) === '+++ ') {
+      file = ln.slice(6) === '/dev/null' ? null : ln.slice(6);
+      out += meta(ln);
+    } else if (ln.slice(0, 4) === '--- ' || ln.slice(0, 3) === 'diff' || ln.slice(0, 5) === 'index' || c === '\\') {
+      out += '<span class="dline meta">' + esc(ln) + '</span>';
+    } else if (ln.slice(0, 3) === '@@ ') {
+      var m = ln.match(/^@@ -\d+(?:,\d+)? \+(\d+)/);
+      newLn = m ? Number(m[1]) : 0;
+      var mo = ln.match(/^@@ -(\d+)/);
+      oldLn = mo ? Number(mo[1]) : 0;
+      out += '<span class="dline hunk">' + esc(ln) + '</span>';
+    } else if (c === '+') {
+      out += diffRow('add', file, newLn, ln);
+      newLn++;
+    } else if (c === '-') {
+      out += diffRow('del', file, oldLn, ln);
+      oldLn++;
+    } else {
+      out += diffRow('ctx', file, newLn, ln);
+      newLn++;
+      oldLn++;
+    }
+  }
+  return out;
+}
+function renderTaskDiff(){
+  var el = byId('taskDiff');
+  if (!task.id) { sigSet(el, 'idle', ''); return; }
+  var sig = [task.id, diffView.open, diffView.busy, diffView.err, diffView.okAt,
+    diffView.target ? diffView.target.file + ':' + diffView.target.line : '',
+    diffView.msg ? (diffView.msgErr ? 'e' : 'o') + diffView.msg : ''].join('|');
+  if (el.getAttribute('data-sig') !== sig) {
+    el.setAttribute('data-sig', sig);
+    var h = '<div class="diffbar"><button type="button" class="diffbtn' + (diffView.open ? ' on' : '') + '">' + (diffView.busy ? 'diff…' : 'diff') + '</button>';
+    if (diffView.data) {
+      var statTail = String(diffView.data.stat || '').trim().split('\n').pop() || '';
+      h += '<span class="diffcap mono">' + esc(diffView.data.branch) + ' @ ' + esc(String(diffView.data.base || '').slice(0, 7)) + (statTail ? ' · ' + esc(statTail) : '') + '</span>';
+    }
+    if (diffView.err) h += '<span class="diffmsg risk">' + esc(diffView.err) + '</span>';
+    if (diffView.msg) h += '<span class="diffmsg' + (diffView.msgErr ? ' risk' : '') + '">' + esc(diffView.msg) + '</span>';
+    h += '</div>';
+    if (diffView.open && diffView.busy) h += '<div class="dim">loading diff...</div>';
+    if (diffView.open && diffView.data) {
+      var rows = buildDiffRows(diffView.data.diff);
+      if (!rows) rows = '<span class="dline meta">(no changes on the branch)</span>';
+      h += '<div class="diffwrap"><pre class="diffview mono">' + rows + '</pre></div>';
+    }
+    if (diffView.open && diffView.target) {
+      h += '<div class="dnote"><span class="dtgt mono">' + esc(diffView.target.file) + ':' + esc(String(diffView.target.line)) + '</span>' +
+        '<input class="diffnote" placeholder="line note — routes to the owning lane...">' +
+        '<button type="button" class="diffsend">send</button></div>';
+    }
+    el.innerHTML = h;
+    var inp = el.querySelector('.diffnote');
+    if (inp && diffView.draft) inp.value = diffView.draft;
+  } else {
+    var keep = el.querySelector('.diffnote');
+    if (keep && document.activeElement !== keep && keep.value !== diffView.draft) keep.value = diffView.draft;
+  }
+}
+function pickDiffLine(f, l){
+  diffView.target = { file: f, line: l };
+  diffView.msg = '';
+  renderTaskDiff();
+  var inp = byId('taskDiff').querySelector('.diffnote');
+  if (inp) inp.focus();
+}
+function sendDiffNote(){
+  if (!task.id || !diffView.target) return;
+  var tgt = diffView.target;
+  var note = (diffView.draft || '').trim();
+  if (!note) { diffView.msg = 'type a note first'; diffView.msgErr = true; renderTaskDiff(); return; }
+  diffView.msg = 'sending…'; diffView.msgErr = false;
+  renderTaskDiff();
+  postJSON('/api/comment', { id: task.id, file: tgt.file, line: tgt.line, note: note })
+    .then(function(res){
+      if (res && res.ok) {
+        diffView.msg = 'comment sent to ' + (res.to || 'the owning lane') + ' (' + tgt.file + ':' + tgt.line + ')';
+        diffView.target = null; diffView.draft = ''; diffView.msgErr = false;
+      } else {
+        diffView.msg = (res && (res.error || res.output)) || 'send failed — retry';
+        diffView.msgErr = true;
+      }
+      renderTaskDiff();
+    })
+    .catch(function(e){
+      diffView.msg = String((e && e.message) || e) + ' — retry';
+      diffView.msgErr = true;
+      renderTaskDiff();
+    });
 }
 // --- 5: activity feed (Activity tab, /api/activity, newest first) ---
 function pollAct(){
@@ -1393,6 +1555,21 @@ if (doneCb) doneCb.addEventListener('change', function(e){
 });
 paintSort();
 byId('drawerClose').addEventListener('click', closeTask);
+var diffEl = byId('taskDiff');
+diffEl.addEventListener('click', function(e){
+  var b = e.target.closest && e.target.closest('.diffbtn');
+  if (b) { toggleDiff(); return; }
+  var n = e.target.closest && e.target.closest('.dlnum[data-file]');
+  if (n) { pickDiffLine(n.getAttribute('data-file'), n.getAttribute('data-line')); return; }
+  var s = e.target.closest && e.target.closest('.diffsend');
+  if (s) sendDiffNote();
+});
+diffEl.addEventListener('input', function(e){
+  if (e.target.classList && e.target.classList.contains('diffnote')) diffView.draft = e.target.value;
+});
+diffEl.addEventListener('keydown', function(e){
+  if (e.key === 'Enter' && e.target.classList && e.target.classList.contains('diffnote')) { e.preventDefault(); sendDiffNote(); }
+});
 byId('setupBody').addEventListener('click', function(e){
   var b = e.target.closest && e.target.closest('.copyfix');
   if (!b) return;
