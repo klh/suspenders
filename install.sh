@@ -69,6 +69,20 @@ if [[ "${1:-}" == "--with-launchd" || "${2:-}" == "--with-launchd" ]]; then
   fi
 fi
 
+# optional: register the board with klh-local's user-level Caddy so the LAN
+# gets http://suspenders.local:7799. Idempotent (converges on re-run) and
+# never fatal — the loopback board works without it.
+KLH_LOCAL_BIN="$HOME/.local/bin/klh-local"
+if [[ -x "$KLH_LOCAL_BIN" ]] && command -v caddy >/dev/null 2>&1; then
+  if "$KLH_LOCAL_BIN" register suspenders --port 7799 --health /; then
+    echo "→ suspenders.local → 127.0.0.1:7799 (klh-local / Caddy)"
+  else
+    echo "→ klh-local register failed (non-fatal) — board stays on http://127.0.0.1:7799"
+  fi
+else
+  echo "optional: install klh-local + caddy to also serve this board at http://suspenders.local:7799"
+fi
+
 echo
 echo "done. restart Claude Code so the hooks register, then:"
 echo "  bun $PREFIX/bin/fleet-board.ts        # live fleet board (+ decision forks)"
