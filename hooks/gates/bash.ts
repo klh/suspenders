@@ -292,6 +292,52 @@ export function bashGate(hook: HookInput): never {
 		}
 	}
 
+	// ---- no-commit-into-live-merge (gaps 18517f51, 2026-09-28): a bare
+	// commit while MERGE_HEAD exists concludes a FOREIGN merge — that state
+	// belongs to the ladder. Fires only when the ladder's liveness marker is
+	// live, so an owner's own non-fleet merge is never blocked. The ladder
+	// bypasses this gate (spawnSync); lanes commit in worktrees whose .git
+	// is a FILE — this check cannot match there.
+	{
+		const commitSegs = SEGS.filter(
+			(w) => verb(w) === "git" && gitSub(w) === "commit",
+		);
+		if (commitSegs.length > 0) {
+			let segCwd = CWD;
+			for (const w of SEGS) {
+				const v = verb(w);
+				if (v === "cd") {
+					const target = w[w.length - 1];
+					if (target && !target.startsWith("<op"))
+						segCwd = target.startsWith("/") ? target : resolve(segCwd, target);
+					continue;
+				}
+				if (v !== "git" || gitSub(w) !== "commit") continue;
+				const dir = gitRepoDir(w, segCwd);
+				if (!existsSync(`${dir}/.git/MERGE_HEAD`)) continue;
+				let live = false;
+				try {
+					const j = JSON.parse(
+						readFileSync(`${dir}/.fleet/merge-active`, "utf8"),
+					) as { pid: number; cmd?: string; ts: number };
+					if (
+						Date.now() - j.ts < 30 * 60_000 &&
+						typeof j.cmd === "string" &&
+						j.cmd.length > 0 &&
+						Bun.spawnSync(["ps", "-o", "command=", "-p", String(j.pid)])
+							.stdout.toString()
+							.trim() === j.cmd
+					)
+						live = true;
+				} catch {}
+				if (live)
+					deny(
+						`merge-guard: a fleet merge is LIVE in ${dir} (MERGE_HEAD + live runner) — a commit now concludes the foreign merge. Wait for the ladder to finish, or SendMessage the coordinator.`,
+					);
+			}
+		}
+	}
+
 	// ---- governor leases: shell writes must respect the same per-file leases
 	// the Write/Edit gate enforces (BEFORE edit-enforce: nudge() exits the
 	// process, so deny checks must run before any nudge). Leases live in

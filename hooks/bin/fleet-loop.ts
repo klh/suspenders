@@ -306,7 +306,14 @@ function mergeOne(b: string): void {
 	const marker = `${REPO}/.fleet/merge-active`;
 	writeFileSync(
 		marker,
-		JSON.stringify({ pid: process.pid, branch: b, ts: Date.now() }),
+		JSON.stringify({
+			pid: process.pid,
+			// exact-identity check: a recycled pid must also carry the runner's
+			// own command line to count as live (gaps 18517f51 follow-up)
+			cmd: process.argv.join(" "),
+			branch: b,
+			ts: Date.now(),
+		}),
 	);
 	const before = sh(["git", "rev-parse", "--short", "HEAD"]);
 	const mv = LADDER
@@ -335,9 +342,18 @@ function mergeRunnerAlive(): number | null {
 	try {
 		const j = JSON.parse(
 			readFileSync(`${REPO}/.fleet/merge-active`, "utf8"),
-		) as { pid: number; ts: number };
+		) as { pid: number; cmd?: string; ts: number };
 		if (Date.now() - j.ts > 30 * 60_000) return null;
 		process.kill(j.pid, 0);
+		// kill(pid,0) is forgeable — a recycled pid is "alive" but is not the
+		// merge runner; the marker must carry the runner's exact command line
+		// and the process must still match it (gaps 18517f51 follow-up).
+		// Markers without cmd predate the identity check → never trusted.
+		if (!j.cmd) return null;
+		const cmd = Bun.spawnSync(["ps", "-o", "command=", "-p", String(j.pid)])
+			.stdout.toString()
+			.trim();
+		if (cmd !== j.cmd) return null;
 		return j.pid;
 	} catch {
 		return null;
@@ -392,8 +408,23 @@ function healCrashedMerge(): void {
 		]);
 	const ab = runCap(["git", "merge", "--abort"]);
 	if (ab.code === 0) {
+		// POST-CONDITION (gaps 18517f51): a bare commit in the healed state
+		// must not be able to conclude anything — MERGE_HEAD gone AND the
+		// index clean. checkout -- restores the worktree FROM the index and
+		// leaves entries staged, so verify and sweep any remnant with a
+		// mixed reset (index only; worktree untouched).
+		const left = sh(["git", "status", "--porcelain"])
+			.split("\n")
+			.filter((l) => l.length > 3 && l[0] !== " " && l[0] !== "?");
+		if (left.length > 0 || existsSync(`${REPO}/.git/MERGE_HEAD`)) {
+			run(["git", "reset"]);
+			log(
+				`SELF-HEAL crashed merge of ${branch} (${head}): aborted, ${left.length} staged remnant(s) cleared via mixed reset`,
+			);
+			return;
+		}
 		log(
-			`SELF-HEAL crashed merge of ${branch} (${head}): restored ${staged.length} staged path(s) to the index, aborted cleanly`,
+			`SELF-HEAL crashed merge of ${branch} (${head}): restored ${staged.length} path(s) from index to worktree, aborted clean, index verified empty`,
 		);
 		return;
 	}
