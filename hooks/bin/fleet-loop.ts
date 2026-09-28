@@ -421,13 +421,20 @@ if (MODE === "dispatch") {
 					"--permission-mode",
 					"acceptEdits",
 				];
-	const proc = Bun.spawn([bin, ...agentArgs], {
-		cwd: wt,
-		env,
-		stdout: "ignore",
-		stderr: "ignore",
-		stdin: "ignore",
-	});
+	// both agents spawn through sh -c exec: the intermediary survives parent
+	// exit (codex dies under direct detached Bun spawn — the dns-sd lesson
+	// again) and < /dev/null gives codex the stdin EOF it blocks on. The lane
+	// log file is the live-tail surface for the board.
+	const sq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
+	const laneLog = `${REPO}/.fleet/lane-${sid}.log`;
+	const proc = Bun.spawn(
+		[
+			"/bin/sh",
+			"-c",
+			`exec ${sq(bin)} ${agentArgs.map(sq).join(" ")} < /dev/null >> ${sq(laneLog)} 2>&1`,
+		],
+		{ cwd: wt, env, stdout: "ignore", stderr: "ignore", stdin: "ignore" },
+	);
 	proc.unref();
 	const entry = {
 		sid,
