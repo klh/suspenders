@@ -314,16 +314,21 @@ if (MODE === "dispatch") {
 		} // claimed by us from a previous dispatch attempt — resume
 	}
 	// reuse path: an existing worktree (dead lane's leftover) is used as-is —
-	// only a missing one is created
+	// only a missing one is created. Codex workspaces are NOT git worktrees:
+	// a plain dir whose .git file points at the private store (see below).
 	if (!existsSync(wt)) {
-		const wtree = runTool([
-			`${process.env.HOME}/.claude/hooks/suspenders/bin/worktree.ts`,
-			"create",
-			item,
-		]);
-		if (wtree.code !== 0) {
-			console.error(`worktree create failed: ${wtree.out}`);
-			process.exit(1);
+		if (AGENT === "codex") {
+			mkdirSync(wt, { recursive: true });
+		} else {
+			const wtree = runTool([
+				`${process.env.HOME}/.claude/hooks/suspenders/bin/worktree.ts`,
+				"create",
+				item,
+			]);
+			if (wtree.code !== 0) {
+				console.error(`worktree create failed: ${wtree.out}`);
+				process.exit(1);
+			}
 		}
 	}
 	const branch =
@@ -404,6 +409,7 @@ if (MODE === "dispatch") {
 				sh(["git", "-C", REPO, "remote", "get-url", "origin"]),
 			]);
 		}
+		writeFileSync(`${wt}/.git`, `gitdir: ${store}\n`);
 	}
 	const agentArgs =
 		AGENT === "codex"
@@ -414,7 +420,7 @@ if (MODE === "dispatch") {
 					"-s",
 					"workspace-write",
 					"-c",
-					`sandbox_workspace_write.writable_roots=${JSON.stringify([REPO, `${process.env.HOME}/.cache/claude-governor`])}`,
+					`sandbox_workspace_write.writable_roots=${JSON.stringify([REPO, `${process.env.HOME}/.cache/claude-governor`, `${process.env.HOME}/.cache/qlty`])}`,
 					"-c",
 					"sandbox_workspace_write.network_access=true",
 					prompt,
