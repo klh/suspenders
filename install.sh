@@ -57,6 +57,15 @@ if [[ "${1:-}" == "--with-launchd" || "${2:-}" == "--with-launchd" ]]; then
       launchctl bootstrap "gui/$(id -u)" "$out"
       echo "→ loaded $name"
     done
+    # supersede the pre-namespacing agent labels so old and new never run side
+    # by side (same jobs, stale script paths, double keepwarm/monitor pings)
+    for legacy in com.klh.llm-keepwarm com.klh.fleet-monitor; do
+      launchctl bootout "gui/$(id -u)/$legacy" 2>/dev/null || true
+      if [ -f "$HOME/Library/LaunchAgents/$legacy.plist" ]; then
+        rm "$HOME/Library/LaunchAgents/$legacy.plist"
+        echo "→ superseded legacy agent $legacy"
+      fi
+    done
   fi
 fi
 
