@@ -1,4 +1,11 @@
-const unesc = (s) => s.split("\\u2014").join(String.fromCharCode(0x2014)).split("\\u00b7").join(String.fromCharCode(0xb7)).split("\\u00B7").join(String.fromCharCode(0xb7));
+const unesc = (s) =>
+	s
+		.split("\\u2014")
+		.join(String.fromCharCode(0x2014))
+		.split("\\u00b7")
+		.join(String.fromCharCode(0xb7))
+		.split("\\u00B7")
+		.join(String.fromCharCode(0xb7));
 // fleet-board-html.ts — the fleet board page, split from the server so the
 // HTML payload stays reviewable. Pure string; served by fleet-board.ts.
 // Source stays pure ASCII: — renders an em dash, · a middle dot.
@@ -43,6 +50,7 @@ nav.tabs button[aria-current] { color:#e8e6e1; border-bottom-color:#d8900f; }
 .chip .st { text-transform:uppercase; letter-spacing:.06em; }
 .chip.zombie { border-color:#af2f12; color:#c96a4f; }
 .chip.zombie b { color:#c96a4f; }
+.hfclear { background:none; border:none; color:#d8900f; cursor:pointer; font:inherit; padding:0; text-decoration:underline; }
 #decisions { border:1px solid rgba(255,255,255,.12); border-radius:2px; background:#171614; margin-bottom:14px; }
 #decisions.has { border-color:rgba(175,47,18,.6); }
 #decisions h2 { margin:0; padding:8px 14px; display:flex; align-items:baseline; gap:12px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:#c96a4f; }
@@ -169,6 +177,7 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
   <button type="button" data-tab="governor">Governor</button>
   <button type="button" data-tab="setup">Setup</button>
 </nav>
+<div id="hashChipBar"></div>
 <main>
 <section id="tab-decisions">
   <section id="decisions">
@@ -259,6 +268,28 @@ var actData = null; var actOkAt = 0; var actErr = null; var actBusy = false; var
 var histOpen = false; var histData = null; var histOkAt = 0; var histErr = null; var histBusy = false; var histLoaded = false;
 var setupData = null; var setupOkAt = 0; var setupErr = null; var setupBusy = false; var setupLoaded = false;
 var task = { id: null, proj: null, data: null, err: null, busy: false, okAt: 0, trigger: null }; // open drawer state
+// --- #filter=<text> deep-link (statusline worker indicators link here) ---
+var hashFilter = ''; // raw needle from the hash; '' = no filtering
+function hashNeedle(){
+  var m = (location.hash || '').match(/^#filter=([^&]*)/);
+  if (!m || !m[1]) return '';
+  try { return decodeURIComponent(m[1]); } catch (e2) { return m[1]; }
+}
+function hashMatch(parts){
+  if (!hashFilter) return true;
+  var f = hashFilter.toLowerCase();
+  for (var i = 0; i < parts.length; i++) {
+    if (String(parts[i] == null ? '' : parts[i]).toLowerCase().indexOf(f) >= 0) return true;
+  }
+  return false;
+}
+function applyHashFilter(){
+  hashFilter = hashNeedle();
+  var bar = byId('hashChipBar');
+  if (bar) sigSet(bar, hashFilter, hashFilter ? '<span class="chip">filtered by <b>' + esc(hashFilter) + '</b> · <button type="button" class="hfclear">clear</button></span>' : '');
+  renderTasks();
+  renderDecisions();
+}
 function byId(id){ return document.getElementById(id); }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 function setText(el, v){ if (el && el.textContent !== v) el.textContent = v; }
@@ -667,7 +698,11 @@ function renderDecisionsInner(){
       delete sentOk[kidId];
     }
   }
-  for (var di = 0; di < all.length; di++) decNode(all[di]);
+  for (var di = 0; di < all.length; di++) {
+    decNode(all[di]);
+    var dq = decNodeEl(all[di].id);
+    if (dq) dq.style.display = hashMatch([all[di].id, all[di].asked_by, all[di].asked_by_label]) ? '' : 'none';
+  }
 }
 function decNode(d){
   var list = byId('decList');
@@ -1099,6 +1134,8 @@ function renderTasks(){
   renderTaskOwnerOptions(ts);
   var byProj = taskProj === 'all' ? ts : ts.filter(function(t){ return projShort(t.project) === taskProj; });
   var own = taskOwner === 'all' ? byProj : byProj.filter(function(t){ return ownerKey(t) === taskOwner; });
+  // #filter= deep-link narrows rows to an id/owner/session substring (case-insensitive)
+  if (hashFilter) own = own.filter(function(t){ return hashMatch([t.id, ownerKey(t), ownerName(t)]); });
   // completed items are opt-in (a healthy fleet buries live work under DONE rows)
   var showDone = false;
   try { showDone = localStorage.getItem('taskShowDone') === '1'; } catch(e) {}
@@ -1316,6 +1353,13 @@ nav.addEventListener('click', function(e){
 window.addEventListener('hashchange', function(){
   var h = (location.hash || '').replace(/^#/, '');
   if (TABS[h]) setTab(h, true);
+  applyHashFilter(); // #filter= deep-link; any other hash (incl. plain tabs) clears it
+});
+byId('hashChipBar').addEventListener('click', function(e){
+  var b = e.target.closest && e.target.closest('.hfclear');
+  if (!b) return;
+  history.replaceState(null, '', location.pathname + location.search); // empty hash = no filtering
+  applyHashFilter();
 });
 byId('tasksTbl').addEventListener('click', function(e){
   var b = e.target.closest && e.target.closest('[data-task]');
@@ -1398,6 +1442,7 @@ function setCollapsed(v){
 setInterval(tick, 1000);
 if (!location.hash) history.replaceState(null, '', '#decisions');
 setTab(TABS[location.hash.slice(1)] ? location.hash.slice(1) : 'decisions', true);
+applyHashFilter(); // honor #filter=<text> on first paint (deep-link from the statusline)
 tick();
 renderAll();
 </script></body></html>`);
