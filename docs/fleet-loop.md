@@ -29,7 +29,7 @@ bun fleet-loop.ts watch --repo <dir> --ladder '<cmd> {branch}' [--every 120] [--
 ## dispatch — one item → claimed, worktree, briefed headless lane
 
 ```bash
-bun fleet-loop.ts dispatch --repo <dir> --item Wn
+bun fleet-loop.ts dispatch --repo <dir> --item Wn [--agent claude|codex]
 ```
 
 The fleet's own spawner (the coordinator's verb; gaps-style `--dispatch-cmd`
@@ -37,9 +37,45 @@ policy scripts can call it per-item instead of hand-rolling lane plumbing).
 It claims the item (resume-tolerant: an existing claim by the same lane id
 continues), reuses or creates the worktree at `.worktrees/<item>` (branch
 read back from the worktree), writes `.fleet/brief-<sid>.md`, and spawns a
-detached `claude -p` lane scoped to git/bun/qlty/rg + Edit/Write in
-`acceptEdits`. The lane is recorded in `lanes.json` with its pid — the
-retire pid-guard and the `lanes` verb cover the rest of its lifecycle.
+detached lane using the selected backend. The lane is recorded in
+`lanes.json` with its pid and `agent` — the retire pid-guard and the `lanes`
+verb cover the rest of its lifecycle. Dispatch refuses to start another
+process while that lane's recorded pid is alive.
+
+### Selecting the agent backend
+
+`--agent` accepts `claude` (the default) or `codex`. The selected CLI must
+be available on the dispatcher's `PATH`; an unknown backend or missing
+binary fails dispatch.
+
+```bash
+# Default Claude lane; --agent claude is equivalent.
+bun fleet-loop.ts dispatch --repo <dir> --item Wn
+
+# Codex lane for the same work-item protocol.
+bun fleet-loop.ts dispatch --repo <dir> --item Wn --agent codex
+
+# Inspect lane liveness and backend.
+bun fleet-loop.ts lanes --repo <dir>
+```
+
+- **Claude:** launches `claude -p` in `acceptEdits`, with the dispatcher's
+  allowed-tool list for shell commands and Edit/Write.
+- **Codex:** launches `codex exec -s workspace-write`, with network access
+  enabled and additional writable roots for the repo and
+  `~/.cache/claude-governor`. Dispatch sets `GIT_DIR` to the lane's private
+  `.gitstore` and `GIT_WORK_TREE` to its worktree so lane commits can be
+  written inside the sandbox; main-repo objects are shared through Git
+  alternates.
+
+Both backends receive the same brief and must follow `AGENTS.md`, including
+quality gates, commit/push, and the Work Graph completion protocol. The
+`lanes` output includes the backend; older registry entries without an
+`agent` field display as `claude`.
+
+Backend selection applies to `dispatch`. A policy script supplied through
+`--dispatch-cmd` must pass `--agent codex` on its own dispatch calls if it
+wants Codex lanes; the loop does not inject that flag into the script.
 
 ## Migrating a project onto it
 
