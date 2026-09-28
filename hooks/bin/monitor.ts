@@ -17,7 +17,11 @@ const fix = process.argv.includes("--fix");
 // published coordinator identity (coord fact set coordinator.sid) — the
 // authority for coordinator exemptions, above the misrecordable role column
 const coordinatorSid =
-	(db.query("SELECT value FROM facts WHERE key = 'coordinator.sid'").get() as { value: string } | null)?.value ?? null;
+	(
+		db.query("SELECT value FROM facts WHERE key = 'coordinator.sid'").get() as {
+			value: string;
+		} | null
+	)?.value ?? null;
 const issues: string[] = [];
 const fixed: string[] = [];
 
@@ -28,22 +32,38 @@ const fixed: string[] = [];
 // distinct from ZOMBIE/SUSPECT/UNKNOWN, and never swept.
 const waiting = new Map<string, number>();
 try {
-	for (const r of db.query("SELECT answer_to AS sid, COUNT(*) AS n FROM decisions WHERE state = 'OPEN' AND answer_to IS NOT NULL GROUP BY answer_to").all() as { sid: string; n: number }[])
+	for (const r of db
+		.query(
+			"SELECT answer_to AS sid, COUNT(*) AS n FROM decisions WHERE state = 'OPEN' AND answer_to IS NOT NULL GROUP BY answer_to",
+		)
+		.all() as { sid: string; n: number }[])
 		waiting.set(r.sid, r.n);
 } catch {} // no decisions table yet
 
 // 1. stale RUNNING sessions with dead transcripts (session sids ARE
 // transcript filenames — decidable for TOP-LEVEL sessions only; lanes close
 // at 24h, their real liveness is backlog W9)
-for (const s of db.query("SELECT sid, role, hb FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NULL AND hb < ?").all(now - 20 * 60_000) as {
-	sid: string; role: string; hb: number;
+for (const s of db
+	.query(
+		"SELECT sid, role, hb FROM sessions WHERE state = 'RUNNING' AND parent_sid IS NULL AND hb < ?",
+	)
+	.all(now - 20 * 60_000) as {
+	sid: string;
+	role: string;
+	hb: number;
 }[]) {
 	let live = false;
 	try {
 		const glob = new Bun.Glob(`**/*${s.sid}*.jsonl`);
-		for (const rel of glob.scanSync({ cwd: `${process.env.HOME}/.claude/projects`, onlyFiles: true })) {
+		for (const rel of glob.scanSync({
+			cwd: `${process.env.HOME}/.claude/projects`,
+			onlyFiles: true,
+		})) {
 			try {
-				if (statSync(`${process.env.HOME}/.claude/projects/${rel}`).mtimeMs > now - 15 * 60_000) {
+				if (
+					statSync(`${process.env.HOME}/.claude/projects/${rel}`).mtimeMs >
+					now - 15 * 60_000
+				) {
 					live = true;
 					break;
 				}
@@ -54,7 +74,9 @@ for (const s of db.query("SELECT sid, role, hb FROM sessions WHERE state = 'RUNN
 		if (waiting.has(s.sid)) {
 			// waiting on a human, not dead — surfaced, never swept
 			const n = waiting.get(s.sid) ?? 0;
-			console.log(`WAITING session ${s.sid.slice(0, 8)} — ${n} open decision${n === 1 ? "" : "s"}, stale hb (not swept)`);
+			console.log(
+				`WAITING session ${s.sid.slice(0, 8)} — ${n} open decision${n === 1 ? "" : "s"}, stale hb (not swept)`,
+			);
 		} else if (s.role === "coordinator" || s.sid === coordinatorSid) {
 			// the coordinator sleeps between waves — a stale hb is not death;
 			// state stays RUNNING so broadcasts and bus targeting keep working.
@@ -63,22 +85,39 @@ for (const s of db.query("SELECT sid, role, hb FROM sessions WHERE state = 'RUNN
 			// noticed. Alert only; the sweep still never closes a coordinator.
 			const ageH = ((now - s.hb) / 3_600_000).toFixed(1);
 			if (now - s.hb > 2 * 3_600_000) {
-				issues.push(`COORDINATOR-DARK ${s.sid.slice(0, 8)} hb-stale ${ageH}h — sleeping between waves or dead? ping it directly or have the owner EXIT it`);
+				issues.push(
+					`COORDINATOR-DARK ${s.sid.slice(0, 8)} hb-stale ${ageH}h — sleeping between waves or dead? ping it directly or have the owner EXIT it`,
+				);
 			} else {
-				console.log(`COORDINATOR ${s.sid.slice(0, 8)} hb stale ${ageH}h — left RUNNING (sleeping between waves)`);
+				console.log(
+					`COORDINATOR ${s.sid.slice(0, 8)} hb stale ${ageH}h — left RUNNING (sleeping between waves)`,
+				);
 			}
 		} else if (fix) {
-			db.query("UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'").run(s.sid);
+			db.query(
+				"UPDATE sessions SET state = 'CLOSED' WHERE sid = ? AND state = 'RUNNING'",
+			).run(s.sid);
 			fixed.push(`swept stale session ${s.sid.slice(0, 8)} → CLOSED`);
-		} else issues.push(`session ${s.sid.slice(0, 8)} RUNNING, hb stale, transcript dead`);
+		} else
+			issues.push(
+				`session ${s.sid.slice(0, 8)} RUNNING, hb stale, transcript dead`,
+			);
 	}
 }
 
 // 2. DONE items must not hold an owner (pure DB invariant)
-for (const w of db.query("SELECT project, id, owner_sid FROM work_items WHERE state = 'DONE' AND owner_sid IS NOT NULL").all() as {
-	project: string; id: string; owner_sid: string;
+for (const w of db
+	.query(
+		"SELECT project, id, owner_sid FROM work_items WHERE state = 'DONE' AND owner_sid IS NOT NULL",
+	)
+	.all() as {
+	project: string;
+	id: string;
+	owner_sid: string;
 }[]) {
-	issues.push(`${w.project.split("/").pop()?.replace(".git", "")}/${w.id} DONE but still owned by ${w.owner_sid.slice(0, 8)}`);
+	issues.push(
+		`${w.project.split("/").pop()?.replace(".git", "")}/${w.id} DONE but still owned by ${w.owner_sid.slice(0, 8)}`,
+	);
 }
 
 // 2b. decision-gated work items with no OPEN decision on the board — the
@@ -87,7 +126,13 @@ for (const w of db.query("SELECT project, id, owner_sid FROM work_items WHERE st
 // while the owner waited to rule; a chat ask is invisible to the board).
 // Detector: title says DECISION. --fix emits the missing NEED_DECISION at
 // the project coordinator (fact coordinator.sid).
-let decisionGated: { project: string; id: string; title: string; owner_sid: string | null; scope: string | null }[] = [];
+let decisionGated: {
+	project: string;
+	id: string;
+	title: string;
+	owner_sid: string | null;
+	scope: string | null;
+}[] = [];
 try {
 	decisionGated = db
 		.query(
@@ -110,30 +155,49 @@ for (const w of decisionGated) {
 		// serves this item's project; foreign-project items alert only (the
 		// .claude frozen backlog W2/W3/W21 must not ride the gaps coordinator)
 		const cproj = coordinatorSid
-			? (db.query("SELECT project FROM sessions WHERE sid = ?").get(coordinatorSid) as { project: string | null } | null)?.project ?? null
+			? ((
+					db
+						.query("SELECT project FROM sessions WHERE sid = ?")
+						.get(coordinatorSid) as { project: string | null } | null
+				)?.project ?? null)
 			: null;
 		if (coordinatorSid && cproj === w.project) {
-			db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'monitor', 'NEED_DECISION', ?, ?, ?)").run(
+			db.query(
+				"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'monitor', 'NEED_DECISION', ?, ?, ?)",
+			).run(
 				now,
 				w.scope,
-				JSON.stringify({ work: w.id, project: w.project, note: `${w.title} — surfaced by monitor: the NEED_DECISION for this item was never emitted` }),
+				JSON.stringify({
+					work: w.id,
+					project: w.project,
+					note: `${w.title} — surfaced by monitor: the NEED_DECISION for this item was never emitted`,
+				}),
 				coordinatorSid,
 			);
 			fixed.push(`emitted NEED_DECISION for ${w.id} → project coordinator`);
 		} else {
-			issues.push(`${label} (no project coordinator to route the NEED_DECISION to)`);
+			issues.push(
+				`${label} (no project coordinator to route the NEED_DECISION to)`,
+			);
 		}
 	}
 }
 
 // 3. expired locks (ts-based, safe to sweep)
-for (const l of db.query("SELECT path, sid, ts FROM locks WHERE ts < ?").all(now - 15 * 60_000) as {
-	path: string; sid: string; ts: number;
+for (const l of db
+	.query("SELECT path, sid, ts FROM locks WHERE ts < ?")
+	.all(now - 15 * 60_000) as {
+	path: string;
+	sid: string;
+	ts: number;
 }[]) {
 	if (fix) {
 		db.query("DELETE FROM locks WHERE path = ? AND ts = ?").run(l.path, l.ts);
 		fixed.push(`swept expired lock ${String(l.path).slice(0, 50)}`);
-	} else issues.push(`expired lock ${String(l.path).slice(0, 50)} (${Math.round((now - l.ts) / 60_000)}m)`);
+	} else
+		issues.push(
+			`expired lock ${String(l.path).slice(0, 50)} (${Math.round((now - l.ts) / 60_000)}m)`,
+		);
 }
 
 // 3b. --fix releases the file locks of waiting lanes so parallel work
@@ -141,22 +205,40 @@ for (const l of db.query("SELECT path, sid, ts FROM locks WHERE ts < ?").all(now
 // a waiting lane), each release logged with path + owner. work_items
 // ownership is never touched: resume goes through the normal claim path.
 if (fix && waiting.size) {
-	for (const l of db.query("SELECT path, sid FROM locks").all() as { path: string; sid: string }[]) {
+	for (const l of db.query("SELECT path, sid FROM locks").all() as {
+		path: string;
+		sid: string;
+	}[]) {
 		if (!waiting.has(l.sid)) continue;
 		db.query("DELETE FROM locks WHERE path = ? AND sid = ?").run(l.path, l.sid);
-		fixed.push(`released lock ${String(l.path).slice(0, 50)} (owner ${l.sid.slice(0, 8)} waiting for you)`);
+		fixed.push(
+			`released lock ${String(l.path).slice(0, 50)} (owner ${l.sid.slice(0, 8)} waiting for you)`,
+		);
 	}
 }
 
 // 4. lane facts must stay inside the preemption state machine
-for (const f of db.query("SELECT key, value FROM facts WHERE key LIKE 'lane.%.state'").all() as { key: string; value: string }[]) {
-	if (!["RUNNING", "PAUSE_REQUESTED", "PAUSED", "RESUME_READY", "BLOCKED", "WAIT_RATE"].includes(f.value)) {
+for (const f of db
+	.query("SELECT key, value FROM facts WHERE key LIKE 'lane.%.state'")
+	.all() as { key: string; value: string }[]) {
+	if (
+		![
+			"RUNNING",
+			"PAUSE_REQUESTED",
+			"PAUSED",
+			"RESUME_READY",
+			"BLOCKED",
+			"WAIT_RATE",
+		].includes(f.value)
+	) {
 		issues.push(`lane fact ${f.key} = ${f.value} — outside state machine`);
 	}
 }
 
 // 5. malformed event payloads
-for (const e of db.query("SELECT id, payload FROM events ORDER BY id DESC LIMIT 20").all() as { id: number; payload: string | null }[]) {
+for (const e of db
+	.query("SELECT id, payload FROM events ORDER BY id DESC LIMIT 20")
+	.all() as { id: number; payload: string | null }[]) {
 	if (e.payload) {
 		try {
 			JSON.parse(e.payload);
@@ -179,25 +261,43 @@ const dead = db
 		 WHERE e.target IS NOT NULL AND e.ts < ? AND e.id > COALESCE(c.event_id, 0)
 		 ORDER BY e.id`,
 	)
-	.all(now - 30 * 60_000) as { id: number; ts: number; kind: string; target: string }[];
+	.all(now - 30 * 60_000) as {
+	id: number;
+	ts: number;
+	kind: string;
+	target: string;
+}[];
 for (const d of dead) {
 	if (waiting.has(d.target)) continue; // waiting on you, not dead
 	const fk = `deadletter.${d.id}`;
-	const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as { ts: number } | null;
+	const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as {
+		ts: number;
+	} | null;
 	const age = Math.round((now - d.ts) / 60_000);
 	const label = `dead letter #${d.id} ${d.kind} → ${d.target.slice(0, 10)} undrained ${age}m`;
 	if (!seen || now - seen.ts > 6 * 3_600_000) {
-		db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, label, now);
+		db.query(
+			"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)",
+		).run(fk, label, now);
 		issues.push(`${label} — cursor behind, never auto-acked`);
-	} else issues.push(`${label} (alerted ${Math.round((now - seen.ts) / 60_000)}m ago)`);
+	} else
+		issues.push(
+			`${label} (alerted ${Math.round((now - seen.ts) / 60_000)}m ago)`,
+		);
 }
 // 5c. drive-by fan-outs (monitor half of W16): decomposition-class shatters
 // are plan-gated — >2 children from one split with no plan-item reference in
 // the work.added payloads is a drive-by. One alert per split burst (same
 // parent, children added within one minute), deduped 6h like other checks.
 const added = db
-	.query("SELECT id, ts, payload FROM events WHERE kind = 'work.added' AND ts >= ? ORDER BY ts, id")
-	.all(now - 24 * 3_600_000) as { id: number; ts: number; payload: string | null }[];
+	.query(
+		"SELECT id, ts, payload FROM events WHERE kind = 'work.added' AND ts >= ? ORDER BY ts, id",
+	)
+	.all(now - 24 * 3_600_000) as {
+	id: number;
+	ts: number;
+	payload: string | null;
+}[];
 const bursts = new Map<string, { id: number; ts: number; plan: boolean }[]>();
 for (const e of added) {
 	let p: Record<string, unknown> = {};
@@ -224,18 +324,25 @@ for (const [key, kids] of bursts) {
 			const ids = cluster.map((k) => k.id).join(",");
 			const label = `drive-by fan-out: ${pname}/${parent} split added ${cluster.length} children, no plan-item reference (#${ids})`;
 			const fk = `driveby.${project}/${parent}`;
-			const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as { ts: number } | null;
+			const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as {
+				ts: number;
+			} | null;
 			if (seen && now - seen.ts <= 6 * 3_600_000) {
-				issues.push(`${label} (alerted ${Math.round((now - seen.ts) / 60_000)}m ago)`);
+				issues.push(
+					`${label} (alerted ${Math.round((now - seen.ts) / 60_000)}m ago)`,
+				);
 			} else {
-				db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, label, now);
+				db.query(
+					"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)",
+				).run(fk, label, now);
 				issues.push(label);
 			}
 		}
 		cluster = [];
 	};
 	for (const k of kids) {
-		if (cluster.length && k.ts - cluster[cluster.length - 1].ts > 60_000) flush();
+		if (cluster.length && k.ts - cluster[cluster.length - 1].ts > 60_000)
+			flush();
 		cluster.push(k);
 	}
 	flush();
@@ -254,10 +361,18 @@ for (const [key, kids] of bursts) {
 // + re-dispatch pointing at the frozen transcript) belongs to the canonical
 // coordinator; alerts dedupe via fact zombie.<id> (6h).
 const ZOMBIE_MS = Number(
-	(db.query("SELECT value FROM facts WHERE key = 'fleet.zombie_after_ms'").get() as { value: string } | null)?.value ?? 45 * 60_000,
+	(
+		db
+			.query("SELECT value FROM facts WHERE key = 'fleet.zombie_after_ms'")
+			.get() as { value: string } | null
+	)?.value ?? 45 * 60_000,
 );
 const STALL_MS = Number(
-	(db.query("SELECT value FROM facts WHERE key = 'fleet.stall_after_ms'").get() as { value: string } | null)?.value ?? 15 * 60_000,
+	(
+		db
+			.query("SELECT value FROM facts WHERE key = 'fleet.stall_after_ms'")
+			.get() as { value: string } | null
+	)?.value ?? 15 * 60_000,
 );
 // W51: transcript liveness by CONTENT — the newest entry's own `timestamp`
 // (mtime alone can lie: compaction or a partial-line flush touches the file
@@ -282,10 +397,16 @@ function transcriptTailTs(path: string): number | null {
 		return null;
 	}
 }
-const zProjects = db.query("SELECT DISTINCT project FROM work_items WHERE state IN ('CLAIMED','RUNNING')").all() as { project: string }[];
+const zProjects = db
+	.query(
+		"SELECT DISTINCT project FROM work_items WHERE state IN ('CLAIMED','RUNNING')",
+	)
+	.all() as { project: string }[];
 for (const { project } of zProjects) {
 	const claimed = db
-		.query("SELECT id, owner_sid, title FROM work_items WHERE project = ? AND state IN ('CLAIMED','RUNNING') AND owner_sid IS NOT NULL")
+		.query(
+			"SELECT id, owner_sid, title FROM work_items WHERE project = ? AND state IN ('CLAIMED','RUNNING') AND owner_sid IS NOT NULL",
+		)
 		.all(project) as { id: string; owner_sid: string; title: string }[];
 	for (const w of claimed) {
 		if (waiting.has(w.owner_sid)) {
@@ -297,32 +418,49 @@ for (const { project } of zProjects) {
 			const n = waiting.get(w.owner_sid) ?? 0;
 			const label = `${w.owner_sid.slice(0, 10)} WAITING for you (${n} open decision${n === 1 ? "" : "s"})`;
 			const fk = `waiting.${w.id}`;
-			const prev = db.query("SELECT value FROM facts WHERE key = ?").get(fk) as { value: string } | null;
+			const prev = db
+				.query("SELECT value FROM facts WHERE key = ?")
+				.get(fk) as { value: string } | null;
 			if (prev?.value !== label) fixed.push(`WAITING ${w.id} (${label})`);
-			db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, label, now);
+			db.query(
+				"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)",
+			).run(fk, label, now);
 			continue;
 		}
-		const sess = db.query("SELECT state, hb, transcript_path FROM sessions WHERE sid = ?").get(w.owner_sid) as
-			| { state: string; hb: number; transcript_path: null | string }
-			| null;
+		const sess = db
+			.query("SELECT state, hb, transcript_path FROM sessions WHERE sid = ?")
+			.get(w.owner_sid) as {
+			state: string;
+			hb: number;
+			transcript_path: null | string;
+		} | null;
 		if (sess && ["PAUSED", "WAIT_RATE"].includes(sess.state)) continue; // expected-silent
 		const signals: string[] = [];
 		let known = 0;
 		if (sess?.hb) {
 			known++;
-			if (now - sess.hb > ZOMBIE_MS) signals.push(`hb ${Math.round((now - sess.hb) / 60000)}min`);
+			if (now - sess.hb > ZOMBIE_MS)
+				signals.push(`hb ${Math.round((now - sess.hb) / 60000)}min`);
 			else signals.length = 0; // fresh hb outranks older transcript signal
 		}
 		if (sess?.transcript_path) {
 			try {
 				const age = now - statSync(sess.transcript_path).mtimeMs;
 				known++;
-				if (age > ZOMBIE_MS) signals.push(`transcript ${Math.round(age / 60000)}min`);
+				if (age > ZOMBIE_MS)
+					signals.push(`transcript ${Math.round(age / 60000)}min`);
 			} catch {
 				// path recorded but unstat-able — telemetry gap, not death
 			}
 		}
-		const verdict = signals.length >= 2 ? "ZOMBIE" : signals.length === 1 ? "SUSPECT" : known === 0 ? "UNKNOWN" : "ACTIVE";
+		const verdict =
+			signals.length >= 2
+				? "ZOMBIE"
+				: signals.length === 1
+					? "SUSPECT"
+					: known === 0
+						? "UNKNOWN"
+						: "ACTIVE";
 		const label = `${w.owner_sid.slice(0, 10)} ${verdict}${signals.length ? ` (${signals.join(", ")})` : " (no telemetry)"}`;
 		// W51: STALLED — alive but quiet: hb fresh (hooks firing) while the
 		// transcript's newest entry is old and nothing waits on a decision
@@ -333,64 +471,113 @@ for (const { project } of zProjects) {
 		if (verdict === "ACTIVE" && sess?.transcript_path) {
 			const lastTs = transcriptTailTs(sess.transcript_path);
 			const fk = `stall.${w.owner_sid}`;
-			const seen = db.query("SELECT value, ts FROM facts WHERE key = ?").get(fk) as { value: string; ts: number } | null;
+			const seen = db
+				.query("SELECT value, ts FROM facts WHERE key = ?")
+				.get(fk) as { value: string; ts: number } | null;
 			if (lastTs !== null && now - lastTs > STALL_MS) {
 				const quiet = Math.round((now - lastTs) / 60000);
 				if (seen?.value === String(lastTs)) {
-					issues.push(`stalled ${w.id}: ${w.owner_sid.slice(0, 10)} STALLED (transcript quiet ${quiet}min, nudged ${Math.round((now - seen.ts) / 60000)}min ago)`);
+					issues.push(
+						`stalled ${w.id}: ${w.owner_sid.slice(0, 10)} STALLED (transcript quiet ${quiet}min, nudged ${Math.round((now - seen.ts) / 60000)}min ago)`,
+					);
 				} else {
-					db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, String(lastTs), now);
-					db.query("INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'monitor', 'STALL_NUDGE', ?, ?, ?)").run(
+					db.query(
+						"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)",
+					).run(fk, String(lastTs), now);
+					db.query(
+						"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'monitor', 'STALL_NUDGE', ?, ?, ?)",
+					).run(
 						now,
 						w.id,
-						JSON.stringify({ work: w.id, note: `transcript quiet ${quiet}m — per the work graph, next step is ${w.title}` }),
+						JSON.stringify({
+							work: w.id,
+							note: `transcript quiet ${quiet}m — per the work graph, next step is ${w.title}`,
+						}),
 						w.owner_sid,
 					);
-					fixed.push(`${w.owner_sid.slice(0, 10)} STALLED ${w.id} — transcript quiet ${quiet}min, STALL_NUDGE sent (next: ${w.title.slice(0, 50)})`);
+					fixed.push(
+						`${w.owner_sid.slice(0, 10)} STALLED ${w.id} — transcript quiet ${quiet}min, STALL_NUDGE sent (next: ${w.title.slice(0, 50)})`,
+					);
 				}
 			} else if (seen) db.query("DELETE FROM facts WHERE key = ?").run(fk);
 		}
 		if (verdict === "ACTIVE") continue;
 		const fk = `zombie.${w.id}`;
-		const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as { ts: number } | null;
+		const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as {
+			ts: number;
+		} | null;
 		if (!seen || now - seen.ts > 6 * 3600_000) {
-			db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)").run(fk, label, now);
+			db.query(
+				"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'monitor', 1, ?)",
+			).run(fk, label, now);
 			if (verdict === "ZOMBIE") {
 				db.query(
 					"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'monitor', 'alert', ?, ?, (SELECT value FROM facts WHERE key = 'coordinator.sid'))",
-				).run(now, w.id, JSON.stringify({ note: `ZOMBIE lane: ${label} — reclaim + re-dispatch pointing at its transcript` }));
+				).run(
+					now,
+					w.id,
+					JSON.stringify({
+						note: `ZOMBIE lane: ${label} — reclaim + re-dispatch pointing at its transcript`,
+					}),
+				);
 			}
 			fixed.push(`${verdict} ${w.id} (${label})`);
 		} else if (verdict === "ZOMBIE") {
-			issues.push(`zombie ${w.id}: ${label} (alerted ${Math.round((now - seen.ts) / 60000)}min ago)`);
+			issues.push(
+				`zombie ${w.id}: ${label} (alerted ${Math.round((now - seen.ts) / 60000)}min ago)`,
+			);
 		}
 	}
 }
 
 // 6. FOCUS: workload surface per project — health-clean ≠ nothing to do
-const projs = db.query("SELECT DISTINCT project FROM work_items WHERE state NOT IN ('DONE','SUPERSEDED') ORDER BY project").all() as { project: string }[];
+const projs = db
+	.query(
+		"SELECT DISTINCT project FROM work_items WHERE state NOT IN ('DONE','SUPERSEDED') ORDER BY project",
+	)
+	.all() as { project: string }[];
 for (const { project } of projs) {
 	const name = project.split("/").pop()?.replace(".git", "") || project;
-	const all = db.query("SELECT id, state, owner_sid, title FROM work_items WHERE project = ? AND state NOT IN ('DONE','SUPERSEDED') ORDER BY id").all(project) as {
-		id: string; state: string; owner_sid: string | null; title: string;
+	const all = db
+		.query(
+			"SELECT id, state, owner_sid, title FROM work_items WHERE project = ? AND state NOT IN ('DONE','SUPERSEDED') ORDER BY id",
+		)
+		.all(project) as {
+		id: string;
+		state: string;
+		owner_sid: string | null;
+		title: string;
 	}[];
-	const inflight = all.filter((w) => w.state === "CLAIMED" || w.state === "RUNNING");
+	const inflight = all.filter(
+		(w) => w.state === "CLAIMED" || w.state === "RUNNING",
+	);
 	const ready = all.filter((w) => w.state === "READY");
 	console.log(
 		`FOCUS ${name}: ${inflight.length} in-flight, ${ready.length} ready/queued, ${all.length - inflight.length - ready.length} gated/other`,
 	);
-	for (const w of inflight) console.log(`  ▶ ${w.id} [${String(w.owner_sid).slice(0, 10)}] ${w.title.slice(0, 50)}`);
-	for (const w of ready.slice(0, 6)) console.log(`  · ${w.id} ${w.title.slice(0, 55)}`);
-	if (ready.length > 6) console.log(`  … +${ready.length - 6} more (work ready)`);
+	for (const w of inflight)
+		console.log(
+			`  ▶ ${w.id} [${String(w.owner_sid).slice(0, 10)}] ${w.title.slice(0, 50)}`,
+		);
+	for (const w of ready.slice(0, 6))
+		console.log(`  · ${w.id} ${w.title.slice(0, 55)}`);
+	if (ready.length > 6)
+		console.log(`  … +${ready.length - 6} more (work ready)`);
 }
 
 // 6b. consult diagnostics: where inter-agent latency hides (the kb answers
 // repeat questions without spending an expert round-trip)
 try {
-	const byState = db.query("SELECT state, COUNT(*) AS n FROM consults GROUP BY state").all() as { state: string; n: number }[];
+	const byState = db
+		.query("SELECT state, COUNT(*) AS n FROM consults GROUP BY state")
+		.all() as { state: string; n: number }[];
 	const s = (k: string) => byState.find((b) => b.state === k)?.n ?? 0;
-	const kbstats = db.query("SELECT COUNT(*) AS n2, COALESCE(SUM(hits), 0) AS n FROM consult_kb").get() as { n2: number; n: number };
-	console.log(`CONSULTS ${s("OPEN")} open · ${s("ANSWERED")} human-answered · ${s("KB")} kb-answered · kb ${kbstats.n2} solutions, ${kbstats.n} hits`);
+	const kbstats = db
+		.query("SELECT COUNT(*) AS n2, COALESCE(SUM(hits), 0) AS n FROM consult_kb")
+		.get() as { n2: number; n: number };
+	console.log(
+		`CONSULTS ${s("OPEN")} open · ${s("ANSWERED")} human-answered · ${s("KB")} kb-answered · kb ${kbstats.n2} solutions, ${kbstats.n} hits`,
+	);
 } catch {} // pre-v3 db — consult tracking not present yet
 
 // automagic hygiene: the shared liveness sweep rides along with --fix only —
@@ -398,7 +585,10 @@ try {
 // always-on sweep points are session-start, coord bootstrap, and coord gc.
 if (fix) {
 	const swept = sweepStaleSessions(db);
-	if (swept) fixed.push(`swept ${swept} stale session(s) (hb-stale + transcript-dead; coordinator/waiting kept)`);
+	if (swept)
+		fixed.push(
+			`swept ${swept} stale session(s) (hb-stale + transcript-dead; coordinator/waiting kept)`,
+		);
 }
 
 if (fixed.length) console.log(fixed.map((f) => `✓ ${f}`).join("\n"));
