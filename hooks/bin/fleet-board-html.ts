@@ -1401,6 +1401,7 @@ function renderDrawer(){
 function resetDiff(){
   diffView.open = false; diffView.busy = false; diffView.err = null; diffView.data = null; diffView.okAt = 0;
   diffView.target = null; diffView.draft = ''; diffView.msg = ''; diffView.msgErr = false;
+  shipReset();
 }
 function fetchDiff(){
   if (diffView.busy || !task.id) return;
@@ -1411,6 +1412,20 @@ function fetchDiff(){
       diffView.busy = false;
       if (res.status === 200 && res.j && res.j.ok) { diffView.data = res.j; diffView.okAt = Date.now(); }
       else diffView.err = (res.j && res.j.error) || 'HTTP ' + res.status;
+      // ship outcome rides this poll: the 404 (retired branch) is the
+      // shipped signal; a 200 while a ship runs keeps the 2s poll alive
+      if (shipView.phase === 'run') {
+        if (res.status === 404) {
+          diffView.msg = 'shipped — merged and the branch retired'; diffView.msgErr = false;
+          shipReset();
+        } else if (Date.now() - shipView.at < 10 * 60_000) {
+          setTimeout(fetchDiff, 2000);
+          return;
+        } else {
+          diffView.msg = 'ship still running after 10min — see the repo .fleet/loop.log'; diffView.msgErr = true;
+          shipReset();
+        }
+      }
       renderTaskDiff();
     })
     .catch(function(e){ diffView.busy = false; diffView.err = String((e && e.message) || e); renderTaskDiff(); });
@@ -1466,13 +1481,16 @@ function renderTaskDiff(){
   if (!task.id) { sigSet(el, 'idle', ''); return; }
   var sig = [task.id, diffView.open, diffView.busy, diffView.err, diffView.okAt,
     diffView.target ? diffView.target.file + ':' + diffView.target.line : '',
-    diffView.msg ? (diffView.msgErr ? 'e' : 'o') + diffView.msg : ''].join('|');
+    diffView.msg ? (diffView.msgErr ? 'e' : 'o') + diffView.msg : '',
+    shipView.phase].join('|');
   if (el.getAttribute('data-sig') !== sig) {
     el.setAttribute('data-sig', sig);
     var h = '<div class="diffbar"><button type="button" class="diffbtn' + (diffView.open ? ' on' : '') + '">' + (diffView.busy ? 'diff…' : 'diff') + '</button>';
     if (diffView.data) {
       var statTail = String(diffView.data.stat || '').trim().split('\n').pop() || '';
       h += '<span class="diffcap mono">' + esc(diffView.data.branch) + ' @ ' + esc(String(diffView.data.base || '').slice(0, 7)) + (statTail ? ' · ' + esc(statTail) : '') + '</span>';
+      var sl = shipView.phase ? 'merging…' : 'ship';
+      h += '<button type="button" class="diffbtn ship" title="ship this branch: run the repo merge ladder and merge to main">' + sl + '</button>';
     }
     if (diffView.err) h += '<span class="diffmsg risk">' + esc(diffView.err) + '</span>';
     if (diffView.msg) h += '<span class="diffmsg' + (diffView.msgErr ? ' risk' : '') + '">' + esc(diffView.msg) + '</span>';
@@ -1527,6 +1545,43 @@ function sendDiffNote(){
       renderTaskDiff();
     });
 }
+// --- 4c: one-click ship (W64, /api/ship) — ladder+merge from the diff bar ---
+// Ship runs detached on the board: the POST returns the resolved ladder while
+// the child runs. Outcome rides the /api/diff poll: once the branch retires,
+// /api/diff 404s ("no branch ...") — that 404 is the shipped signal.
+var shipView = { phase: null, ladder: '', at: 0 };
+function shipReset(){
+  shipView = { phase: null, ladder: '', at: 0 };
+}
+function shipItem(){
+  if (!task.id || !diffView.data || shipView.phase) return;
+  var proj = task.proj || (task.data && task.data.task && task.data.task.project);
+  if (!proj) { diffView.msg = 'ship: no project on the open task'; diffView.msgErr = true; renderTaskDiff(); return; }
+  shipView = { phase: 'post', ladder: '', at: Date.now() };
+  diffView.msg = 'ship: dispatching...'; diffView.msgErr = false;
+  renderTaskDiff();
+  postJSON('/api/ship', { project: proj, id: task.id })
+    .then(function(res){
+      if (res && res.ok) {
+        shipView = { phase: 'run', ladder: res.ladder || '', at: Date.now() };
+        diffView.msg = 'shipping via ' + (res.ladder || 'the repo ladder') + ' — the branch retires when it lands';
+        fetchDiff();
+      } else {
+        shipReset();
+        diffView.msg = (res && res.error) || 'ship failed — retry';
+        diffView.msgErr = true;
+        // the branch may have merged while the drawer sat open — refresh
+        fetchDiff();
+      }
+    })
+    .catch(function(e){
+      shipReset();
+      diffView.msg = String((e && e.message) || e) + ' — retry';
+      diffView.msgErr = true;
+      renderTaskDiff();
+    });
+}
+
 // --- 5: activity feed (Activity tab, /api/activity, newest first) ---
 function pollAct(){
   if (actBusy || curTab !== 'activity') return;
@@ -1696,6 +1751,8 @@ paintSort();
 byId('drawerClose').addEventListener('click', closeTask);
 var diffEl = byId('taskDiff');
 diffEl.addEventListener('click', function(e){
+  var sh = e.target.closest && e.target.closest('.diffbtn.ship');
+  if (sh) { shipItem(); return; }
   var b = e.target.closest && e.target.closest('.diffbtn');
   if (b) { toggleDiff(); return; }
   var n = e.target.closest && e.target.closest('.dlnum[data-file]');
