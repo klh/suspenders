@@ -85,6 +85,14 @@ quality gates, commit/push, and the Work Graph completion protocol. The
 `lanes` output includes the backend; older registry entries without an
 `agent` field display as `claude`.
 
+Lanes cannot push main (W70): the pre-bash push-guard denies any `git push`
+that would move main on the remote — explicit refspecs (including deletes
+and force forms), HEAD/current-branch pushes, bare pushes while sitting on
+main, and `--all`/`--mirror` — from any session whose process tree resolves
+to a `.fleet/lanes.json` entry via a ppid walk (`hooks/lib/fleetlane.ts`).
+Merge to main is the ladder's job (board ship trigger / `fleet-loop ship`),
+never a lane's.
+
 Backend selection applies to `dispatch`. A policy script supplied through
 `--dispatch-cmd` must pass `--agent codex` on its own dispatch calls if it
 wants Codex lanes; the loop does not inject that flag into the script.
