@@ -111,6 +111,7 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
 #tasksTbl .num { text-align:right; font-variant-numeric:tabular-nums; color:#98958e; }
 .tidbtn { background:none; border:none; padding:0; color:#d8900f; font:inherit; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
 .ttitle { word-break:break-word; max-width:480px; }
+.tail { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:480px; }
 .akind { display:inline-block; border:1px solid rgba(255,255,255,.18); border-radius:2px; padding:0 6px; font-size:9.5px; text-transform:uppercase; letter-spacing:.06em; color:#98958e; }
 .sec { margin-bottom:20px; }
 .sec h2 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:#98958e; margin:0 0 8px; }
@@ -1069,7 +1070,8 @@ function taskRow(t, parentId){
   var kid = parentId ? '<span class="kidmark">↳</span>' : '';
   return '<tr data-tid="' + esc(t.id) + '"><td>' + kid + '<button type="button" class="tidbtn mono" data-task="' + esc(t.id) + '" data-proj="' + esc(t.project || '') + '" aria-haspopup="dialog">' + esc(t.id) + '</button></td>' +
     '<td class="mono dim">' + esc(projShort(t.project)) + '</td>' +
-    '<td class="ttitle">' + esc(String(t.title || '(untitled)')).slice(0, 120) + '</td>' +
+    '<td class="ttitle">' + esc(String(t.title || '(untitled)')).slice(0, 120) +
+      (t.tail && t.tail.text ? '<div class="tail dim">' + esc(t.tail.text) + '</div>' : '') + '</td>' +
     '<td>' + taskPill(t.state) + '</td>' +
     '<td>' + esc(owner) + '</td>' +
     '<td class="num">' + agoShort(t.age_s) + '</td>' +

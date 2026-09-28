@@ -8,7 +8,7 @@
 // focusing a session shows its project's TODO / IN-FLIGHT / DONE board,
 // its claims, inbox, lane state, and the event tail.
 import { openGovernorDb } from "../lib/govdb.ts";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { HTML } from "./fleet-board-html.ts";
 
 // sibling CLIs resolve relative to this file — the board is relocatable
@@ -288,6 +288,51 @@ const payloadOf = (raw: string | null): any => {
 	}
 };
 
+const TAIL_BYTES = 32 * 1024;
+const TAIL_MAX = 110;
+function transcriptTail(sid: string | null | undefined): { text: string; ts: string | null } | null {
+	if (!sid) return null;
+	const row = db.query("SELECT transcript_path FROM sessions WHERE sid = ?").get(sid) as { transcript_path: string | null } | null;
+	const path = row?.transcript_path;
+	if (!path || !existsSync(path) || !statSync(path).size) return null;
+	const size = statSync(path).size;
+	const start = Math.max(0, size - TAIL_BYTES);
+	const len = size - start;
+	const buf = Buffer.alloc(len);
+	try {
+		const fd = openSync(path, "r");
+		readSync(fd, buf, 0, len, start);
+		closeSync(fd);
+	} catch {
+		return null;
+	}
+	const lines = buf.toString("utf8").split("\n");
+	if (start > 0) lines.shift(); // first line may be a partial record
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (!line) continue;
+		let j: any;
+		try {
+			j = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		const msg = j?.message;
+		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (let k = msg.content.length - 1; k >= 0; k--) {
+			const b = msg.content[k];
+			if (b?.type === "text" && typeof b.text === "string" && b.text.trim())
+				return { text: b.text.trim().replace(/\s+/g, " ").slice(0, TAIL_MAX), ts: j.timestamp ?? null };
+			if (b?.type === "tool_use" && b.name)
+				return {
+					text: `→ ${b.name}: ${String(b.input?.command ?? b.input?.file_path ?? b.input?.pattern ?? b.input?.description ?? "").replace(/\s+/g, " ").slice(0, TAIL_MAX - 3)}`,
+					ts: j.timestamp ?? null,
+				};
+		}
+	}
+	return null;
+}
+
 function taskShape(w: any, openDecisions: number): Record<string, unknown> {
 	return {
 		project: w.project,
@@ -301,6 +346,7 @@ function taskShape(w: any, openDecisions: number): Record<string, unknown> {
 		parent_id: w.parent_id ?? null,
 		age_s: ago(w.updated_at),
 		open_decisions: openDecisions,
+		tail: transcriptTail(w.owner_sid),
 	};
 }
 

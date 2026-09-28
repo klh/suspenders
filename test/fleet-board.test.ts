@@ -345,7 +345,7 @@ describe("board api v3 (docs/board-api.md)", () => {
 		expect(feed.tasks.length).toBeGreaterThan(1);
 		for (const t of feed.tasks) {
 			expect(t.project).toBe(proj);
-			expect(Object.keys(t).sort()).toEqual(["age_s", "id", "open_decisions", "owner_label", "owner_sid", "parent_id", "project", "requires", "scope", "state", "title"]);
+			expect(Object.keys(t).sort()).toEqual(["age_s", "id", "open_decisions", "owner_label", "owner_sid", "parent_id", "project", "requires", "scope", "state", "tail", "title"]);
 		}
 		const alpha = feed.tasks.find((t: any) => t.id === w1);
 		const beta = feed.tasks.find((t: any) => t.id === w2);

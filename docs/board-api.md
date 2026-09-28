@@ -23,12 +23,15 @@ newest activity first:
   "project": "/p/repo/.git", "id": "W7", "title": "…", "state": "READY|CLAIMED|RUNNING|BLOCKED|DONE|SHATTERED",
   "owner_sid": "…|null", "owner_label": "lane-name|null", "requires": "shell,git|null",
   "scope": "src/x|null", "parent_id": "W6|null", "age_s": 4210,
-  "open_decisions": 1
+  "open_decisions": 1,
+  "tail": { "text": "→ Bash: bun test test/", "ts": "2026-09-28T07:19:35.016Z" } | null
 }
 ```
 
 `open_decisions` = OPEN decisions rows with `task_id = id`. `owner_label` = the owner's
-newest claim intent, else session name, else null.
+newest claim intent, else session name, else null. `tail` = the claiming session's latest
+assistant text or tool call, read from the last 32KB of its `sessions.transcript_path`
+JSONL (null when the session has no transcript on this disk — remote or reaped).
 
 ## GET /api/task?project=&id=
 
@@ -56,14 +59,14 @@ contract holds.
 `{ ok, checks: [{ id, label, ok: bool, detail, fix|null }] }` — advisory wiring
 checks, never throw:
 
-| id | label | ok when | fix |
-|---|---|---|---|
-| db | Control-plane database | this process is serving it | — |
-| hooks-wired | Hook gates wired | `~/.claude/settings.json` references this install's `gate.ts` in PreToolUse | `./install.sh --wire` |
-| session-start | Session injection wired | SessionStart hook references session-start.ts | `./install.sh --wire` |
-| monitor-agent | Fleet monitor launchd | `~/Library/LaunchAgents/com.suspenders.fleet-monitor.plist` exists | `./install.sh --with-launchd` |
-| llm | Advice LLM endpoint | `GET $SUSPENDERS_LLM_URL/v1/models` (default `http://127.0.0.1:8901`) answers within 1.5 s | local LLM stack docs |
-| bind | LAN binding | informational: SUSPENDERS_BIND value | — |
+| id            | label                   | ok when                                                                                    | fix                           |
+| ------------- | ----------------------- | ------------------------------------------------------------------------------------------ | ----------------------------- |
+| db            | Control-plane database  | this process is serving it                                                                 | —                             |
+| hooks-wired   | Hook gates wired        | `~/.claude/settings.json` references this install's `gate.ts` in PreToolUse                | `./install.sh --wire`         |
+| session-start | Session injection wired | SessionStart hook references session-start.ts                                              | `./install.sh --wire`         |
+| monitor-agent | Fleet monitor launchd   | `~/Library/LaunchAgents/com.suspenders.fleet-monitor.plist` exists                         | `./install.sh --with-launchd` |
+| llm           | Advice LLM endpoint     | `GET $SUSPENDERS_LLM_URL/v1/models` (default `http://127.0.0.1:8901`) answers within 1.5 s | local LLM stack docs          |
+| bind          | LAN binding             | informational: SUSPENDERS_BIND value                                                       | —                             |
 
 ## Demo mode — `--demo` CLI flag
 
