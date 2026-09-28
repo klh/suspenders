@@ -1,6 +1,6 @@
 {
   "name": "suspenders",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A control plane for agent fleets — SQLite state, capability-aware dispatch, zombie detection, decisions with LLM recommendations, a consult knowledge base, and a live fleet board",
   "type": "module",
   "license": "BUSL-1.1",
