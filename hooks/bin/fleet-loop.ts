@@ -424,18 +424,14 @@ if (MODE === "dispatch") {
 	}
 	const agentArgs =
 		AGENT === "codex"
-			? // sandboxed lane; writable roots cover the work-graph state the
-				// done-protocol touches, network covers the branch push
-				[
-					"exec",
-					"-s",
-					"workspace-write",
-					"-c",
-					`sandbox_workspace_write.writable_roots=${JSON.stringify([REPO, `${process.env.HOME}/.cache/claude-governor`, `${process.env.HOME}/.qlty`])}`,
-					"-c",
-					"sandbox_workspace_write.network_access=true",
-					prompt,
-				]
+			? // full access — owner directive 2026-09-28: codex lanes are
+				// EQUIVALENT to claude lanes (same trust class, unsandboxed).
+				// The seatbelt structurally denies git writes, which forked the
+				// protocol into lane-commits vs coordinator-commits; one
+				// approach, two backends. The private git store stays: even
+				// unsandboxed, a codex lane's commits never touch the main
+				// object db until the coordinator merges.
+				["exec", "--sandbox", "danger-full-access", prompt]
 			: [
 					"-p",
 					prompt,
