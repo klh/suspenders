@@ -119,6 +119,15 @@ After dispatch, inspect `.fleet/brief-<sid>.md`, `.fleet/lanes.json`, and
 `.fleet/lane-<sid>.log` for the assigned item, branch, backend, pid, and
 progress. A live pid proves liveness, not successful completion.
 
+**Lane liveness (2026-09-28, autow57):** `claude -p` buffers stdout — the
+lane log shows startup warnings and the FINAL result, nothing in between, so
+log silence during a run is normal and proves nothing. To distinguish a
+grinding lane from a stuck one, probe the session transcript:
+`~/.claude/projects/<repo>--worktrees-<item>/<sid>.jsonl` grows in real time
+while the lane works (the original autow57 had 2.7MB of active work when it
+was killed on a log-silence misread). The `[claude-code:unrecognized_model]`
+line appears in healthy lanes too (W79 completed with it) — non-fatal noise.
+
 In the assigned workspace, verify `git rev-parse --verify HEAD`,
 `git branch --show-current`, and `git status --short` before editing. A Codex
 workspace uses a private Git store rather than a registered Git worktree;
