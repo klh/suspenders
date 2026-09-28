@@ -32,6 +32,19 @@ bun fleet-loop.ts watch --repo <dir> --ladder '<cmd> {branch}' [--every 120] [--
 bun fleet-loop.ts dispatch --repo <dir> --item Wn [--agent claude|codex]
 ```
 
+## ship — one branch through the ladder now (W64)
+
+```bash
+bun fleet-loop.ts ship --repo <dir> --branch suspenders/<id> --ladder '<cmd> {branch}'
+```
+
+The board's one-click ship trigger (fleet-board `POST /api/ship`) resolves the
+ladder from `<repo>/.fleet/ship.json` (`{"ladder": "<cmd template with
+{branch}>"}` — owner config, same trust class as the Makefile) and spawns this
+verb detached. It is a foreground single-shot of the cycle's merge step: same
+MERGE_HEAD abort, ladder timeout, FAIL tail, 3-strike park, and retire
+lifecycle. The branch need not match `--glob` — ship is explicit intent.
+
 The fleet's own spawner (the coordinator's verb; gaps-style `--dispatch-cmd`
 policy scripts can call it per-item instead of hand-rolling lane plumbing).
 It claims the item (resume-tolerant: an existing claim by the same lane id

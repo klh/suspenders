@@ -92,6 +92,36 @@ Success: `{ ok: true, item, sid }` — the lane sid is deterministic
 racing claim loses cleanly (dispatch exits nonzero, nothing spawned). The
 board never spawns from `--demo`.
 
+## POST /api/ship (W64)
+
+`{ project, id }` required. One-click ship from the task drawer's diff bar:
+runs the repo's merge ladder for the item's `suspenders/<id>` branch and
+merges it — `fleet-loop.ts ship --repo <repo> --branch suspenders/<id>
+--ladder <from .fleet/ship.json>` spawned detached (the HTTP answer returns
+while the ladder runs; ladders run tests — expect minutes). The UI polls
+`/api/diff` until the branch retires, which is the shipped signal. Validation
+order — first failure wins:
+
+| condition                                                          | status |
+| ------------------------------------------------------------------ | ------ |
+| missing `project` or `id`                                          | 400    |
+| demo board (`--demo`)                                              | 409    |
+| unknown work item                                                  | 404    |
+| project directory missing on disk                                  | 409    |
+| branch `suspenders/<id>` does not exist                            | 404    |
+| no `main`/`master` branch in the repo                              | 404    |
+| branch not ahead of base (already merged)                          | 409    |
+| a live lane owns the branch (`.fleet/lanes.json` pid alive)        | 409    |
+| owning session still live (RUNNING + fresh hb or warm transcript)  | 409    |
+| no ladder configured — `<repo>/.fleet/ship.json` missing/no ladder | 409    |
+
+Success: `{ ok: true, item, branch, ladder }`. The ladder is owner config —
+`<repo>/.fleet/ship.json` `{"ladder": "<cmd template with {branch}>"}` — and
+REQUIRED: ship must never do a plain merge behind the repo's quality policy's
+back. The merge goes through fleet-loop's shared `mergeOne` (MERGE_HEAD abort,
+ladder timeout, FAIL tail, 3-strike park, retire), so board-shipped branches
+obey the same discipline as loop merges; outcomes land in `<repo>/.fleet/loop.log`.
+
 ## Demo mode — `--demo` CLI flag
 
 `fleet-board.ts --demo` seeds an idempotent demo partition before serving (skip when

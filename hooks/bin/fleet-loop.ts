@@ -31,15 +31,16 @@ const argv = process.argv.slice(2);
 const MODE = argv[0];
 if (
 	!MODE ||
-	!["once", "watch", "lanes", "dispatch"].includes(MODE) ||
+	!["once", "watch", "lanes", "dispatch", "ship"].includes(MODE) ||
 	!argv.includes("--repo")
 ) {
 	console.error(
-		`usage: fleet-loop once|watch|lanes|dispatch --repo <dir> [--glob lane/autow*] [--main main]\n` +
+		`usage: fleet-loop once|watch|lanes|dispatch|ship --repo <dir> [--glob lane/autow*] [--main main]\n` +
 			`          [--ladder <cmd template with {branch}>]  default: plain git merge --no-ff\n` +
 			`          [--ladder-timeout 10]                    minutes; watchdog-kills a hung ladder\n` +
 			`          [--dispatch-cmd <template>]              optional policy script\n` +
 			`          [--agent claude|codex]                   dispatch backend (default claude)\n` +
+			`          ship --branch <branch>                   one branch through the ladder (board ship trigger)\n` +
 			`          [--every 120] [--cycle-timeout 15] [--log <file>]   (watch mode)\n`,
 	);
 	process.exit(MODE ? 1 : 0);
@@ -197,6 +198,50 @@ function retireMerged(b: string): void {
 		);
 }
 
+// a failed ladder: abort the merge, log the tail, count the strike, park at 3
+function mergeFail(b: string, tail: string): void {
+	// a failed ladder leaves MERGE_HEAD behind — abort it; NEVER reset --hard
+	if (existsSync(`${REPO}/.git/MERGE_HEAD`)) run(["git", "merge", "--abort"]);
+	log(
+		`FAIL ${b} — ladder failed, merge aborted, branch left for inspection${tail ? `: ${tail}` : ""}`,
+	);
+	const n = bumpFail(b);
+	if (n >= 3) {
+		const parked = b.replace(/^([^/]+)\//, "parked/");
+		run(["git", "branch", "-m", b, parked]);
+		log(
+			`PARKED ${b} → ${parked} after ${n} failed ladder attempts — needs a repair lane`,
+		);
+		clearFail(b);
+	}
+}
+
+// one branch through the ladder — the cycle's per-branch body, shared with
+// the board's one-click ship (`ship --branch <b>` runs it foreground).
+// Fail-isolated: a failed ladder aborts the merge, leaves the branch for
+// inspection, and counts toward the 3-strike park like every other merge.
+function mergeOne(b: string): void {
+	if (ahead(b) === 0) {
+		retireMerged(b);
+		return;
+	}
+	const before = sh(["git", "rev-parse", "--short", "HEAD"]);
+	const mv = LADDER
+		? runTemplate(LADDER, b, LADDER_TIMEOUT_MS)
+		: {
+				code: run(["git", "merge", "--no-ff", b, "-m", `Merge ${b}`]),
+				tail: "",
+			};
+	if (mv.code === 0) {
+		const after = sh(["git", "rev-parse", "--short", "HEAD"]);
+		log(`MERGED ${b} ${before}→${after}`);
+		clearFail(b);
+	} else {
+		mergeFail(b, mv.tail);
+	}
+	retireMerged(b);
+}
+
 async function cycle(): Promise<void> {
 	// 1. never enter a cycle with leftover merge state
 	if (existsSync(`${REPO}/.git/MERGE_HEAD`)) {
@@ -215,41 +260,7 @@ async function cycle(): Promise<void> {
 	])
 		.split("\n")
 		.filter(Boolean);
-	for (const b of branches) {
-		if (ahead(b) === 0) {
-			retireMerged(b);
-			continue;
-		}
-		const before = sh(["git", "rev-parse", "--short", "HEAD"]);
-		const mv = LADDER
-			? runTemplate(LADDER, b, LADDER_TIMEOUT_MS)
-			: {
-					code: run(["git", "merge", "--no-ff", b, "-m", `Merge ${b}`]),
-					tail: "",
-				};
-		if (mv.code === 0) {
-			const after = sh(["git", "rev-parse", "--short", "HEAD"]);
-			log(`MERGED ${b} ${before}→${after}`);
-			clearFail(b);
-		} else {
-			// a failed ladder leaves MERGE_HEAD behind — abort it; NEVER reset --hard
-			if (existsSync(`${REPO}/.git/MERGE_HEAD`))
-				run(["git", "merge", "--abort"]);
-			log(
-				`FAIL ${b} — ladder failed, merge aborted, branch left for inspection${mv.tail ? `: ${mv.tail}` : ""}`,
-			);
-			const n = bumpFail(b);
-			if (n >= 3) {
-				const parked = b.replace(/^([^/]+)\//, "parked/");
-				run(["git", "branch", "-m", b, parked]);
-				log(
-					`PARKED ${b} → ${parked} after ${n} failed ladder attempts — needs a repair lane`,
-				);
-				clearFail(b);
-			}
-		}
-		retireMerged(b);
-	}
+	for (const b of branches) mergeOne(b);
 
 	// 3. refill the fleet — policy lives in the repo's dispatch script
 	if (DISPATCH) runTemplate(DISPATCH, "", LADDER_TIMEOUT_MS);
@@ -462,6 +473,27 @@ if (MODE === "dispatch") {
 	writeFileSync(`${REPO}/.fleet/lanes.json`, JSON.stringify(all, null, 2));
 	log(`DISPATCHED ${item} → ${sid} (pid ${proc.pid}, ${branch})`);
 	console.log(`dispatched ${item} → ${sid} (pid ${proc.pid})`);
+	process.exit(0);
+}
+
+// ship: one branch through the ladder NOW — the board's one-click ship
+// trigger (W64, fleet-board /api/ship). A foreground single-shot of the
+// cycle's merge step: same MERGE_HEAD abort, ladder timeout, FAIL tail,
+// strike/park discipline, retire lifecycle. The branch need not match
+// --glob (explicit intent); the BOARD resolves the ladder from the repo's
+// .fleet/ship.json and passes it here — the loop shell stays policy-free.
+if (MODE === "ship") {
+	const b = val("--branch");
+	if (!b) {
+		console.error("ship requires --branch <branch>");
+		process.exit(1);
+	}
+	// never enter with leftover merge state (same as cycle step 1)
+	if (existsSync(`${REPO}/.git/MERGE_HEAD`)) {
+		run(["git", "merge", "--abort"]);
+		log("ABORT leftover MERGE_HEAD");
+	}
+	mergeOne(b);
 	process.exit(0);
 }
 

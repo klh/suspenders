@@ -79,6 +79,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/advise    fire the advice worker for a fork (async; lands as fact advice.<id>)
 - POST /api/comment   route a review line-comment to a work item's owning lane (coord NOTE; id, file, line, note required — note capped at 2000)
 - POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not READY, demo, or claude missing)
+- POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, or while a lane lives)
 
 ## Advice LLM
 
@@ -393,6 +394,96 @@ async function readJson(
 
 // failure notes ride the work.failed event payload ($.work = item id) — the
 // board shows why a lane died, not just that it died
+// W64 ship-trigger helpers — merging a lane branch is safe only when no live
+// lane still owns it. Two registries: .fleet/lanes.json (dispatched lanes,
+// pid-guard) and the sessions table (interactive lanes — hb updates only at
+// bootstrap, so the transcript mtime is the liveness signal, per the zombie
+// lesson); the ladder comes from <repo>/.fleet/ship.json (owner config).
+const pidAlive = (pid: number): boolean => {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
+const lanesOf = (repo: string): { pid: number; branch: string }[] => {
+	try {
+		return JSON.parse(readFileSync(`${repo}/.fleet/lanes.json`, "utf8")) as {
+			pid: number;
+			branch: string;
+		}[];
+	} catch {
+		return [];
+	}
+};
+
+// <repo>/.fleet/ship.json — the one-click ship trigger's owner config, same
+// trust class as the loop's --ladder argv. Required: ship must never do a
+// plain merge behind the repo's quality policy's back.
+const readShipJson = (repo: string): { ladder?: string } => {
+	try {
+		return JSON.parse(readFileSync(`${repo}/.fleet/ship.json`, "utf8")) as {
+			ladder?: string;
+		};
+	} catch {
+		return {};
+	}
+};
+
+// a transcript written within the last 15 minutes = live process
+const transcriptWarm = (sid: string): boolean => {
+	const floor = Date.now() - 15 * 60_000;
+	const p = (
+		db.query("SELECT transcript_path FROM sessions WHERE sid = ?").get(sid) as {
+			transcript_path: string | null;
+		} | null
+	)?.transcript_path;
+	if (p) {
+		try {
+			return statSync(p).mtimeMs > floor;
+		} catch {}
+	}
+	try {
+		const glob = new Bun.Glob(`**/*${sid}*.jsonl`);
+		for (const rel of glob.scanSync({
+			cwd: `${process.env.HOME}/.claude/projects`,
+			onlyFiles: true,
+		})) {
+			try {
+				if (
+					statSync(`${process.env.HOME}/.claude/projects/${rel}`).mtimeMs >
+					floor
+				)
+					return true;
+			} catch {}
+		}
+	} catch {}
+	return false;
+};
+
+// live = RUNNING row + (fresh hb or warm transcript); coordinators are exempt
+// (they sleep between waves — same doctrine as targetAlive)
+const sessionAlive = (sid: string): boolean => {
+	const s = db
+		.query("SELECT state, role, hb FROM sessions WHERE sid = ?")
+		.get(sid) as { state: string; role: string | null; hb: number } | null;
+	if (s?.state !== "RUNNING") return false;
+	if (s.role === "coordinator") return true;
+	if (
+		sid ===
+		(
+			db
+				.query("SELECT value FROM facts WHERE key = 'coordinator.sid'")
+				.get() as { value: string } | null
+		)?.value
+	)
+		return true;
+	if (Date.now() - s.hb <= deadAfterMs()) return true;
+	return transcriptWarm(sid);
+};
+
 const failNote = (id: string): string | null => {
 	try {
 		const r = db
@@ -1752,6 +1843,134 @@ Bun.serve({
 				sid: `autow${id.replace(/^W/, "").replace(/\./g, "")}`,
 			});
 		}
+		if (req.method === "POST" && url.pathname === "/api/ship") {
+			// W64 — one-click ship from the W55 diff drawer: run the repo's merge
+			// ladder for ONE branch (suspenders/<id>). Guarded; ladder required.
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			const parsed = await readJson(req);
+			if (!parsed.ok) return parsed.resp;
+			const project = String(parsed.body?.project ?? "");
+			const id = String(parsed.body?.id ?? "");
+			if (!project || !id)
+				return json({ ok: false, error: "missing project or id" }, 400);
+			if (DEMO)
+				return json({ ok: false, error: "demo board — no real lanes" }, 409);
+			const w = db
+				.query("SELECT project FROM work_items WHERE project = ? AND id = ?")
+				.get(project, id) as { project: string } | null;
+			if (!w)
+				return json(
+					{ ok: false, error: `no work item ${id} in ${project}` },
+					404,
+				);
+			const repo = project.replace(/\/\.git$/, "");
+			if (!existsSync(repo))
+				return json(
+					{ ok: false, error: `project directory missing: ${repo}` },
+					409,
+				);
+			const branch = `suspenders/${id}`;
+			const git = (args: string[]): { out: string; code: number } => {
+				const p = Bun.spawnSync(["/usr/bin/git", "-C", repo, ...args], {
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				return { out: p.stdout.toString(), code: p.exitCode };
+			};
+			if (
+				git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])
+					.code !== 0
+			)
+				return json(
+					{ ok: false, error: `no branch ${branch} for item ${id}` },
+					404,
+				);
+			const baseBranch = ["main", "master"].find(
+				(b) =>
+					git(["rev-parse", "--verify", "--quiet", `refs/heads/${b}`]).code ===
+					0,
+			);
+			if (!baseBranch)
+				return json(
+					{ ok: false, error: `no main/master branch in ${repo}` },
+					404,
+				);
+			const ahead = Number(
+				git(["rev-list", "--count", `${baseBranch}..${branch}`]).out.trim() ||
+					"0",
+			);
+			if (!Number.isFinite(ahead) || ahead <= 0)
+				return json(
+					{
+						ok: false,
+						error: `nothing to ship — ${branch} is already merged`,
+					},
+					409,
+				);
+			// never ship a branch a live lane still owns: the dispatched-lane pid
+			// registry (.fleet/lanes.json) and the owning session's liveness both
+			// veto — interactive lanes aren't in lanes.json, hence the second check
+			const liveLane = lanesOf(repo).find(
+				(l) => l.branch === branch && pidAlive(l.pid),
+			);
+			if (liveLane)
+				return json(
+					{
+						ok: false,
+						error: `a live lane (pid ${liveLane.pid}) still owns ${branch}`,
+					},
+					409,
+				);
+			const owner = db
+				.query("SELECT owner_sid FROM work_items WHERE project = ? AND id = ?")
+				.get(project, id) as { owner_sid: string | null } | null;
+			if (owner?.owner_sid && sessionAlive(owner.owner_sid))
+				return json(
+					{
+						ok: false,
+						error: `owning session ${owner.owner_sid} is still live — ship after the lane finishes`,
+					},
+					409,
+				);
+			// the ladder is owner config in the repo — REQUIRED (a silent plain
+			// merge would bypass the repo's quality policy)
+			const ship = readShipJson(repo);
+			if (!ship.ladder)
+				return json(
+					{
+						ok: false,
+						error: `no ladder configured — add ${repo}/.fleet/ship.json {"ladder":"<cmd template with {branch}>"}`,
+					},
+					409,
+				);
+			// detached child: HTTP answers while the ladder runs (ladders test — minutes)
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					CLI("fleet-loop.ts"),
+					"ship",
+					"--repo",
+					repo,
+					"--branch",
+					branch,
+					"--ladder",
+					ship.ladder,
+				],
+				{
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "ignore",
+					// the ladder's own tools (bun/qlty/git) must resolve under launchd
+					env: {
+						...process.env,
+						PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ""}`,
+					},
+				},
+			);
+			child.unref();
+			return json({ ok: true, item: id, branch, ladder: ship.ladder });
+		}
 		if (url.pathname === "/llms.txt")
 			// static plain-text agent contract (see LLMS_TXT above)
 			return new Response(LLMS_TXT, {
@@ -1771,7 +1990,7 @@ Bun.serve({
 	},
 });
 console.log(
-	`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise /api/comment /api/start)`,
+	`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise /api/comment /api/start /api/ship)`,
 );
 
 // best-effort Bonjour/mDNS: while the board runs, http://suspenders.local:PORT

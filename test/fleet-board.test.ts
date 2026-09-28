@@ -6,7 +6,14 @@
 
 import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1101,6 +1108,16 @@ describe("demo mode (--demo)", () => {
 		expect(r.status).toBe(409);
 		expect((await r.json()).error).toContain("demo board");
 	});
+
+	test("/api/ship refuses to ship from a demo board (W64)", async () => {
+		const r = await fetch(`${DEMO_BASE}/api/ship`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ project: demoProj, id: "W1" }),
+		});
+		expect(r.status).toBe(409);
+		expect((await r.json()).error).toContain("demo board");
+	});
 });
 
 // W28 — llm.call telemetry: advise.ts emits an llm.call event per LLM
@@ -1320,5 +1337,141 @@ describe("W55 per-item diff + review comments", () => {
 		});
 		expect(notReady.status).toBe(409);
 		expect(notReady.json.error).toContain("only READY items");
+	});
+});
+
+// W64 — one-click ship: /api/ship guards + required .fleet/ship.json ladder,
+// then detached `fleet-loop ship`; the E2E waits for the MERGED log line.
+describe("W64 ship trigger", () => {
+	const g = (args: string[], cwd = GREPO) =>
+		Bun.spawnSync(["/usr/bin/git", ...args], {
+			cwd,
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+	// ship-ready fixture: work item + suspenders/<id> branch one commit ahead
+	// of main, made in a shared throwaway worktree (removed after each use);
+	// ownerless by default so the liveness guard stays out of the way
+	function shipFixture(id: string, owner?: string): void {
+		const wt = join(GREPO, "wt-tmp");
+		const wa = g(["worktree", "add", "-b", `suspenders/${id}`, wt]);
+		if (wa.exitCode !== 0) throw new Error(`worktree add failed: ${wa.stderr}`);
+		g(["config", "user.email", "t@threads.dk"], wt);
+		g(["config", "user.name", "t"], wt);
+		writeFileSync(join(wt, "ship.txt"), `${id}\n`);
+		g(["add", "-A"], wt);
+		const c = g(["commit", "-m", `lane ${id}`], wt);
+		if (c.exitCode !== 0) throw new Error(`fixture commit failed: ${c.stderr}`);
+		g(["worktree", "remove", wt]);
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		db.query(
+			"INSERT INTO work_items (project, id, title, state, owner_sid, created_by, created_at, updated_at) VALUES (?, ?, 'ship demo', 'CLAIMED', ?, 'test', ?, ?)",
+		).run(GREPO, id, owner ?? null, Date.now(), Date.now());
+		db.close();
+	}
+	const shipJson = (repo: string, ladder: string | null): void => {
+		mkdirSync(join(repo, ".fleet"), { recursive: true });
+		if (ladder === null)
+			rmSync(join(repo, ".fleet", "ship.json"), { force: true });
+		else
+			writeFileSync(
+				join(repo, ".fleet", "ship.json"),
+				JSON.stringify({ ladder }),
+			);
+	};
+	const waitBranch = (branch: string, gone: boolean): boolean => {
+		for (let i = 0; i < 100; i++) {
+			const exists =
+				g(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])
+					.exitCode === 0;
+			if (exists !== gone) return true;
+			Bun.sleepSync(100);
+		}
+		return false;
+	};
+
+	test("served page wires the ship button + llms.txt lists /api/ship", async () => {
+		const page = await (await fetch(`${BASE}/`)).text();
+		expect(page).toContain("diffbtn ship");
+		expect(page).toContain("shipItem");
+		expect(page).toContain("/api/ship");
+		const txt = await (await fetch(`${BASE}/llms.txt`)).text();
+		expect(txt).toContain("/api/ship");
+	});
+
+	test("validation: missing fields 400, unknown item 404, no-ladder 409", async () => {
+		expect((await post("/api/ship", { project: GREPO })).status).toBe(400);
+		expect(
+			(await post("/api/ship", { project: GREPO, id: "WNOPE" })).status,
+		).toBe(404);
+		// branch exists + ahead + no live lane + no owner → the LADDER guard
+		// is what refuses (ship.json never written for WSHIPZ)
+		shipFixture("WSHIPZ");
+		const noLadder = await post("/api/ship", { project: GREPO, id: "WSHIPZ" });
+		expect(noLadder.status).toBe(409);
+		expect(noLadder.json.error).toContain("no ladder configured");
+		expect(noLadder.json.error).toContain("ship.json");
+	});
+
+	test("live-lane pid guard: a live lanes.json entry vetoes the ship", async () => {
+		shipFixture("WSHIPL");
+		mkdirSync(join(GREPO, ".fleet"), { recursive: true });
+		writeFileSync(
+			join(GREPO, ".fleet", "lanes.json"),
+			JSON.stringify([
+				{
+					sid: "w64-test-lane",
+					item: "WSHIPL",
+					pid: process.pid,
+					branch: "suspenders/WSHIPL",
+					worktree: "",
+				},
+			]),
+		);
+		const r = await post("/api/ship", { project: GREPO, id: "WSHIPL" });
+		expect(r.status).toBe(409);
+		expect(r.json.error).toContain("live lane");
+		expect(r.json.error).toContain("pid");
+	});
+
+	test("live-owner guard: a RUNNING session with a warm transcript vetoes", async () => {
+		shipFixture("WSHIPO", "w64-live-owner");
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		db.query(
+			"INSERT OR REPLACE INTO sessions (sid, project, role, started_at, hb, state) VALUES ('w64-live-owner', ?, 'worker', ?, ?, 'RUNNING')",
+		).run(GREPO, Date.now(), Date.now());
+		db.close();
+		const r = await post("/api/ship", { project: GREPO, id: "WSHIPO" });
+		expect(r.status).toBe(409);
+		expect(r.json.error).toContain("still live");
+	});
+
+	test("end-to-end: ok + detached child merges through the ladder and retires the branch", async () => {
+		shipFixture("WSHIP1");
+		shipJson(GREPO, 'git merge --no-ff {branch} -m "shipped {branch}"');
+		writeFileSync(join(GREPO, ".fleet", "lanes.json"), "[]");
+		const t0 = Date.now();
+		const r = await post("/api/ship", { project: GREPO, id: "WSHIP1" });
+		expect(r.status).toBe(200);
+		expect(r.json.ok).toBe(true);
+		expect(r.json.branch).toBe("suspenders/WSHIP1");
+		expect(r.json.ladder).toContain("shipped {branch}");
+		// the detached child does the real work — wait for retirement
+		expect(waitBranch("suspenders/WSHIP1", true)).toBe(true);
+		expect(Date.now() - t0).toBeLessThan(60_000);
+		// ladder substitution proven by the merge subject; loop.log carries it
+		expect(g(["log", "--format=%s", "-1"]).stdout.toString()).toContain(
+			"shipped suspenders/WSHIP1",
+		);
+		const logTail = readFileSync(join(GREPO, ".fleet", "loop.log"), "utf8");
+		expect(logTail).toContain("MERGED suspenders/WSHIP1");
+		expect(logTail).toContain("RETIRED suspenders/WSHIP1");
+		// shipped = branch retired — a second ship is an honest 404
+		const again = await post("/api/ship", { project: GREPO, id: "WSHIP1" });
+		expect(again.status).toBe(404);
+		expect(again.json.error).toContain("no branch");
 	});
 });
