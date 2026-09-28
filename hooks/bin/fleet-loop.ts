@@ -25,6 +25,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
@@ -179,6 +180,16 @@ function retireMerged(b: string): void {
 	}
 	const wt =
 		tracked?.worktree ?? `${REPO}/.worktrees/${b.replace(/^.*\//, "")}`;
+	// mid-spawn grace (2026-09-28 gaps autow298/299): dispatch registers the
+	// branch immediately but gaps' async wrapper lands the lanes.json entry
+	// 22–55s later — the ladder saw ahead=0 with NO entry, the pid guard had
+	// nothing to check, and retire fired on a lane mid-spawn. A seconds-old
+	// (or missing) worktree with no commits is ambiguous; ambiguity defers
+	// to don't-touch: skip retire under a 10-min worktree-age grace.
+	if (!tracked) {
+		const st = statSync(wt, { throwIfNoEntry: false });
+		if (Date.now() - (st?.birthtimeMs ?? Date.now()) < 10 * 60_000) return;
+	}
 	if (existsSync(wt)) {
 		let rm = runCap(["git", "worktree", "remove", "--force", wt]);
 		if (rm.code !== 0) {
