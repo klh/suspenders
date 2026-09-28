@@ -1587,3 +1587,172 @@ describe("W64 ship trigger", () => {
 		expect(again.json.error).toContain("no branch");
 	});
 });
+
+describe("W57 orchestrate box", () => {
+	const OPORT = 7849;
+	const OB = `http://127.0.0.1:${OPORT}`;
+	const MPORT = 7850;
+	const MB = `http://127.0.0.1:${MPORT}`;
+	// mock OpenAI-compatible endpoint: fenced-JSON proposal for normal goals,
+	// prose-only garbage for goals containing JUNK (the parse-failure path)
+	const mock = Bun.serve({
+		port: MPORT,
+		fetch: async (req) => {
+			const body = (await req.json().catch(() => ({}))) as {
+				messages?: { role: string; content: string }[];
+			};
+			const goal = body.messages?.find((m) => m.role === "user")?.content ?? "";
+			if (goal.includes("JUNK")) {
+				return Response.json({
+					choices: [{ message: { content: "sorry, no json here" } }],
+				});
+			}
+			const proposal = {
+				title: "csv export for the tasks table",
+				children: [
+					{ title: "export scaffolding", brief: "route + content negotiation" },
+					{ title: "streaming for big exports", brief: "cursor pagination" },
+					{ title: "docs row", brief: "" },
+				],
+			};
+			return Response.json({
+				choices: [
+					{
+						message: {
+							content: `\`\`\`json\n${JSON.stringify(proposal)}\n\`\`\``,
+						},
+					},
+				],
+				usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+			});
+		},
+	});
+	const orchProc = Bun.spawn(
+		["bun", join(bin, "fleet-board.ts"), "--port", String(OPORT)],
+		{
+			cwd: REPO,
+			env: { ...env, SUSPENDERS_LLM_URL: `${MB}/v1/chat/completions` },
+			stdout: "pipe",
+			stderr: "pipe",
+		},
+	);
+	afterAll(async () => {
+		orchProc.kill();
+		await orchProc.exited;
+		mock.stop(true);
+	});
+	const postO = async (path: string, body: unknown) => {
+		const r = await fetch(`${OB}${path}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		return { status: r.status, json: await r.json() };
+	};
+	test("llms.txt lists both orchestrate routes", async () => {
+		const txt = await (await fetch(`${BASE}/llms.txt`)).text();
+		expect(txt).toContain("/api/orchestrate/register");
+		expect(txt).toContain("/api/orchestrate ");
+	});
+	test("unreachable LLM degrades to 502, nothing written", async () => {
+		const r = await post("/api/orchestrate", {
+			project: MY_PROJ,
+			goal: "anything",
+		});
+		expect(r.status).toBe(502);
+		expect(r.json.ok).toBe(false);
+	});
+	test("propose parses fenced LLM json into a proposal", async () => {
+		await waitUp(OB);
+		const r = await postO("/api/orchestrate", {
+			project: MY_PROJ,
+			goal: "add csv export",
+		});
+		expect(r.status).toBe(200);
+		expect(r.json.ok).toBe(true);
+		expect(r.json.proposal.title).toContain("csv export");
+		expect(r.json.proposal.children.length).toBe(3);
+		expect(r.json.proposal.children[0].brief).toBeTruthy();
+		expect(r.json.model).toBeTruthy();
+	});
+	test("junk LLM output answers 502 with a retryable error", async () => {
+		const r = await postO("/api/orchestrate", {
+			project: MY_PROJ,
+			unused: 0,
+			goal: "JUNK goal",
+		});
+		expect(r.status).toBe(502);
+		expect(r.json.error).toContain("no parseable plan");
+	});
+	test("register validation: 400s before any work-graph write", async () => {
+		expect(
+			(await postO("/api/orchestrate/register", { goal: "x" })).status,
+		).toBe(400);
+		expect(
+			(await postO("/api/orchestrate/register", { project: MY_PROJ })).status,
+		).toBe(400);
+		expect(
+			(
+				await postO("/api/orchestrate/register", {
+					project: MY_PROJ,
+					title: "t",
+					children: ["only one child"],
+				})
+			).status,
+		).toBe(400);
+		expect(
+			(
+				await postO("/api/orchestrate/register", {
+					project: MY_PROJ,
+					title: "t",
+					children: Array.from({ length: 9 }, (_, i) => `c${i}`),
+				})
+			).status,
+		).toBe(400);
+	});
+	test("register runs the plan-gated split in the target repo", async () => {
+		const reg = await postO("/api/orchestrate/register", {
+			project: MY_PROJ,
+			title: "W57 e2e orchestration",
+			children: [
+				"first independently actionable child",
+				"second independently actionable child",
+				"third independently actionable child",
+			],
+		});
+		expect(reg.status).toBe(200);
+		expect(reg.json.ok).toBe(true);
+		expect(reg.json.plan).toMatch(/^W\d+$/);
+		expect(reg.json.children.length).toBe(3);
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`, {
+			readonly: true,
+		});
+		const parent = db
+			.query("SELECT state FROM work_items WHERE project = ? AND id = ?")
+			.get(MY_PROJ, reg.json.plan) as { state: string } | null;
+		expect(parent?.state).toBe("SHATTERED");
+		const kids = db
+			.query(
+				"SELECT id, state FROM work_items WHERE project = ? AND parent_id = ? ORDER BY id",
+			)
+			.all(MY_PROJ, reg.json.plan) as { id: string; state: string }[];
+		db.close();
+		expect(kids.length).toBe(3);
+		for (const k of kids) expect(k.state).toBe("READY");
+		const feed = await (await fetch(`${OB}/api/tasks`)).json();
+		const plan = feed.tasks.find((t: Row) => t.id === reg.json.plan);
+		expect(plan?.title).toBe("plan: W57 e2e orchestration");
+	});
+	test("orchestrate telemetry lands as an llm.call event", async () => {
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`, {
+			readonly: true,
+		});
+		const row = db
+			.query(
+				"SELECT COUNT(*) AS n FROM events WHERE kind = 'llm.call' AND source = 'orchestrate'",
+			)
+			.get() as { n: number };
+		db.close();
+		expect(row.n).toBeGreaterThanOrEqual(1);
+	});
+});
