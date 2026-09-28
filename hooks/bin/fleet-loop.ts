@@ -27,6 +27,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
+import { symlinkBuildDirs } from "../lib/builddirs.ts";
 
 const argv = process.argv.slice(2);
 const MODE = argv[0];
@@ -333,6 +334,9 @@ if (MODE === "dispatch") {
 	if (!existsSync(wt)) {
 		if (AGENT === "codex") {
 			mkdirSync(wt, { recursive: true });
+			// build dirs symlinked from the repo root — parity with worktree.ts
+			// create, so codex lanes skip reinstalls too
+			symlinkBuildDirs(REPO, wt);
 		} else {
 			const wtree = runTool([
 				`${process.env.HOME}/.claude/hooks/suspenders/bin/worktree.ts`,
