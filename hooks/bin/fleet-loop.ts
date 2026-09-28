@@ -355,6 +355,10 @@ if (MODE === "dispatch") {
 	const env = { ...process.env };
 	delete env.ANTHROPIC_BASE_URL;
 	delete env.ANTHROPIC_AUTH_TOKEN;
+	if (AGENT === "codex") {
+		env.GIT_DIR = `${wt}/.gitstore`;
+		env.GIT_WORK_TREE = wt;
+	}
 	const prompt = `Read ${briefFile} and execute it fully.`;
 	// the agent binary resolves at dispatch time — a bare name ENOENTs under
 	// launchd, where PATH is minimal
@@ -363,10 +367,42 @@ if (MODE === "dispatch") {
 		console.error(`${AGENT} binary not found on PATH`);
 		process.exit(1);
 	}
+	// codex lanes: codex's seatbelt denies every write into any .git
+	// directory (name-based, verified empirically 2026-09-28), so the standard
+	// worktree layout (admin dir + objects under REPO/.git) can never commit.
+	// The lane gets a PRIVATE git store under a non-.git name inside its
+	// workspace, wired with GIT_DIR/GIT_WORK_TREE env: main-repo objects are
+	// shared read-only via alternates; the lane's own objects/refs land in
+	// the private store — the main object db stays seatbelt-protected.
+	if (AGENT === "codex") {
+		const store = `${wt}/.gitstore`;
+		if (!existsSync(`${store}/HEAD`)) {
+			Bun.spawnSync(["git", "init", "--quiet", "--bare", store]);
+			const g = (args: string[]): void => {
+				Bun.spawnSync(["git", "--git-dir", store, ...args], {
+					cwd: REPO,
+					stdout: "ignore",
+					stderr: "ignore",
+				});
+			};
+			g([
+				"update-ref",
+				`refs/heads/suspenders/${item}`,
+				sh(["git", "-C", REPO, "rev-parse", MAIN]),
+			]);
+			g(["checkout", "-q", `suspenders/${item}`]);
+			g(["config", "core.bare", "false"]);
+			g(["config", "core.worktree", wt]);
+			writeFileSync(
+				`${store}/objects/info/alternates`,
+				`${REPO}/.git/objects\n`,
+			);
+		}
+	}
 	const agentArgs =
 		AGENT === "codex"
-			? // workspace-write + network (the brief pushes the branch) + writable
-				// roots for the work-graph state the lane's done-protocol touches
+			? // sandboxed lane; writable roots cover the work-graph state the
+				// done-protocol touches, network covers the branch push
 				[
 					"exec",
 					"-s",

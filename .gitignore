@@ -9,3 +9,4 @@ node_modules/
 .gates-test-*/
 
 .worktrees/
+.fleet/
