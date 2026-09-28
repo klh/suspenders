@@ -458,5 +458,20 @@ export function bashGate(hook: HookInput): never {
 			`speedy nudge: prefer the fast tool — ${v0} → ${TOOL_MAP[v0]} (see CLAUDE.md / klh-cli-speed-tools skill)`,
 		);
 
+	// ---- structural-edit nudge (2026-09-28): text rewrites on .ts files are
+	// where the day's corruptions lived — regex escapes, fmt-reflowed anchors,
+	// blanket replaces hitting a second binding. ast-grep matches syntax
+	// nodes, so none of those can happen. Advisory: the tools still work.
+	const joined = SEGS.map((s) =>
+		s.map((t) => (typeof t === "string" ? t : (t as Cmd).cmd)).join(" "),
+	).join(" ; ");
+	if (/\b(sd|sed)\b/.test(joined) || /bun\s+-e\b/.test(joined)) {
+		const tsTarget = /[\w./-]+\.(ts|tsx)\b/.test(joined);
+		if (tsTarget)
+			nudge(
+				"structural nudge: rewriting a .ts file with a text tool — prefer ast-grep (ast-grep rewrite -p '<pattern>' -r '<replacement>' <file>); matches syntax nodes, immune to fmt/whitespace drift and silent second-site hits",
+			);
+	}
+
 	allow();
 }
