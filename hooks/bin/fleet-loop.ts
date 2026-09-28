@@ -465,6 +465,7 @@ if (MODE === "dispatch") {
 		show.out,
 		``,
 		`PROTOCOL: BEFORE any edit, read AGENTS.md in the repo root and follow it (plan-first, shatter judgment, gates, done protocol, final-line vocabulary).`,
+		`Inbox: before planning and again before finishing, check coord inbox — coordinator and board messages arrive there: bun ~/.claude/hooks/suspenders/bin/coord.ts inbox --as ${sid}.`,
 		`Work in the EXISTING worktree ${wt} (branch ${branch}).`,
 		`Finish: bun ~/.claude/hooks/suspenders/bin/work.ts done ${item} --sha <branch-head>.`,
 		`Final line: DONE <sha> | SPLIT ${item} | BLOCKED (after 3 honest attempts, tree restored).`,
