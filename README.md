@@ -119,6 +119,6 @@ suspenders is source-available under the **Business Source License 1.1** (see [L
 
 - **Free** for personal projects, education, research, and internal evaluation.
 - **Production / commercial use requires a commercial license** — running it in a product or service, in paid client work, or as part of business operations. Contact the Licensor (see LICENSE) for terms.
-- On **2029-09-25** (or 4 years after first public distribution of a given version) each version converts to Apache-2.0.
+- **No conversion** — unlike standard BSL 1.1, the Change Date / Change License parameters are **N/A**: the Licensed Work never converts to an open license; all rights remain with the Licensor indefinitely.
 
 A Threads thing — [threads.dk](https://www.threads.dk).
