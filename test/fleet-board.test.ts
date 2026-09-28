@@ -49,6 +49,11 @@ function run(cmd: string, args: string[]) {
 }
 const q = (s: string) => encodeURIComponent(s);
 
+// rows off the board's JSON feeds — Record<string, unknown> keeps the feed
+// callbacks honest without modeling every endpoint (the wire data is
+// untrusted until the assertion pins it)
+type Row = Record<string, unknown>;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function getData() {
 	const r = await fetch(`${BASE}/api/data`);
@@ -60,7 +65,7 @@ async function getData() {
 const MY_PROJ = realpathSync(REPO);
 async function myProject() {
 	const d = await getData();
-	return d.projects.find((p: any) => p.project === MY_PROJ);
+	return d.projects.find((p: Row) => p.project === MY_PROJ);
 }
 async function getDecisions() {
 	// v3 default is OPEN-only (docs/board-api.md) — the lifecycle tests below
@@ -102,8 +107,8 @@ function rawPost(
 		rq.end(body);
 	});
 }
-function fork(feed: any, question: string) {
-	const hits = feed.decisions.filter((d: any) => d.question === question);
+function fork(feed: { decisions: Row[] }, question: string) {
+	const hits = feed.decisions.filter((d: Row) => d.question === question);
 	expect(hits.length).toBeLessThanOrEqual(1); // questions unique per test
 	return hits[0];
 }
@@ -425,7 +430,7 @@ describe("decision lifecycle (docs/decisions-api.md)", () => {
 		expect(rec.age_s).toBeGreaterThanOrEqual(0);
 		expect(typeof rec.asked_by_label).toBe("string");
 		expect(rec.created_ts).toBeGreaterThan(0);
-		const open = feed.decisions.filter((d: any) => d.state === "OPEN");
+		const open = feed.decisions.filter((d: Row) => d.state === "OPEN");
 		expect(feed.count).toBe(open.length);
 		expect(feed.byProject[open[0].project]).toBeGreaterThan(0);
 		const sum = Object.values(feed.byProject).reduce(
@@ -462,7 +467,7 @@ describe("endpoint hardening", () => {
 			"board-lane",
 		]);
 		const nonNeed = (await getData()).events.find(
-			(e: any) => e.kind === "NOTE",
+			(e: Row) => e.kind === "NOTE",
 		).id;
 		expect((await post("/api/ack", { id: nonNeed })).status).toBe(400);
 	});
@@ -603,7 +608,7 @@ describe("endpoint hardening", () => {
 			body: '{"id":1}',
 		});
 		expect(noCt.status).toBe(415);
-		const malformed = await post("/api/ack", undefined as any);
+		const malformed = await post("/api/ack", undefined);
 		expect(malformed.status).toBe(400);
 	});
 });
@@ -648,7 +653,7 @@ describe("dashboard accuracy", () => {
 		const w = addWork("doomed item", ["--scope", "df"]);
 		run("work.ts", ["fail", w, "--note", "boom: no compiler"]);
 		const failed = (await myProject()).other.find(
-			(x: any) => x.state === "FAILED",
+			(x: Row) => x.state === "FAILED",
 		);
 		expect(failed).toBeDefined();
 		expect(failed.note).toBe("boom: no compiler");
@@ -663,7 +668,7 @@ describe("dashboard accuracy", () => {
 		]);
 		expect(
 			(await getData()).zombies.some(
-				(z: any) => z.label === "board-lane ZOMBIE (hb 52min)",
+				(z: Row) => z.label === "board-lane ZOMBIE (hb 52min)",
 			),
 		).toBe(true);
 	});
@@ -741,11 +746,11 @@ describe("board api v3 (docs/board-api.md)", () => {
 				"unblocked_by",
 			]);
 		}
-		const alpha = feed.tasks.find((t: any) => t.id === w1);
-		const beta = feed.tasks.find((t: any) => t.id === w2);
+		const alpha = feed.tasks.find((t: Row) => t.id === w1);
+		const beta = feed.tasks.find((t: Row) => t.id === w2);
 		// newest activity first: beta was taken after alpha was added
-		expect(feed.tasks.findIndex((t: any) => t.id === w2)).toBeLessThan(
-			feed.tasks.findIndex((t: any) => t.id === w1),
+		expect(feed.tasks.findIndex((t: Row) => t.id === w2)).toBeLessThan(
+			feed.tasks.findIndex((t: Row) => t.id === w1),
 		);
 		expect(beta.state).toBe("CLAIMED");
 		expect(beta.owner_sid).toBe("board-lane");
@@ -761,13 +766,13 @@ describe("board api v3 (docs/board-api.md)", () => {
 		const everything = await (
 			await fetch(`${BASE}/api/tasks?project=all`)
 		).json();
-		expect(everything.tasks.find((t: any) => t.id === w1)).toBeDefined();
+		expect(everything.tasks.find((t: Row) => t.id === w1)).toBeDefined();
 		// superseding removes the item from the feed
 		expect(run("work.ts", ["supersede", w2, "--by", w1]).code).toBe(0);
 		const after = await (
 			await fetch(`${BASE}/api/tasks?project=${q(proj)}`)
 		).json();
-		expect(after.tasks.find((t: any) => t.id === w2)).toBeUndefined();
+		expect(after.tasks.find((t: Row) => t.id === w2)).toBeUndefined();
 	});
 
 	test("/api/tasks: done→ready auto-start — unblocked_by flags the freed dependent", async () => {
@@ -783,7 +788,7 @@ describe("board api v3 (docs/board-api.md)", () => {
 		const feed = await (
 			await fetch(`${BASE}/api/tasks?project=${q(proj)}`)
 		).json();
-		const dep = feed.tasks.find((t: any) => t.id === w2);
+		const dep = feed.tasks.find((t: Row) => t.id === w2);
 		expect(dep.state).toBe("READY");
 		expect(dep.unblocked_by).toBe(w1);
 		// the drawer's task object shares the shape ("…as above" in board-api.md)
@@ -796,7 +801,7 @@ describe("board api v3 (docs/board-api.md)", () => {
 		const later = await (
 			await fetch(`${BASE}/api/tasks?project=${q(proj)}`)
 		).json();
-		expect(later.tasks.find((t: any) => t.id === w2).unblocked_by).toBeNull();
+		expect(later.tasks.find((t: Row) => t.id === w2).unblocked_by).toBeNull();
 	});
 
 	test("/api/task: 404 shape for a missing id; events + decisions linkage, newest first", async () => {
@@ -843,7 +848,7 @@ describe("board api v3 (docs/board-api.md)", () => {
 		expect(r.task.title).toBe("detail demo");
 		expect(r.task.open_decisions).toBe(1);
 		expect(r.events.length).toBeGreaterThanOrEqual(4); // added + scope checkpoint + work checkpoint + fork
-		const ids = r.events.map((e: any) => e.id);
+		const ids = r.events.map((e: Row) => e.id);
 		expect([...ids].sort((a: number, b: number) => b - a)).toEqual(ids); // newest first
 		for (const e of r.events) {
 			expect(Object.keys(e).sort()).toEqual([
@@ -856,9 +861,9 @@ describe("board api v3 (docs/board-api.md)", () => {
 			]);
 			expect(e.ts).toBeGreaterThan(0);
 		}
-		expect(r.events.map((e: any) => e.note)).toContain("scope-tied note"); // scope match
-		expect(r.events.map((e: any) => e.note)).toContain("work-tied note"); // payload.work match
-		const dec = r.decisions.find((d: any) => d.question === "detail fork?");
+		expect(r.events.map((e: Row) => e.note)).toContain("scope-tied note"); // scope match
+		expect(r.events.map((e: Row) => e.note)).toContain("work-tied note"); // payload.work match
+		const dec = r.decisions.find((d: Row) => d.question === "detail fork?");
 		expect(dec.state).toBe("OPEN");
 		expect(dec.answer_note).toBeNull();
 		expect(Object.keys(dec).sort()).toEqual([
@@ -892,7 +897,7 @@ describe("board api v3 (docs/board-api.md)", () => {
 		const def = await (await fetch(`${BASE}/api/activity`)).json();
 		expect(def.ok).toBe(true);
 		expect(def.events.length).toBe(80);
-		const ids = def.events.map((e: any) => e.id);
+		const ids = def.events.map((e: Row) => e.id);
 		expect([...ids].sort((a: number, b: number) => b - a)).toEqual(ids);
 		expect(def.events[0].note).toBe("not yours");
 		expect(def.events[0].project).toBe("/elsewhere/.git");
@@ -956,21 +961,21 @@ describe("board api v3 (docs/board-api.md)", () => {
 		const rec2 = fork(await getDecisions(), "history dismiss");
 		expect((await post("/api/ack", { id: rec2.id })).status).toBe(200);
 		const hist = await (await fetch(`${BASE}/api/decisions?history=1`)).json();
-		const ans = hist.decisions.find((d: any) => d.question === "history fork");
+		const ans = hist.decisions.find((d: Row) => d.question === "history fork");
 		expect(ans.state).toBe("ANSWERED");
 		expect(ans.answer_note).toBe("resolved");
 		expect(ans.answered_ts).toBeGreaterThan(0);
 		expect("ack_ts" in ans).toBe(true);
 		const cancelled = hist.decisions.find(
-			(d: any) => d.question === "history dismiss",
+			(d: Row) => d.question === "history dismiss",
 		);
 		expect(cancelled.state).toBe("CANCELLED");
 		expect(cancelled.answer_note).toBeNull();
 		expect(cancelled.answered_ts).toBeNull();
 		const def = await (await fetch(`${BASE}/api/decisions`)).json();
-		expect(def.decisions.every((d: any) => d.state === "OPEN")).toBe(true);
+		expect(def.decisions.every((d: Row) => d.state === "OPEN")).toBe(true);
 		expect(
-			def.decisions.find((d: any) => d.question === "history fork"),
+			def.decisions.find((d: Row) => d.question === "history fork"),
 		).toBeUndefined();
 	});
 
@@ -979,7 +984,7 @@ describe("board api v3 (docs/board-api.md)", () => {
 		const r = await (await fetch(`${BASE}/api/setup`)).json();
 		expect(Date.now() - t0).toBeLessThan(5000);
 		expect(r.ok).toBe(true);
-		expect(r.checks.map((c: any) => c.id)).toEqual([
+		expect(r.checks.map((c: Row) => c.id)).toEqual([
 			"db",
 			"hooks-wired",
 			"session-start",
@@ -1000,7 +1005,7 @@ describe("board api v3 (docs/board-api.md)", () => {
 			expect(typeof c.detail).toBe("string");
 			expect(c.fix === null || typeof c.fix === "string").toBe(true);
 		}
-		const byId = Object.fromEntries(r.checks.map((c: any) => [c.id, c]));
+		const byId = Object.fromEntries(r.checks.map((c: Row) => [c.id, c]));
 		expect(byId.db.ok).toBe(true);
 		expect(byId.db.fix).toBeNull();
 		expect(byId["hooks-wired"].ok).toBe(false); // temp HOME wires nothing
@@ -1026,26 +1031,26 @@ describe("demo mode (--demo)", () => {
 		await waitUp(DEMO_BASE);
 		const feed = await (await fetch(`${DEMO_BASE}/api/tasks`)).json();
 		expect(feed.projects).toContain(demoProj);
-		const dt = feed.tasks.filter((t: any) => t.project === demoProj);
+		const dt = feed.tasks.filter((t: Row) => t.project === demoProj);
 		expect(dt.length).toBe(4);
-		expect(new Set(dt.map((t: any) => t.state))).toEqual(
+		expect(new Set(dt.map((t: Row) => t.state))).toEqual(
 			new Set(["READY", "CLAIMED", "BLOCKED", "DONE"]),
 		);
-		const claimed = dt.find((t: any) => t.state === "CLAIMED");
+		const claimed = dt.find((t: Row) => t.state === "CLAIMED");
 		expect(claimed.owner_label).toBe("backend lane"); // claim intent, not the sid
 		const dec = await (await fetch(`${DEMO_BASE}/api/decisions`)).json();
-		const demoOpen = dec.decisions.filter((d: any) => d.project === demoProj);
+		const demoOpen = dec.decisions.filter((d: Row) => d.project === demoProj);
 		expect(demoOpen.length).toBe(2);
 		expect(
 			demoOpen.every(
-				(d: any) => d.state === "OPEN" && d.delivery === "DELIVERED",
+				(d: Row) => d.state === "OPEN" && d.delivery === "DELIVERED",
 			),
 		).toBe(true);
 		const hist = await (
 			await fetch(`${DEMO_BASE}/api/decisions?history=1`)
 		).json();
 		const demoAns = hist.decisions.filter(
-			(d: any) => d.project === demoProj && d.state === "ANSWERED",
+			(d: Row) => d.project === demoProj && d.state === "ANSWERED",
 		);
 		expect(demoAns.length).toBe(2);
 		for (const d of demoAns) {
@@ -1060,8 +1065,8 @@ describe("demo mode (--demo)", () => {
 		).json();
 		expect(detail.task.open_decisions).toBe(1);
 		expect(detail.events.length).toBeGreaterThanOrEqual(4);
-		expect(detail.decisions.some((d: any) => d.state === "OPEN")).toBe(true);
-		expect(detail.decisions.some((d: any) => d.state === "ANSWERED")).toBe(
+		expect(detail.decisions.some((d: Row) => d.state === "OPEN")).toBe(true);
+		expect(detail.decisions.some((d: Row) => d.state === "ANSWERED")).toBe(
 			true,
 		);
 		// the bus: a dozen events, all demo-stamped, never a real project
@@ -1074,7 +1079,7 @@ describe("demo mode (--demo)", () => {
 		const data = await (await fetch(`${DEMO_BASE}/api/data`)).json();
 		expect(
 			data.zombies.some(
-				(z: any) => z.item === "W3" && z.label.includes("ZOMBIE"),
+				(z: Row) => z.item === "W3" && z.label.includes("ZOMBIE"),
 			),
 		).toBe(true);
 	});
@@ -1094,7 +1099,7 @@ describe("demo mode (--demo)", () => {
 		);
 		await waitUp(DEMO_BASE);
 		const feed = await (await fetch(`${DEMO_BASE}/api/tasks`)).json();
-		expect(feed.tasks.filter((t: any) => t.project === demoProj).length).toBe(
+		expect(feed.tasks.filter((t: Row) => t.project === demoProj).length).toBe(
 			4,
 		);
 	});
@@ -1178,18 +1183,18 @@ describe("W28 llm telemetry", () => {
 		).run(t);
 		db.close();
 		const d = await getData();
-		const u = d.llm.usage.find((x: any) => x.model === "test-a");
+		const u = d.llm.usage.find((x: Row) => x.model === "test-a");
 		expect(u.tokens).toBe(180); // 120 + 60 — budget-joined
 		expect(u.budget).toBe(500);
 		expect(u.calls).toBe(2);
-		const b = d.llm.usage.find((x: any) => x.model === "test-b");
+		const b = d.llm.usage.find((x: Row) => x.model === "test-b");
 		expect(b.tokens).toBe(0);
 		expect(b.budget).toBeNull();
 		expect(d.llm.calls.length).toBeGreaterThanOrEqual(3);
 		const last = d.llm.calls[0]; // newest first
 		expect(last.model).toBe("test-a");
 		expect(last.tt).toBe(120);
-		expect(d.llm.calls.some((c: any) => c.error === "LLM 500")).toBe(true); // failures are in the log
+		expect(d.llm.calls.some((c: Row) => c.error === "LLM 500")).toBe(true); // failures are in the log
 	});
 });
 
