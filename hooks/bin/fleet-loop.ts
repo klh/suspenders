@@ -209,8 +209,20 @@ function retireMerged(b: string): void {
 	// (or missing) worktree with no commits is ambiguous; ambiguity defers
 	// to don't-touch: skip retire under a 10-min worktree-age grace.
 	if (!tracked) {
+		// mid-spawn evidence, not blanket skip: a fresh worktree OR a
+		// DISPATCHED log line <10min old means a lane may still be
+		// registering (gaps' async wrapper, autow298/299); neither piece of
+		// evidence → dead debris (no entry, no worktree) retires normally
 		const st = statSync(wt, { throwIfNoEntry: false });
-		if (Date.now() - (st?.birthtimeMs ?? Date.now()) < 10 * 60_000) return;
+		if (st && Date.now() - st.birthtimeMs < 10 * 60_000) return;
+		try {
+			const line = readFileSync(`${REPO}/.fleet/loop.log`, "utf8")
+				.split("\n")
+				.reverse()
+				.find((l) => l.includes("DISPATCHED") && l.includes(b));
+			const ts = line ? Date.parse(line.slice(0, 24)) : Number.NaN;
+			if (Number.isFinite(ts) && Date.now() - ts < 10 * 60_000) return;
+		} catch {}
 	}
 	if (existsSync(wt)) {
 		let rm = runCap(["git", "worktree", "remove", "--force", wt]);
@@ -476,6 +488,11 @@ if (MODE === "dispatch") {
 	const env = { ...process.env };
 	delete env.ANTHROPIC_BASE_URL;
 	delete env.ANTHROPIC_AUTH_TOKEN;
+	// model overrides must not ride the coordinator's env into lanes — a
+	// dispatch from a GLM-routed shell hung W57 at model init
+	// (claude-code:unrecognized_model, 2026-09-28)
+	delete env.ANTHROPIC_MODEL;
+	delete env.ANTHROPIC_SMALL_FAST_MODEL;
 	if (AGENT === "codex") {
 		env.GIT_DIR = `${wt}/.gitstore`;
 		env.GIT_WORK_TREE = wt;
