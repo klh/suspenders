@@ -806,7 +806,9 @@ if (cmd === "add") {
 			: null,
 	);
 	emit("work.added", id, { scope: scope ?? "" });
-	console.log(`${green("✓")} ${cyan(id)} ${dim("READY")} — ${title}`);
+	console.log(
+		`${green("✓")} ${cyan(id)} ${dim("READY")} — ${title} ${dim(`[project: ${PROJECT}]`)}`,
+	);
 } else if (cmd === "list" || cmd === "ready") {
 	const mode = cmd === "ready" ? "ready" : (rest[0] ?? "open");
 	let rows: Item[];

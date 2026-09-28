@@ -128,8 +128,8 @@ export function filesCheck(hook: HookInput): FilesExit {
 	// lease owner's NEXT edit never sees the edit's own delta as foreign.
 	if (existsSync(F)) refreshLeaseHash(F);
 
-	const note = editStreak(hook, F);
-	if (note) return { kind: "context", msg: note };
+	const streak = editStreak(hook, F);
+	if (streak) return streak;
 	return { kind: "ok" };
 }
 
@@ -178,7 +178,7 @@ function qltyGate(F: string): string | null {
 
 // Count edits per file per session; every 3rd edit nudges to verify
 // (CLAUDE.md blind-edit rule: run/build/test before editing further).
-function editStreak(hook: HookInput, F: string): string | null {
+function editStreak(hook: HookInput, F: string): FilesExit | null {
 	const sid = hook.session_id;
 	if (!sid) return null;
 	const statePath = `${(process.env.TMPDIR ?? "/tmp").replace(/\/$/, "")}/claude-edits-${sid}.json`;
@@ -191,7 +191,29 @@ function editStreak(hook: HookInput, F: string): string | null {
 		writeFileSync(statePath, JSON.stringify(counts));
 	} catch {}
 	if (counts[F] % 3 !== 0) return null;
-	return `Edit #${counts[F]} to ${F.slice(F.lastIndexOf("/") + 1)} this session — verify-every-3rd-edit rule: run/build/test it now before editing further.`;
+	const label = F.slice(F.lastIndexOf("/") + 1);
+	// 2026-09-28, owner: the verify-every-3rd-edit nag was ignored all day
+	// while interleaved edits + autofixes corrupted files twice — the gate
+	// now runs the build ITSELF at 3/6/9 and blocks with the compiler error.
+	// TS only (json/md have no build); bun build ~100ms; fail-open on spawn
+	// trouble (the streak counter is advisory state, never a hard gate).
+	if (/\.(ts|tsx|mjs)$/.test(F) && existsSync(F)) {
+		const build = Bun.spawnSync(
+			[process.execPath, "build", "--target=bun", F, "--outfile", "/dev/null"],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const err = build.stderr ? new TextDecoder().decode(build.stderr) : "";
+		if (build.exitCode !== 0) {
+			return {
+				kind: "block",
+				err: `Edit #${counts[F]} to ${label}: the gate built it and it FAILS — fix before editing further.\n${err.slice(0, 2000)}\n`,
+			};
+		}
+	}
+	return {
+		kind: "context",
+		msg: `Edit #${counts[F]} to ${label} — build verified clean by the gate.`,
+	};
 }
 
 /** Governor interplay: a post-tool write (prettier/qlty-fmt) mutated the file
