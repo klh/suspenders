@@ -118,6 +118,23 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
 }
 #tasksTbl .num { text-align:right; font-variant-numeric:tabular-nums; color:#98958e; }
 .tidbtn { background:none; border:none; padding:0; color:#d8900f; font:inherit; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
+/* W65 lanes kanban — one column per work-graph state, cards carry the lane's live tail */
+.kwrap { overflow-x:auto; }
+.kanban { display:flex; gap:10px; align-items:flex-start; min-width:max-content; padding-bottom:8px; }
+.kcol { flex:0 0 250px; max-width:250px; border-top:2px solid rgba(255,255,255,.16); padding-top:6px; }
+.kcol h3 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:#98958e; margin:0 0 8px; }
+.kcount { float:right; font-variant-numeric:tabular-nums; }
+.kcard { border:1px solid rgba(255,255,255,.1); border-radius:8px; padding:8px 10px; margin-bottom:8px; background:rgba(255,255,255,.03); cursor:pointer; }
+.kcard:hover { border-color:rgba(255,255,255,.28); }
+.krow { display:flex; gap:8px; align-items:baseline; }
+.kage { margin-left:auto; flex:none; font-variant-numeric:tabular-nums; }
+.kdec { flex:none; color:#c96a4f; font-size:10px; text-transform:uppercase; letter-spacing:.06em; }
+.ktitle { margin-top:4px; word-break:break-word; }
+.klane { margin-top:3px; font-size:11px; }
+.ktail { margin-top:4px; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#98958e; }
+.kstart { margin-top:6px; background:none; border:1px solid #d8900f; border-radius:4px; color:#d8900f; font:inherit; font-size:11px; padding:2px 8px; cursor:pointer; }
+.kstart:hover { background:rgba(216,144,15,.12); }
+.kempty { font-size:11px; padding:2px 0 6px; }
 .ttitle { word-break:break-word; max-width:480px; }
 .tail { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:480px; }
 .akind { display:inline-block; border:1px solid rgba(255,255,255,.18); border-radius:2px; padding:0 6px; font-size:9.5px; text-transform:uppercase; letter-spacing:.06em; color:#98958e; }
@@ -235,6 +252,7 @@ button.diffsend:disabled { opacity:.45; cursor:default; }
 <nav class="tabs" aria-label="board sections">
   <button type="button" data-tab="decisions" aria-current="true">Decisions</button>
   <button type="button" data-tab="tasks">Tasks</button>
+  <button type="button" data-tab="lanes">Lanes</button>
   <button type="button" data-tab="activity">Activity</button>
   <button type="button" data-tab="governor">Governor</button>
   <button type="button" data-tab="setup">Setup</button>
@@ -280,6 +298,10 @@ button.diffsend:disabled { opacity:.45; cursor:default; }
     <tbody id="tasksBody"><tr><td colspan="7" class="dim">loading tasks...</td></tr></tbody>
   </table>
 </section>
+<section id="tab-lanes" hidden>
+  <div id="kanbanErr" class="taberr"></div>
+  <div class="kwrap"><div id="kanban"><div class="state dim">loading lanes...</div></div></div>
+</section>
 <section id="tab-activity" hidden>
   <div id="actErr" class="taberr"></div>
   <div class="feed"><div id="actBody"><div class="r"><span class="dim">loading activity...</span></div></div></div>
@@ -324,7 +346,7 @@ var decCollapsed = false;
 var evFilter = 'all';
 var projBaseline = false; // suppress toast storm right after a project switch
 var knownProj = {}; // distinct project paths seen in any 'projects' response
-var TABS = { decisions: 1, tasks: 1, activity: 1, governor: 1, setup: 1 };
+var TABS = { decisions: 1, tasks: 1, lanes: 1, activity: 1, governor: 1, setup: 1 };
 var curTab = 'decisions';
 var tasksData = null; var tasksOkAt = 0; var tasksErr = null; var tasksBusy = false; var tasksLoaded = false;
 var actData = null; var actOkAt = 0; var actErr = null; var actBusy = false; var actLoaded = false;
@@ -354,6 +376,7 @@ function applyHashFilter(){
   var bar = byId('hashChipBar');
   if (bar) sigSet(bar, hashFilter, hashFilter ? '<span class="chip">filtered by <b>' + esc(hashFilter) + '</b> · <button type="button" class="hfclear">clear</button></span>' : '');
   renderTasks();
+  renderKanban();
   renderDecisions();
 }
 function byId(id){ return document.getElementById(id); }
@@ -1153,7 +1176,7 @@ function paintSort(){
   }
 }
 function pollTasks(){
-  if (tasksBusy || curTab !== 'tasks') return;
+  if (tasksBusy || (curTab !== 'tasks' && curTab !== 'lanes')) return;
   tasksBusy = true;
   fetch('/api/tasks' + projQuery(), { signal: AbortSignal.timeout(8000) })
     .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -1163,7 +1186,7 @@ function pollTasks(){
       noteProjects(j.projects);
     })
     .catch(function(e){ tasksErr = String((e && e.message) || e); })
-    .finally(function(){ tasksBusy = false; renderTasks(); });
+    .finally(function(){ tasksBusy = false; renderTasks(); renderKanban(); });
 }
 function taskRow(t, parentId){
   var owner = ownerName(t);
@@ -1220,6 +1243,74 @@ function renderTasks(){
   var cnt = byId('taskCount');
   if (cnt) cnt.textContent = pool.length === ts.length ? pool.length + ' tasks' : pool.length + ' of ' + ts.length + ' tasks';
   sigSetKeep(body, html, html, 'data-task'); // rebuild only on real change; refocus the row button if the table swapped under it
+}
+// --- W65 lanes kanban: work items as cards in state columns; active cards
+// carry the owner lane's live transcript tail (1s poll). A card click expands
+// straight into the task drawer (diff + comments); unclaimed READY cards get
+// a start button that POSTs /api/start (fleet-loop dispatch).
+var KCOLS = [
+  { key: 'READY', label: 'ready', states: ['READY'] },
+  { key: 'ACTIVE', label: 'working', states: ['CLAIMED', 'RUNNING'] },
+  { key: 'BLOCKED', label: 'blocked', states: ['BLOCKED', 'PAUSED'] },
+  { key: 'FAILED', label: 'failed', states: ['FAILED'] },
+  { key: 'DONE', label: 'done', states: ['DONE'], cap: 12 }
+];
+var starting = {}; // 'proj\u0000id' -> start POST in flight (rebuild-proof)
+function startItem(id, proj, btn){
+  var k = proj + '\u0000' + id;
+  if (starting[k]) return;
+  starting[k] = true;
+  if (btn) btn.disabled = true;
+  postJSON('/api/start', { project: proj, id: id }).then(function(j){
+    delete starting[k];
+    if (j && j.ok) toast('lane ' + String(j.sid || '') + ' dispatching on ' + id);
+    else toast('start failed: ' + String((j && j.error) || 'unknown error'));
+    pollTasks();
+  });
+}
+function kanbanCard(t){
+  var od = t.open_decisions || 0;
+  var startable = t.state === 'READY' && !t.owner_sid;
+  var html = '<div class="kcard" data-kid="' + esc(t.id) + '" data-kproj="' + esc(t.project || '') + '" title="open details">';
+  html += '<div class="krow">' + taskPill(t.state) +
+    '<button type="button" class="tidbtn mono" data-task="' + esc(t.id) + '" data-proj="' + esc(t.project || '') + '" aria-haspopup="dialog">' + esc(t.id) + '</button>' +
+    (od ? '<span class="kdec">needs you</span>' : '') +
+    '<span class="kage dim">' + agoShort(t.age_s) + '</span></div>';
+  html += '<div class="ktitle">' + esc(String(t.title || '(untitled)')).slice(0, 140) + '</div>';
+  html += '<div class="klane dim">lane ' + esc(t.owner_label || t.owner_sid || 'unclaimed') + '</div>';
+  if (t.tail && t.tail.text) html += '<div class="ktail">' + esc(t.tail.text) + '</div>';
+  if (startable) html += '<button type="button" class="kstart" data-start="' + esc(t.id) + '" data-startproj="' + esc(t.project || '') + '">▶ start lane</button>';
+  return html + '</div>';
+}
+function renderKanban(){
+  if (curTab !== 'lanes') return;
+  var el = byId('kanban');
+  if (!el) return;
+  if (!tasksLoaded && !tasksErr) { sigSet(el, 'loading', '<div class="state dim">loading lanes...</div>'); return; }
+  if (tasksErr) {
+    errBanner(byId('kanbanErr'), 'lane board unavailable' + (tasksOkAt ? ' — last good ' + ago(Math.round((Date.now() - tasksOkAt) / 1000)) : ''), function(){ tasksErr = null; pollTasks(); });
+    if (!tasksData) return; // nothing good yet — banner instead of stale cards
+  } else {
+    clearErr(byId('kanbanErr'));
+  }
+  if (!tasksData) return;
+  var ts = tasksData.tasks;
+  buildOwnerDisp(ts);
+  if (hashFilter) ts = ts.filter(function(t){ return hashMatch([t.id, t.title, ownerKey(t), ownerName(t), t.project]); });
+  var html = '<div class="kanban">';
+  for (var c = 0; c < KCOLS.length; c++) {
+    var col = KCOLS[c];
+    var items = ts.filter(function(t){ return col.states.indexOf(t.state) >= 0; });
+    items.sort(function(a, b){ return (a.age_s || 0) - (b.age_s || 0); }); // newest activity first
+    var shown = col.cap ? items.slice(0, col.cap) : items;
+    html += '<div class="kcol"><h3>' + esc(col.label) + '<span class="kcount">' + items.length + '</span></h3>';
+    for (var i = 0; i < shown.length; i++) html += kanbanCard(shown[i]);
+    if (!items.length) html += '<div class="kempty dim">(empty)</div>';
+    else if (col.cap && items.length > col.cap) html += '<div class="kempty dim">+' + (items.length - col.cap) + ' older — the table has all</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+  sigSet(el, html, html);
 }
 function openTask(id, proj, trigger){
   task.id = id; task.proj = proj || null; task.data = null; task.err = null; task.okAt = 0; task.trigger = trigger || null;
@@ -1521,7 +1612,7 @@ function renderSetup(){
 }
 // --- 7: tab shell (location.hash driven, deep-linkable, back/forward) ---
 function pollActiveTab(){
-  if (curTab === 'tasks') pollTasks();
+  if (curTab === 'tasks' || curTab === 'lanes') pollTasks();
   else if (curTab === 'activity') pollAct();
   else if (curTab === 'decisions') pollHist(); // no-op while history is collapsed
   // governor rides /api/data; setup fetches on activation
@@ -1529,6 +1620,7 @@ function pollActiveTab(){
 function renderTab(){
   if (curTab === 'decisions') renderHist();
   else if (curTab === 'tasks') renderTasks();
+  else if (curTab === 'lanes') renderKanban();
   else if (curTab === 'activity') renderAct();
   else if (curTab === 'governor') { if (lastData) { renderFleet(); renderClaims(lastData); renderDone(lastData); renderEvents(lastData); renderLlm(lastData); } }  else if (curTab === 'setup') renderSetup();
 }
@@ -1565,6 +1657,14 @@ byId('hashChipBar').addEventListener('click', function(e){
 byId('tasksTbl').addEventListener('click', function(e){
   var b = e.target.closest && e.target.closest('[data-task]');
   if (b) openTask(b.getAttribute('data-task'), b.getAttribute('data-proj'), b);
+});
+byId('kanban').addEventListener('click', function(e){
+  var s = e.target.closest && e.target.closest('[data-start]');
+  if (s) { startItem(s.getAttribute('data-start'), s.getAttribute('data-startproj'), s); return; }
+  var b = e.target.closest && e.target.closest('[data-task]');
+  if (b) { openTask(b.getAttribute('data-task'), b.getAttribute('data-proj'), b); return; }
+  var c = e.target.closest && e.target.closest('.kcard');
+  if (c) openTask(c.getAttribute('data-kid'), c.getAttribute('data-kproj'), c);
 });
 var theadEl = document.querySelector('#tasksTbl thead');
 if (theadEl) theadEl.addEventListener('click', function(e){

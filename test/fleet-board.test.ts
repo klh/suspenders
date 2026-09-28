@@ -150,9 +150,14 @@ describe("served page", () => {
 		expect(r.status).toBe(200);
 		const page = await r.text();
 		// only the corruption check is stable across UI rewrites — panel
-		// internals belong to the UI and its own tests
-		const script = page.match(/<script>([\s\S]*)<\/script>/)?.[1];
-		expect(() => new Function(script)).not.toThrow();
+		// internals belong to the UI and its own tests. Per-block, non-greedy:
+		// the topbar probe script (2ae8d41) made the old greedy match span
+		// both blocks + the markup between them, so it never parsed again
+		const blocks = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+			(m) => m[1],
+		);
+		expect(blocks.length).toBeGreaterThanOrEqual(2);
+		for (const b of blocks) expect(() => new Function(b)).not.toThrow();
 	});
 
 	test("GET /llms.txt — plain-text agent contract", async () => {
@@ -162,6 +167,7 @@ describe("served page", () => {
 		const txt = await r.text();
 		expect(txt).toContain("# suspenders");
 		expect(txt).toContain("/api/data");
+		expect(txt).toContain("/api/start");
 		expect(txt).toContain("http://www.threads.dk");
 	});
 
@@ -1085,6 +1091,16 @@ describe("demo mode (--demo)", () => {
 			4,
 		);
 	});
+
+	test("/api/start refuses to spawn lanes from a demo board", async () => {
+		const r = await fetch(`${DEMO_BASE}/api/start`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ project: demoProj, id: "W1" }),
+		});
+		expect(r.status).toBe(409);
+		expect((await r.json()).error).toContain("demo board");
+	});
 });
 
 // W28 — llm.call telemetry: advise.ts emits an llm.call event per LLM
@@ -1280,5 +1296,29 @@ describe("W55 per-item diff + review comments", () => {
 			body: '{"id":"WDIFF1","file":"f.txt","line":"1","note":"x"}',
 		});
 		expect(plain.status).toBe(415);
+	});
+	test("/api/start validation: missing fields 400, unknown 404, claimed 409, not-READY 409", async () => {
+		// missing fields
+		expect((await post("/api/start", { project: GREPO })).status).toBe(400);
+		// unknown item
+		const unknown = await post("/api/start", { project: GREPO, id: "WNOPE" });
+		expect(unknown.status).toBe(404);
+		// claimed item (WDIFF1 — owner board-lane)
+		const claimed = await post("/api/start", { project: GREPO, id: "WDIFF1" });
+		expect(claimed.status).toBe(409);
+		expect(claimed.json.error).toContain("already claimed");
+		// non-READY item (insert a BLOCKED row — never reaches the spawn)
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		db.query(
+			"INSERT INTO work_items (project, id, title, state, owner_sid, created_by, created_at, updated_at) VALUES (?, 'WSTART1', 'blocked demo', 'BLOCKED', NULL, 'test', ?, ?)",
+		).run(GREPO, Date.now(), Date.now());
+		db.close();
+		const notReady = await post("/api/start", {
+			project: GREPO,
+			id: "WSTART1",
+		});
+		expect(notReady.status).toBe(409);
+		expect(notReady.json.error).toContain("only READY items");
 	});
 });
