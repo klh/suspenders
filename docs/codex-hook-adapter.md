@@ -1,8 +1,18 @@
-# codex hook adapter — spec (W68, 2026-09-28)
+# codex hook adapter — spec (W68, 2026-09-28) → SHIPPED (W73, 2026-09-28)
 
-> Status: SPEC — implementation is a follow-up work item, sequenced from
-> this file. Source of truth: this file. If implementation diverges, this
-> spec wins or gets amended.
+> Status: SHIPPED by W73 the same day. The implementation diverges from the
+> spec in two places, both resolved at step 0: (1) **wiring is the
+> hooks.json emitter** (bin/gate-wire-codex.ts, merge-not-clobber, run
+> idempotently inside the dispatch spawn block), not per-lane `-c`
+> overrides — `-c` hook expression stayed unverifiable in the implementing
+> session (codex exec was permission-blocked); the hooks.json merge is the
+> proven surface on this machine. (2) **SessionEnd exists** in codex
+> 0.158.0 (binary-verified), so session-end accounting wires directly — the
+> spec's absent-event note is stale. Confirmed live: ask is unsupported on
+> PreToolUse ("unsupported permissionDecision:ask") — the ask → deny
+> degradation is load-bearing. Codex surface facts are first-tier as of
+> 2026-09-28 (installed 0.158.0 binary strings + the working user
+> hooks.json); a live pilot probe (spec step 4) remains open.
 > Sources: W66 docs-verified codex surface (docs/codex-portability.md,
 > 2026-09-28) + W67 first-hand pilot (docs/fleet-loop.md §Selecting the
 > agent backend; merge f3d3139). Codex CLI surface facts below remain

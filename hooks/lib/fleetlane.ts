@@ -36,7 +36,7 @@ const ppid = (pid: number): number => {
 // Fleet root = the nearest ancestor dir owning .fleet/lanes.json. Lane cwds
 // live BELOW it (worktrees at <root>/.worktrees/<item>), so walking UP from
 // cwd finds it; other repos resolve to null after a few existsSync calls.
-const lanesFileFor = (cwd: string): string => {
+export const lanesFileFor = (cwd: string): string => {
 	let dir = resolve(cwd);
 	for (;;) {
 		const f = `${dir}/.fleet/lanes.json`;

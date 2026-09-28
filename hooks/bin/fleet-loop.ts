@@ -381,6 +381,10 @@ if (MODE === "dispatch") {
 	if (AGENT === "codex") {
 		env.GIT_DIR = `${wt}/.gitstore`;
 		env.GIT_WORK_TREE = wt;
+		// W73: the fleet sid rides the lane env — hooks inherit it, making
+		// SUSPENDERS_SID the primary identity channel for the codex adapter
+		// (ppid-walk into lanes.json stays the fallback, lib/fleetlane.ts).
+		env.SUSPENDERS_SID = sid;
 	}
 	const prompt = `Read ${briefFile} and execute it fully.`;
 	// the agent binary resolves at dispatch time — a bare name ENOENTs under
@@ -389,6 +393,26 @@ if (MODE === "dispatch") {
 	if (!bin) {
 		console.error(`${AGENT} binary not found on PATH`);
 		process.exit(1);
+	}
+	// W73 gate wiring: idempotent merge-not-clobber into ~/.codex/hooks.json
+	// right before the lane starts, after the binary check (a missing binary
+	// must fail dispatch with its own error, not a wiring one). A failed wire
+	// aborts — never a silent gate-less lane (W68 degradation rule).
+	if (AGENT === "codex") {
+		const wire = Bun.spawnSync(
+			[process.execPath, `${import.meta.dir}/gate-wire-codex.ts`],
+			{
+				cwd: REPO,
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		if (wire.exitCode !== 0) {
+			console.error(
+				`codex gate wiring failed: ${new TextDecoder().decode(wire.stderr ?? new Uint8Array()).trim()}`,
+			);
+			process.exit(1);
+		}
 	}
 	// codex lanes: codex's seatbelt denies every write into any .git
 	// directory (name-based, verified empirically 2026-09-28), so the standard
