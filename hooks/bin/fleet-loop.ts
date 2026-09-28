@@ -147,6 +147,16 @@ const runTemplate = (
 const ahead = (b: string): number =>
 	Number(sh(["git", "rev-list", "--count", `${MAIN}..${b}`]) || "0");
 
+// retire's runs capture stderr — a RETIRE-BLOCKED line must carry git's
+// reason (the loop's own "reasonless FAIL is a bug" doctrine)
+const runCap = (cmd: string[]): { code: number; out: string } => {
+	const p = Bun.spawnSync(cmd, { cwd: REPO, stdout: "pipe", stderr: "pipe" });
+	return {
+		code: p.exitCode ?? 1,
+		out: `${p.stdout ? new TextDecoder().decode(p.stdout) : ""}${p.stderr ? new TextDecoder().decode(p.stderr) : ""}`.trim(),
+	};
+};
+
 function retireMerged(b: string): void {
 	if (ahead(b) !== 0) return;
 	// ahead=0 is also true for a freshly-dispatched lane's pre-commit branch —
@@ -162,12 +172,26 @@ function retireMerged(b: string): void {
 	}
 	const wt =
 		tracked?.worktree ?? `${REPO}/.worktrees/${b.replace(/^.*\//, "")}`;
-	if (existsSync(wt)) run(["git", "worktree", "remove", "--force", wt]);
-	const deleted =
-		run(["git", "branch", "-d", b]) === 0 ||
-		run(["git", "branch", "-D", b]) === 0;
-	if (deleted) log(`RETIRED ${b}`);
-	else log(`RETIRE-BLOCKED ${b} — branch delete failed, inspect manually`);
+	if (existsSync(wt)) {
+		let rm = runCap(["git", "worktree", "remove", "--force", wt]);
+		if (rm.code !== 0) {
+			// stale worktree registration (git's metadata outlived a dead lane) —
+			// prune and retry once; a second failure is logged with git's reason
+			runCap(["git", "worktree", "prune"]);
+			rm = runCap(["git", "worktree", "remove", "--force", wt]);
+		}
+		if (rm.code !== 0)
+			log(
+				`RETIRE-STALL ${b} — worktree remove failed: ${rm.out.split("\n").slice(-2).join(" | ")}`,
+			);
+	}
+	const delD = runCap(["git", "branch", "-d", b]);
+	const del = delD.code === 0 ? null : runCap(["git", "branch", "-D", b]);
+	if (delD.code === 0 || (del && del.code === 0)) log(`RETIRED ${b}`);
+	else
+		log(
+			`RETIRE-BLOCKED ${b} — branch delete failed: ${del ? del.out.split("\n").slice(-2).join(" | ") : "?"}`,
+		);
 }
 
 async function cycle(): Promise<void> {
