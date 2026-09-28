@@ -152,8 +152,14 @@ const runTemplate = (
 	return { code: p.exitCode ?? 1, tail };
 };
 
-const ahead = (b: string): number =>
-	Number(sh(["git", "rev-list", "--count", `${MAIN}..${b}`]) || "0");
+const ahead = (b: string): number => {
+	// a failed rev-list (unknown ref, park-rename race) must read as
+	// UNMERGED, never as merged — Number("") was 0, which made any vanished
+	// branch look fully merged to the retire path (2026-09-28 gaps losses)
+	const out = sh(["git", "rev-list", "--count", `${MAIN}..${b}`]);
+	const n = Number(out);
+	return out !== "" && Number.isFinite(n) ? n : -1;
+};
 
 // retire's runs capture stderr — a RETIRE-BLOCKED line must carry git's
 // reason (the loop's own "reasonless FAIL is a bug" doctrine)
@@ -224,6 +230,17 @@ function retireMerged(b: string): void {
 			if (Number.isFinite(ts) && Date.now() - ts < 10 * 60_000) return;
 		} catch {}
 	}
+	// REFERENCE BEFORE DELETE (gaps incident 2026-09-28): pin the tip to a
+	// recovery ref before any destructive step, so a later -D or an
+	// aggressive prune can never orphan the commits.
+	const tip = sh(["git", "rev-parse", "--verify", b]);
+	if (tip)
+		runCap([
+			"git",
+			"update-ref",
+			`refs/recover/${b.replace(/\//g, "-")}-${Date.now()}`,
+			tip,
+		]);
 	if (existsSync(wt)) {
 		let rm = runCap(["git", "worktree", "remove", "--force", wt]);
 		if (rm.code !== 0) {
@@ -269,7 +286,9 @@ function mergeFail(b: string, tail: string): void {
 // Fail-isolated: a failed ladder aborts the merge, leaves the branch for
 // inspection, and counts toward the 3-strike park like every other merge.
 function mergeOne(b: string): void {
-	if (ahead(b) === 0) {
+	const n = ahead(b);
+	if (n < 0) return; // vanished between sweep and ladder (park-rename race)
+	if (n === 0) {
 		retireMerged(b);
 		return;
 	}
