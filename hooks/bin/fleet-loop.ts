@@ -263,8 +263,15 @@ if (MODE === "dispatch") {
 		sid,
 	]);
 	if (take.code !== 0) {
-		console.error(`work take failed: ${take.out}`);
-		process.exit(1);
+		const mine = runTool([
+			`${process.env.HOME}/.claude/hooks/suspenders/bin/work.ts`,
+			"show",
+			item,
+		]);
+		if (!mine.out.includes(sid)) {
+			console.error(`work take failed and not ours: ${take.out}`);
+			process.exit(1);
+		} // claimed by us from a previous dispatch attempt — resume
 	}
 	const wtree = runTool([
 		`${process.env.HOME}/.claude/hooks/suspenders/bin/worktree.ts`,
