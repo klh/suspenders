@@ -455,7 +455,7 @@ export function bashGate(hook: HookInput): never {
 	const v0 = verb(SEGS[0] ?? []);
 	if (v0 in TOOL_MAP)
 		nudge(
-			`speedy-claude nudge: prefer the fast tool — ${v0} → ${TOOL_MAP[v0]} (see CLAUDE.md / klh-cli-speed-tools skill)`,
+			`speedy nudge: prefer the fast tool — ${v0} → ${TOOL_MAP[v0]} (see CLAUDE.md / klh-cli-speed-tools skill)`,
 		);
 
 	allow();
