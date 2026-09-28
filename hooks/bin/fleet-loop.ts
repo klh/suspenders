@@ -165,6 +165,23 @@ const runCap = (cmd: string[]): { code: number; out: string } => {
 	};
 };
 
+/** Actual worktree path checked out at branch b, from git's registry —
+ *  gaps parks lanes under .claude/worktrees/ (not .worktrees/), so the
+ *  default-path guess misses them and branch delete stalls on "used by
+ *  worktree" (autow294.1, 2026-09-28). */
+function wtPathFromGit(b: string): string | null {
+	const out = sh(["git", "worktree", "list", "--porcelain"]);
+	let path: string | null = null;
+	for (const line of out.split("\n")) {
+		if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
+		else if (line.startsWith("branch ")) {
+			if (line.slice("branch ".length).trim() === `refs/heads/${b}` && path)
+				return path;
+		}
+	}
+	return null;
+}
+
 function retireMerged(b: string): void {
 	if (ahead(b) !== 0) return;
 	// ahead=0 is also true for a freshly-dispatched lane's pre-commit branch —
@@ -178,8 +195,13 @@ function retireMerged(b: string): void {
 		} catch {}
 		if (alive) return;
 	}
+	// worktree path: git's registry is ground truth — gaps parks lanes under
+	// .claude/worktrees/ (not .worktrees/), so the bare default guess misses
+	// them and branch delete stalls on "used by worktree"
 	const wt =
-		tracked?.worktree ?? `${REPO}/.worktrees/${b.replace(/^.*\//, "")}`;
+		wtPathFromGit(b) ??
+		tracked?.worktree ??
+		`${REPO}/.worktrees/${b.replace(/^.*\//, "")}`;
 	// mid-spawn grace (2026-09-28 gaps autow298/299): dispatch registers the
 	// branch immediately but gaps' async wrapper lands the lanes.json entry
 	// 22–55s later — the ladder saw ahead=0 with NO entry, the pid guard had
