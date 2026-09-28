@@ -7,7 +7,13 @@
 // `git init`: an empty mkdir'd .git is NOT a valid gitdir, and discovery
 // would walk up into the checkout's own .git, colliding project identity.
 import { describe, test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import {
+	mkdtempSync,
+	rmSync,
+	mkdirSync,
+	writeFileSync,
+	readFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -15,7 +21,10 @@ import { Database } from "bun:sqlite";
 const HOME = mkdtempSync(join(tmpdir(), "claude-work-cli-home-"));
 const gitInit = (dir: string): void => {
 	mkdirSync(dir, { recursive: true });
-	const r = Bun.spawnSync(["git", "init", "-q", dir], { stdout: "ignore", stderr: "ignore" });
+	const r = Bun.spawnSync(["git", "init", "-q", dir], {
+		stdout: "ignore",
+		stderr: "ignore",
+	});
 	if (r.exitCode !== 0) throw new Error(`git init failed in ${dir}`);
 };
 const REPO = mkdtempSync(join(process.cwd(), ".tmp-work-cli-repo-"));
@@ -24,12 +33,25 @@ const env = { ...process.env, HOME };
 const BIN = join(import.meta.dir, "..", "hooks", "bin");
 const DB = join(HOME, ".cache", "claude-governor", "governor.db");
 
-function workIn(cwd: string, ...args: string[]): { out: string; err: string; code: number } {
-	const p = Bun.spawnSync(["bun", join(BIN, "work.ts"), ...args], { cwd, env, stdout: "pipe", stderr: "pipe" });
-	return { out: p.stdout.toString(), err: p.stderr.toString(), code: p.exitCode };
+function workIn(
+	cwd: string,
+	...args: string[]
+): { out: string; err: string; code: number } {
+	const p = Bun.spawnSync(["bun", join(BIN, "work.ts"), ...args], {
+		cwd,
+		env,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	return {
+		out: p.stdout.toString(),
+		err: p.stderr.toString(),
+		code: p.exitCode,
+	};
 }
 const work = (...args: string[]) => workIn(REPO, ...args);
-const idOf = (out: string): string => (out.match(/W\d+(?:\.\d+)*/) ?? [])[0] ?? "";
+const idOf = (out: string): string =>
+	(out.match(/W\d+(?:\.\d+)*/) ?? [])[0] ?? "";
 const rootNum = (id: string): number => Number(id.slice(1).split(".")[0]);
 const firstLine = (s: string): string => (s.split("\n")[0] ?? "").trim();
 
@@ -40,7 +62,10 @@ function withDb(fn: (db: Database) => void): void {
 }
 
 /** take → done: the disciplined completion path. */
-function finish(id: string, sid: string): { code: number; out: string; err: string } {
+function finish(
+	id: string,
+	sid: string,
+): { code: number; out: string; err: string } {
 	const t = work("take", id, "--as", sid);
 	if (t.code !== 0) return t;
 	return work("done", id, "--sha", `sha-${sid}`);
@@ -67,7 +92,9 @@ describe("add — id allocation", () => {
 
 	test("missing title and unknown options are refused", () => {
 		expect(work("add").err).toContain("usage: add <title>");
-		expect(work("add", "x", "--bogus", "y").err).toContain("unknown option: --bogus");
+		expect(work("add", "x", "--bogus", "y").err).toContain(
+			"unknown option: --bogus",
+		);
 	});
 });
 
@@ -81,7 +108,9 @@ describe("take — CAS claim", () => {
 	});
 
 	test("take refuses nonexistent ids and unmet dependencies", () => {
-		expect(work("take", "W404", "--as", "any").err).toContain("no such work item");
+		expect(work("take", "W404", "--as", "any").err).toContain(
+			"no such work item",
+		);
 		const g = idOf(work("add", "gate target").out);
 		const d = idOf(work("add", "dependent").out);
 		work("block", d, "--on", g);
@@ -91,7 +120,12 @@ describe("take — CAS claim", () => {
 	test("concurrent takes race: exactly one CAS wins", async () => {
 		const id = idOf(work("add", "race item").out);
 		const procs = ["racer-1", "racer-2"].map((sid) =>
-			Bun.spawn(["bun", join(BIN, "work.ts"), "take", id, "--as", sid], { cwd: REPO, env, stdout: "pipe", stderr: "pipe" }),
+			Bun.spawn(["bun", join(BIN, "work.ts"), "take", id, "--as", sid], {
+				cwd: REPO,
+				env,
+				stdout: "pipe",
+				stderr: "pipe",
+			}),
 		);
 		const codes = await Promise.all(procs.map((p) => p.exited));
 		expect(codes.filter((c) => c === 0).length).toBe(1);
@@ -101,7 +135,14 @@ describe("take — CAS claim", () => {
 describe("split — shatter, child ids, roll-up", () => {
 	test("split creates dotted child ids and shatters the parent", () => {
 		const p = idOf(work("add", "shatter me").out);
-		const s = work("split", p, "child a", "child b", "--reason", "independent-scopes");
+		const s = work(
+			"split",
+			p,
+			"child a",
+			"child b",
+			"--reason",
+			"independent-scopes",
+		);
 		expect(s.code).toBe(0);
 		expect(s.out).toContain(`${p}.1`);
 		expect(s.out).toContain(`${p}.2`);
@@ -116,7 +157,16 @@ describe("split — shatter, child ids, roll-up", () => {
 	test("--keep leaves the claimed child with the owner", () => {
 		const p = idOf(work("add", "keep root").out);
 		expect(work("take", p, "--as", "lane-keep").code).toBe(0);
-		const s = work("split", p, "kept", "handed", "--reason", "independent-scopes", "--keep", "1");
+		const s = work(
+			"split",
+			p,
+			"kept",
+			"handed",
+			"--reason",
+			"independent-scopes",
+			"--keep",
+			"1",
+		);
 		expect(s.code).toBe(0);
 		expect(firstLine(work("show", `${p}.1`).out)).toContain("CLAIMED");
 		expect(firstLine(work("show", `${p}.2`).out)).toContain("READY");
@@ -126,7 +176,9 @@ describe("split — shatter, child ids, roll-up", () => {
 describe("done — roll-up for shattered parents", () => {
 	test("parent stays SHATTERED until every required child is DONE, then rolls up", () => {
 		const p = idOf(work("add", "rollup root").out);
-		expect(work("split", p, "c1", "c2", "--reason", "independent-scopes").code).toBe(0);
+		expect(
+			work("split", p, "c1", "c2", "--reason", "independent-scopes").code,
+		).toBe(0);
 		expect(work("done", `${p}.1`, "--sha", "s1").code).not.toBe(0); // this repo: READY work cannot be marked done...
 		expect(work("take", `${p}.1`, "--as", "lane-r1").code).toBe(0); // ...claim it first
 		expect(work("done", `${p}.1`, "--sha", "s1").code).toBe(0);
@@ -138,8 +190,13 @@ describe("done — roll-up for shattered parents", () => {
 
 	test("nested shatters roll up recursively", () => {
 		const q = idOf(work("add", "nested root").out);
-		expect(work("split", q, "x", "y", "--reason", "independent-scopes").code).toBe(0);
-		expect(work("split", `${q}.1`, "x1", "x2", "--reason", "independent-scopes").code).toBe(0);
+		expect(
+			work("split", q, "x", "y", "--reason", "independent-scopes").code,
+		).toBe(0);
+		expect(
+			work("split", `${q}.1`, "x1", "x2", "--reason", "independent-scopes")
+				.code,
+		).toBe(0);
 		expect(work("take", `${q}.2`, "--as", "lane-n2").code).toBe(0);
 		expect(work("done", `${q}.2`, "--sha", "s").code).toBe(0);
 		expect(firstLine(work("show", q).out)).toContain("SHATTERED");
@@ -154,7 +211,9 @@ describe("done — roll-up for shattered parents", () => {
 
 	test("FAILED required child blocks the parent; supersession closes", () => {
 		const p = idOf(work("add", "failure root").out);
-		expect(work("split", p, "a", "b", "--reason", "independent-scopes").code).toBe(0);
+		expect(
+			work("split", p, "a", "b", "--reason", "independent-scopes").code,
+		).toBe(0);
 		expect(work("fail", `${p}.1`, "--note", "blew up").code).toBe(0);
 		expect(finish(`${p}.2`, "lane-fb").code).toBe(0);
 		expect(firstLine(work("show", p).out)).toContain("SHATTERED"); // FAILED blocks
@@ -163,7 +222,9 @@ describe("done — roll-up for shattered parents", () => {
 	});
 
 	test("done without an id prints usage", () => {
-		expect(work("done").err).toContain("usage: done <id> [--as sid] --sha <sha>");
+		expect(work("done").err).toContain(
+			"usage: done <id> [--as sid] --sha <sha>",
+		);
 	});
 });
 
@@ -215,7 +276,9 @@ describe("mine / owned / orphaned", () => {
 		const m = idOf(work("add", "owned item").out);
 		expect(work("take", m, "--as", "lane-mine").code).toBe(0);
 		expect(work("mine", "--as", "lane-mine").out).toContain(m);
-		expect(work("mine", "--as", "lane-nobody").out).toContain("(nothing owned)");
+		expect(work("mine", "--as", "lane-nobody").out).toContain(
+			"(nothing owned)",
+		);
 		expect(work("owned").out).toContain(m);
 		// temp HOME has no transcripts ⇒ every claim is dead ⇒ orphaned
 		expect(work("orphaned").out).toContain(m);
@@ -241,7 +304,11 @@ describe("release / reclaim", () => {
 		expect(work("reclaim", r).code).toBe(0);
 		expect(firstLine(work("show", r).out)).toContain("READY");
 		withDb((db) =>
-			db.query("UPDATE work_items SET state = 'ORPHANED' WHERE project = (SELECT project FROM work_items WHERE id = ?) AND id = ?").run(r, r),
+			db
+				.query(
+					"UPDATE work_items SET state = 'ORPHANED' WHERE project = (SELECT project FROM work_items WHERE id = ?) AND id = ?",
+				)
+				.run(r, r),
 		);
 		expect(work("reclaim", r).code).toBe(0);
 		const stale = work("reclaim", r); // now READY — nothing to reclaim
@@ -282,7 +349,9 @@ describe("project partitioning", () => {
 		try {
 			expect(workIn(repo2, "list").out).toContain("(none)");
 			const any = idOf(work("add", "visibility probe").out);
-			expect(workIn(repo2, "show", any).err).toContain("no such work item in this project");
+			expect(workIn(repo2, "show", any).err).toContain(
+				"no such work item in this project",
+			);
 		} finally {
 			rmSync(repo2, { recursive: true, force: true });
 		}
@@ -292,8 +361,12 @@ describe("project partitioning", () => {
 describe("usage surface", () => {
 	test("arg-less commands print their usage and exit 2", () => {
 		expect(work("take").err).toContain("usage: take <id> --as <sid>");
-		expect(work("supersede", "W1").err).toContain("usage: supersede <id> --by <new-id>");
-		expect(work("block", "W1").err).toContain("usage: block <id> --on <other-id>");
+		expect(work("supersede", "W1").err).toContain(
+			"usage: supersede <id> --by <new-id>",
+		);
+		expect(work("block", "W1").err).toContain(
+			"usage: block <id> --on <other-id>",
+		);
 	});
 
 	test("unknown command dies, --help wins everywhere", () => {
@@ -315,7 +388,9 @@ describe("finish helper sanity", () => {
 describe("split gate — more than 2 children requires --plan", () => {
 	test("1-2 child splits stay free", () => {
 		const p = idOf(work("add", "free split").out);
-		expect(work("split", p, "a", "b", "--reason", "independent-scopes").code).toBe(0);
+		expect(
+			work("split", p, "a", "b", "--reason", "independent-scopes").code,
+		).toBe(0);
 	});
 
 	test("3+ children without --plan is refused, no partial state", () => {
@@ -329,7 +404,17 @@ describe("split gate — more than 2 children requires --plan", () => {
 
 	test("--plan must reference an existing graph item", () => {
 		const p = idOf(work("add", "phantom plan").out);
-		const r = work("split", p, "a", "b", "c", "--reason", "independent-scopes", "--plan", "W404");
+		const r = work(
+			"split",
+			p,
+			"a",
+			"b",
+			"c",
+			"--reason",
+			"independent-scopes",
+			"--plan",
+			"W404",
+		);
 		expect(r.code).toBe(2);
 		expect(r.err).toContain("--plan");
 		expect(r.err).toContain("W404");
@@ -338,7 +423,17 @@ describe("split gate — more than 2 children requires --plan", () => {
 	test("3 children with a registered plan shatter atomically", () => {
 		const plan = idOf(work("add", "the registered plan").out);
 		const p = idOf(work("add", "gated fan-out").out);
-		const r = work("split", p, "a", "b", "c", "--reason", "independent-scopes", "--plan", plan);
+		const r = work(
+			"split",
+			p,
+			"a",
+			"b",
+			"c",
+			"--reason",
+			"independent-scopes",
+			"--plan",
+			plan,
+		);
 		expect(r.code).toBe(0);
 		expect(r.out).toContain(`${p}.3`);
 		expect(firstLine(work("show", p).out)).toContain("SHATTERED");
@@ -372,7 +467,13 @@ describe("migrate-ledger", () => {
 		const r = work("migrate-ledger", led);
 		expect(r.code).toBe(0);
 		// five unresolved lines imported; markers and numbering stripped
-		for (const t of ["fix the flange", "write the parser battery", "wait on vendor", "revisit quoting", "publish the board"]) {
+		for (const t of [
+			"fix the flange",
+			"write the parser battery",
+			"wait on vendor",
+			"revisit quoting",
+			"publish the board",
+		]) {
 			expect(r.out).toContain(t);
 			expect(work("list").out).toContain(t);
 		}
@@ -394,7 +495,8 @@ describe("migrate-ledger", () => {
 
 	test("idempotent on re-run: no new items", () => {
 		const led = join(REPO, "OPS-LEDGER.md");
-		const count = (s: string): number => (s.match(/·|◐|▶|⚠|⏸|⊞|◌|✗/g) ?? []).length;
+		const count = (s: string): number =>
+			(s.match(/·|◐|▶|⚠|⏸|⊞|◌|✗/g) ?? []).length;
 		const before = count(work("list").out);
 		const r = work("migrate-ledger", led);
 		expect(r.code).toBe(0);
@@ -422,7 +524,66 @@ describe("migrate-ledger", () => {
 	});
 
 	test("missing path or missing file is refused", () => {
-		expect(work("migrate-ledger").err).toContain("usage: migrate-ledger <path>");
+		expect(work("migrate-ledger").err).toContain(
+			"usage: migrate-ledger <path>",
+		);
 		expect(work("migrate-ledger", join(REPO, "NOPE.md")).code).toBe(2);
+	});
+});
+
+describe("dep-merge ancestor gate (W60)", () => {
+	const g = (...a: string[]) =>
+		Bun.spawnSync(["git", "-C", REPO, ...a], {
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+	const commit = (msg: string) =>
+		g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg);
+
+	test("DONE dep with a sha not on main gates ready/take/done; merge opens it; unverifiable sha fails open", () => {
+		g("symbolic-ref", "HEAD", "refs/heads/main");
+		writeFileSync(join(REPO, "w60-base.txt"), "base");
+		g("add", "-A");
+		commit("w60 base");
+		g("checkout", "-q", "-b", "w60-side");
+		writeFileSync(join(REPO, "w60-side.txt"), "side");
+		g("add", "-A");
+		commit("w60 side");
+		const sha = g("rev-parse", "HEAD").stdout.toString().trim();
+		g("checkout", "-q", "main");
+
+		const dep = idOf(work("add", "dep lane (merge gate)").out);
+		const depOn = idOf(work("add", "dependent lane (merge gate)").out);
+		expect(work("block", depOn, "--on", dep).code).toBe(0);
+
+		// dep lands DONE with the unmerged sha — done output names the gated dependent
+		expect(work("take", dep, "--as", "lane-w60").code).toBe(0);
+		const d = work("done", dep, "--sha", sha);
+		expect(d.code).toBe(0);
+		expect(d.out).toContain(`dep ${dep} done but unmerged (sha not on main)`);
+		expect(d.out).toContain(`${depOn} stays gated`);
+
+		// take refuses with the spec-exact note
+		const t = work("take", depOn, "--as", "lane-w60b");
+		expect(t.code).toBe(2);
+		expect(t.err).toContain(`dep ${dep} done but unmerged (sha not on main)`);
+
+		// ready excludes the item and prints the why-note
+		expect(work("ready").out).toContain(`${depOn} stays gated`);
+		expect(work("ready").out).not.toContain(`· ${depOn}`);
+
+		// fail-open: an unverifiable sha (unknown object) is NOT a verified
+		// negative — the dep counts and the dependent unblocks
+		const dep2 = idOf(work("add", "failopen dep lane").out);
+		const depOn2 = idOf(work("add", "failopen dependent lane").out);
+		expect(work("block", depOn2, "--on", dep2).code).toBe(0);
+		expect(work("take", dep2, "--as", "lane-w60c").code).toBe(0);
+		const d2 = work("done", dep2, "--sha", "0123456789abcdef0123456987654321");
+		expect(d2.out).toContain("startable now");
+		expect(work("take", depOn2, "--as", "lane-w60d").code).toBe(0);
+
+		// merging the side branch makes the sha an ancestor — gate opens
+		g("merge", "-q", "--no-edit", "w60-side");
+		expect(work("take", depOn, "--as", "lane-w60e").code).toBe(0);
 	});
 });
