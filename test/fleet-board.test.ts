@@ -15,6 +15,8 @@ import { isDecisionKind } from "../hooks/lib/govdb.ts";
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-board-"));
 const REPO = mkdtempSync(join(tmpdir(), "suspenders-boardrepo-"));
 mkdirSync(join(REPO, ".git"), { recursive: true });
+// W55: a REAL git repo for the diff endpoint (REPO's .git is an empty dir)
+const GREPO = mkdtempSync(join(tmpdir(), "suspenders-boardgit-"));
 const env = {
 	...process.env,
 	HOME,
@@ -139,6 +141,7 @@ afterAll(async () => {
 	}
 	rmSync(HOME, { recursive: true, force: true });
 	rmSync(REPO, { recursive: true, force: true });
+	rmSync(GREPO, { recursive: true, force: true });
 });
 
 describe("served page", () => {
@@ -1154,5 +1157,128 @@ describe("W28 llm telemetry", () => {
 		expect(last.model).toBe("test-a");
 		expect(last.tt).toBe(120);
 		expect(d.llm.calls.some((c: any) => c.error === "LLM 500")).toBe(true); // failures are in the log
+	});
+});
+
+// W55 — per-item diff + review line-comments: GET /api/diff resolves the
+// item's repo + suspenders/<id> branch (worktree.ts naming) and diffs it
+// against the merge-base with main; POST /api/comment routes a review note
+// to the owning lane over the coord bus.
+describe("W55 per-item diff + review comments", () => {
+	test("served page wires the diff toggle + comment flow; llms.txt lists both routes", async () => {
+		const page = await (await fetch(`${BASE}/`)).text();
+		expect(page).toContain("diffbtn");
+		expect(page).toContain("/api/diff");
+		expect(page).toContain("/api/comment");
+		const txt = await (await fetch(`${BASE}/llms.txt`)).text();
+		expect(txt).toContain("/api/diff");
+		expect(txt).toContain("/api/comment");
+	});
+
+	test("/api/diff on an unknown id is a 404 JSON", async () => {
+		const r = await fetch(`${BASE}/api/diff?id=NOPE`);
+		expect(r.status).toBe(404);
+		expect((await r.json()).ok).toBe(false);
+	});
+
+	test("/api/diff: stat + diff for a seeded suspenders/<id> branch", async () => {
+		const g = (args: string[], cwd = GREPO) => {
+			const p = Bun.spawnSync(["/usr/bin/git", ...args], {
+				cwd,
+				env,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			return { out: p.stdout.toString(), code: p.exitCode };
+		};
+		expect(g(["init", "-b", "main"]).code).toBe(0);
+		g(["config", "user.email", "t@threads.dk"]);
+		g(["config", "user.name", "t"]);
+		await Bun.write(join(GREPO, "f.txt"), "one\n");
+		g(["add", "."]);
+		expect(g(["commit", "-m", "base"]).code).toBe(0);
+		// a lane worktree: branch suspenders/WDIFF1 off main, edit, commit
+		expect(
+			g(["worktree", "add", "-b", "suspenders/WDIFF1", join(GREPO, "wt")]).code,
+		).toBe(0);
+		await Bun.write(join(GREPO, "wt", "f.txt"), "one\ntwo\n");
+		expect(g(["add", "."], join(GREPO, "wt")).code).toBe(0);
+		expect(g(["commit", "-m", "lane change"], join(GREPO, "wt")).code).toBe(0);
+		// the board resolves the item's repo from work_items.project — insert
+		// the row directly (GREPO, not the empty-.git REPO fixture)
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4000");
+		db.query(
+			"INSERT INTO work_items (project, id, title, state, owner_sid, created_by, created_at, updated_at) VALUES (?, 'WDIFF1', 'diff demo', 'CLAIMED', 'board-lane', 'test', ?, ?)",
+		).run(GREPO, Date.now(), Date.now());
+		db.close();
+		const r = await fetch(`${BASE}/api/diff?id=WDIFF1`);
+		expect(r.status).toBe(200);
+		const j = await r.json();
+		expect(j.ok).toBe(true);
+		expect(j.branch).toBe("suspenders/WDIFF1");
+		expect(j.base).toMatch(/^[0-9a-f]{40,64}$/);
+		expect(j.stat).toContain("f.txt");
+		expect(j.diff).toContain("+two");
+	});
+	test("/api/comment routes a review note to the owning lane over coord", async () => {
+		const sent = await post("/api/comment", {
+			id: "WDIFF1",
+			file: "f.txt",
+			line: "2",
+			note: "why two?",
+		});
+		expect(sent.status).toBe(200);
+		expect(sent.json.ok).toBe(true);
+		expect(sent.json.to).toBe("board-lane");
+		// the emit rides coord — the NOTE lands in the lane's inbox events
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4000");
+		const ev = db
+			.query(
+				"SELECT payload FROM events WHERE kind = 'NOTE' AND target = 'board-lane' ORDER BY id DESC LIMIT 1",
+			)
+			.get() as { payload: string };
+		db.close();
+		expect(ev.payload).toContain("f.txt:2");
+		expect(ev.payload).toContain("why two?");
+	});
+	test("/api/comment validation: missing fields 400, unknown id 404, ownerless 404, content-type 415", async () => {
+		expect(
+			(await post("/api/comment", { id: "WDIFF1", file: "f.txt", line: "2" }))
+				.status,
+		).toBe(400);
+		// unknown id → 404
+		expect(
+			(
+				await post("/api/comment", {
+					id: "NOPE",
+					file: "f.txt",
+					line: "2",
+					note: "x",
+				})
+			).status,
+		).toBe(404);
+		// ownerless item — no lane to route to
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		db.query(
+			"INSERT INTO work_items (project, id, title, state, owner_sid, created_by, created_at, updated_at) VALUES (?, 'WDIFF2', 'ownerless', 'READY', NULL, 'test', ?, ?)",
+		).run(GREPO, Date.now(), Date.now());
+		db.close();
+		const orphan = await post("/api/comment", {
+			id: "WDIFF2",
+			file: "f.txt",
+			line: "1",
+			note: "x",
+		});
+		expect(orphan.status).toBe(404);
+		expect(orphan.json.error).toContain("no owning lane");
+		const plain = await fetch(`${BASE}/api/comment`, {
+			method: "POST",
+			headers: { "content-type": "text/plain" },
+			body: '{"id":"WDIFF1","file":"f.txt","line":"1","note":"x"}',
+		});
+		expect(plain.status).toBe(415);
 	});
 });
