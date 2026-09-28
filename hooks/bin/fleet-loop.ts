@@ -241,11 +241,9 @@ if (MODE === "dispatch") {
 	const branch = `lane/${sid}`;
 	const wt = `${REPO}/.worktrees/${sid}`;
 	if (existsSync(wt)) {
-		console.error(
-			`worktree already exists: ${wt} — a lane may own it; inspect first`,
-		);
+		console.error(`lane ${sid} already running (pid ${live.pid})`);
 		process.exit(1);
-	}
+	} // an existing worktree without a live lane is reused
 	const runTool = (args: string[]): { code: number; out: string } => {
 		const p = Bun.spawnSync([process.execPath, ...args], {
 			cwd: REPO,
