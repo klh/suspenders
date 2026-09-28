@@ -122,6 +122,44 @@ back. The merge goes through fleet-loop's shared `mergeOne` (MERGE_HEAD abort,
 ladder timeout, FAIL tail, 3-strike park, retire), so board-shipped branches
 obey the same discipline as loop merges; outcomes land in `<repo>/.fleet/loop.log`.
 
+## GET /api/tail (W76)
+
+Live lane tail for the drawer. `{ id }` resolves the owning lane via
+`work_items.owner_sid`; reads the lane's stdout/stderr log
+(`<repo>/.fleet/lane-<sid>.log` — fleet-loop's declared live-tail surface,
+last 32KB) and the session transcript's 12 most recent assistant text/tool
+blocks. Validation — first failure wins:
+
+| condition               | status |
+| ----------------------- | ------ |
+| bad item id             | 404    |
+| unknown work item       | 404    |
+| item has no owning lane | 404    |
+
+Success: `{ ok, id, sid, log: { size, mtime, truncated, text } | null,
+transcript: { text, ts } | null, recent: [{ text, ts }…] }`. `log` is null
+until the lane has written output; `recent` is newest-last. `claude -p`
+buffers stdout until the run finishes — the transcript is what makes the
+window live for a RUNNING claude lane; the log carries finished runs and
+codex's streaming output. The UI prefers the log when non-empty, else the
+transcript lines, else "(no lane output yet)".
+
+## POST /api/message (W76)
+
+`{ id, note }` required (note capped at 2000). Message-to-lane from the
+board: a coord NOTE routed to the item's owning lane, emitted as the
+published coordinator identity (fact `coordinator.sid`; fallback
+`fleet-board` when the fact is unset). Same guards as /api/comment. First
+failure wins:
+
+| condition               | status |
+| ----------------------- | ------ |
+| missing `id` or `note`  | 400    |
+| unknown work item       | 404    |
+| item has no owning lane | 404    |
+
+Success: `{ ok, to, as }` — `as` reports the identity the NOTE carried.
+
 ## Demo mode — `--demo` CLI flag
 
 `fleet-board.ts --demo` seeds an idempotent demo partition before serving (skip when

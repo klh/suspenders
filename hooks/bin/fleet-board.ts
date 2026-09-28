@@ -103,6 +103,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - GET /api/activity   newest-first coord bus feed (?project=<path>&limit=<n>; default 80, cap 300)
 - GET /api/setup      advisory wiring checks (hooks, monitor agent, advice LLM, bind)
 - GET /api/diff       per-item branch diff for the drawer: repo + branch suspenders/<id> (worktree.ts naming), base = merge-base with main (fallback master); JSON {ok,id,branch,base,stat,diff}, patch tail-capped at 200KB
+- GET /api/tail       live lane tail for the drawer: the owning lane's .fleet/lane-<sid>.log (last 32KB) + transcript recent lines; JSON {ok,id,sid,log,transcript,recent}
 - GET /llms.txt       this file
 
 ## Write endpoints (human at the board; origin/host guarded)
@@ -111,6 +112,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/ack       dismiss an open fork (state to CANCELLED, idempotent)
 - POST /api/advise    fire the advice worker for a fork (async; lands as fact advice.<id>)
 - POST /api/comment   route a review line-comment to a work item's owning lane (coord NOTE; id, file, line, note required — note capped at 2000)
+- POST /api/message   message a work item's owning lane as the coordinator (coord NOTE; id, note required — note capped at 2000)
 - POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not READY, demo, or claude missing)
 - POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, or while a lane lives)
 
@@ -598,15 +600,24 @@ const payloadOf = (raw: string | null): Record<string, unknown> => {
 
 const TAIL_BYTES = 32 * 1024;
 const TAIL_MAX = 110;
+const LANE_TAIL_BYTES = 32 * 1024;
 function transcriptTail(
 	sid: string | null | undefined,
 ): { text: string; ts: string | null } | null {
-	if (!sid) return null;
+	return transcriptTailAll(sid, 1)[0] ?? null;
+}
+// newest-last list of the session's latest assistant text / tool blocks.
+// max=1 reproduces the kanban-card tail contract (the single last block).
+function transcriptTailAll(
+	sid: string | null | undefined,
+	max: number,
+): { text: string; ts: string | null }[] {
+	if (!sid) return [];
 	const row = db
 		.query("SELECT transcript_path FROM sessions WHERE sid = ?")
 		.get(sid) as { transcript_path: string | null } | null;
 	const path = row?.transcript_path;
-	if (!path || !existsSync(path) || !statSync(path).size) return null;
+	if (!path || !existsSync(path) || !statSync(path).size) return [];
 	const size = statSync(path).size;
 	const start = Math.max(0, size - TAIL_BYTES);
 	const len = size - start;
@@ -616,11 +627,12 @@ function transcriptTail(
 		readSync(fd, buf, 0, len, start);
 		closeSync(fd);
 	} catch {
-		return null;
+		return [];
 	}
 	const lines = buf.toString("utf8").split("\n");
 	if (start > 0) lines.shift(); // first line may be a partial record
-	for (let i = lines.length - 1; i >= 0; i--) {
+	const out: { text: string; ts: string | null }[] = [];
+	for (let i = lines.length - 1; i >= 0 && out.length < max; i--) {
 		const line = lines[i].trim();
 		if (!line) continue;
 		let j:
@@ -644,15 +656,15 @@ function transcriptTail(
 		}
 		const msg = j?.message;
 		if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
-		for (let k = msg.content.length - 1; k >= 0; k--) {
+		for (let k = msg.content.length - 1; k >= 0 && out.length < max; k--) {
 			const b = msg.content[k];
 			if (b?.type === "text" && typeof b.text === "string" && b.text.trim())
-				return {
+				out.push({
 					text: b.text.trim().replace(/\s+/g, " ").slice(0, TAIL_MAX),
 					ts: j.timestamp ?? null,
-				};
-			if (b?.type === "tool_use" && b.name)
-				return {
+				});
+			else if (b?.type === "tool_use" && b.name)
+				out.push({
 					text: `→ ${b.name}: ${String(
 						b.input?.command ??
 							b.input?.file_path ??
@@ -663,10 +675,10 @@ function transcriptTail(
 						.replace(/\s+/g, " ")
 						.slice(0, TAIL_MAX - 3)}`,
 					ts: j.timestamp ?? null,
-				};
+				});
 		}
 	}
-	return null;
+	return out;
 }
 
 // done→ready auto-start (W50): newest work.ready event per item, keyed by
@@ -1678,6 +1690,67 @@ Bun.serve({
 					: full;
 			return json({ ok: true, id, branch, base, stat, diff });
 		}
+		if (url.pathname === "/api/tail") {
+			// W76 — live lane tail for the drawer: the owning lane's
+			// stdout/stderr log (.fleet/lane-<sid>.log — fleet-loop's declared
+			// live-tail surface) plus the session transcript's recent assistant
+			// blocks. `claude -p` buffers stdout until the run finishes, so the
+			// transcript is what makes the window live for a RUNNING claude
+			// lane; the log carries finished runs and codex's streaming output.
+			const id = url.searchParams.get("id") ?? "";
+			if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id))
+				return json({ ok: false, error: "bad item id" }, 404);
+			const w = db
+				.query(
+					"SELECT project, owner_sid FROM work_items WHERE id = ? ORDER BY updated_at DESC LIMIT 1",
+				)
+				.get(id) as { project: string; owner_sid: string | null } | null;
+			if (!w)
+				return json({ ok: false, error: `unknown work item: ${id}` }, 404);
+			if (!w.owner_sid)
+				return json(
+					{ ok: false, error: `work item ${id} has no owning lane` },
+					404,
+				);
+			const repo = w.project.replace(/\/\.git$/, "");
+			const logFile = `${repo}/.fleet/lane-${w.owner_sid}.log`;
+			let log: {
+				size: number;
+				mtime: number;
+				truncated: boolean;
+				text: string;
+			} | null = null;
+			if (existsSync(logFile)) {
+				const size = statSync(logFile).size;
+				const start = Math.max(0, size - LANE_TAIL_BYTES);
+				const len = size - start;
+				const buf = Buffer.alloc(len);
+				let text = "";
+				try {
+					const fd = openSync(logFile, "r");
+					readSync(fd, buf, 0, len, start);
+					closeSync(fd);
+					text = buf.toString("utf8");
+				} catch {
+					// a lane appending mid-read — the next poll retries
+				}
+				log = {
+					size,
+					mtime: statSync(logFile).mtimeMs,
+					truncated: start > 0,
+					text,
+				};
+			}
+			const recent = transcriptTailAll(w.owner_sid, 12).reverse();
+			return json({
+				ok: true,
+				id,
+				sid: w.owner_sid,
+				log,
+				transcript: transcriptTail(w.owner_sid),
+				recent,
+			});
+		}
 		if (req.method === "POST" && url.pathname === "/api/answer") {
 			// the board's single write: relay a human answer into the event bus.
 			// Idempotency per docs/decisions-api.md: the client echoes the
@@ -1887,6 +1960,65 @@ Bun.serve({
 					500,
 				);
 			return json({ ok: true, to: w.owner_sid });
+		}
+		if (req.method === "POST" && url.pathname === "/api/message") {
+			// W76 — message-to-lane: a general board note routed to the owning
+			// lane over coord, emitted as the published coordinator identity
+			// (fact `coordinator.sid`; fallback `fleet-board` when unset so the
+			// route degrades to the /api/comment identity, never to "unknown").
+			// Mirrors /api/comment's guards and emit shape. Unknown or
+			// ownerless item = 404.
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			const parsed = await readJson(req);
+			if (!parsed.ok) return parsed.resp;
+			const id = String(parsed.body?.id ?? "");
+			const note = String(parsed.body?.note ?? "")
+				.trim()
+				.slice(0, 2000);
+			if (!id || !note)
+				return json({ ok: false, error: "missing id or note" }, 400);
+			const w = db
+				.query(
+					"SELECT owner_sid FROM work_items WHERE id = ? ORDER BY updated_at DESC LIMIT 1",
+				)
+				.get(id) as { owner_sid: string | null } | null;
+			if (!w)
+				return json({ ok: false, error: `unknown work item: ${id}` }, 404);
+			if (!w.owner_sid)
+				return json(
+					{ ok: false, error: `work item ${id} has no owning lane` },
+					404,
+				);
+			const as =
+				(
+					db
+						.query("SELECT value FROM facts WHERE key = 'coordinator.sid'")
+						.get() as { value: string } | null
+				)?.value ?? "fleet-board";
+			const full = `board ${id} — ${note}`;
+			const p = Bun.spawnSync(
+				[
+					process.execPath,
+					CLI("coord.ts"),
+					"emit",
+					"NOTE",
+					"--to",
+					w.owner_sid,
+					"--note",
+					full,
+					"--as",
+					as,
+				],
+				{ stdout: "pipe", stderr: "pipe" },
+			);
+			const out = `${p.stdout.toString()} ${p.stderr.toString()}`.trim();
+			if (p.exitCode !== 0)
+				return json(
+					{ ok: false, output: out.slice(0, 400), to: w.owner_sid },
+					500,
+				);
+			return json({ ok: true, to: w.owner_sid, as });
 		}
 		if (req.method === "POST" && url.pathname === "/api/start") {
 			// W65 — start-on-READY: the board dispatches a fresh lane on a READY

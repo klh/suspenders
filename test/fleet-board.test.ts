@@ -1345,7 +1345,114 @@ describe("W55 per-item diff + review comments", () => {
 	});
 });
 
-// W64 — one-click ship: /api/ship guards + required .fleet/ship.json ladder,
+// W76 — live lane tail (lane log + transcript fallback) and message-to-lane
+// (coord NOTE as the published coordinator identity, fallback fleet-board).
+describe("W76 lane tail + message-to-lane", () => {
+	test("served page wires the tail toggle + message input; llms.txt lists both routes", async () => {
+		const page = await (await fetch(`${BASE}/`)).text();
+		expect(page).toContain("tailbtn");
+		expect(page).toContain("lanemsg");
+		expect(page).toContain("/api/tail");
+		expect(page).toContain("/api/message");
+		const txt = await (await fetch(`${BASE}/llms.txt`)).text();
+		expect(txt).toContain("/api/tail");
+		expect(txt).toContain("/api/message");
+	});
+
+	test("/api/tail: lane log text + transcript fields for a claimed item", async () => {
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		db.query(
+			"INSERT INTO work_items (project, id, title, state, owner_sid, created_by, created_at, updated_at) VALUES (?, 'WTAIL1', 'tail demo', 'CLAIMED', 'board-lane', 'test', ?, ?)",
+		).run(GREPO, Date.now(), Date.now());
+		db.close();
+		await Bun.write(
+			join(GREPO, ".fleet", "lane-board-lane.log"),
+			"booting lane...\nbuilding the thing\nDONE abc1234\n",
+		);
+		const r = await fetch(`${BASE}/api/tail?id=WTAIL1`);
+		expect(r.status).toBe(200);
+		const j = await r.json();
+		expect(j.ok).toBe(true);
+		expect(j.sid).toBe("board-lane");
+		expect(j.log.text).toContain("building the thing");
+		expect(j.log.truncated).toBe(false);
+		expect(Array.isArray(j.recent)).toBe(true);
+	});
+
+	test("/api/tail validation: unknown 404, ownerless 404, bad id 404", async () => {
+		expect((await fetch(`${BASE}/api/tail?id=NOPE`)).status).toBe(404);
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		db.query(
+			"INSERT INTO work_items (project, id, title, state, owner_sid, created_by, created_at, updated_at) VALUES (?, 'WTAIL2', 'ownerless tail', 'READY', NULL, 'test', ?, ?)",
+		).run(GREPO, Date.now(), Date.now());
+		db.close();
+		const orphan = await fetch(`${BASE}/api/tail?id=WTAIL2`);
+		expect(orphan.status).toBe(404);
+		expect((await orphan.json()).error).toContain("no owning lane");
+		expect((await fetch(`${BASE}/api/tail?id=..%2Fx`)).status).toBe(404);
+	});
+
+	test("/api/message routes to the owning lane as fleet-board when no coordinator fact", async () => {
+		const sent = await post("/api/message", {
+			id: "WTAIL1",
+			note: "pause and wait for the owner",
+		});
+		expect(sent.status).toBe(200);
+		expect(sent.json.ok).toBe(true);
+		expect(sent.json.to).toBe("board-lane");
+		expect(sent.json.as).toBe("fleet-board");
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		const ev = db
+			.query(
+				"SELECT source, payload FROM events WHERE kind = 'NOTE' AND target = 'board-lane' ORDER BY id DESC LIMIT 1",
+			)
+			.get() as { source: string; payload: string };
+		db.close();
+		expect(ev.source).toBe("fleet-board");
+		expect(ev.payload).toContain("board WTAIL1 —");
+		expect(ev.payload).toContain("pause and wait");
+	});
+
+	test("/api/message: coordinator identity when the fact is set; validation 400/404", async () => {
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		db.query(
+			"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES ('coordinator.sid', 'coord-test', 'test', 1, ?)",
+		).run(Date.now());
+		db.close();
+		const sent = await post("/api/message", { id: "WTAIL1", note: "second" });
+		expect(sent.json.ok).toBe(true);
+		expect(sent.json.as).toBe("coord-test");
+		const db2 = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db2.run("PRAGMA busy_timeout = 4500");
+		const ev = db2
+			.query(
+				"SELECT source FROM events WHERE kind = 'NOTE' AND target = 'board-lane' ORDER BY id DESC LIMIT 1",
+			)
+			.get() as { source: string };
+		db2.close();
+		expect(ev.source).toBe("coord-test");
+	});
+	test("/api/message validation: missing 400, unknown 404, ownerless 404, plain 415", async () => {
+		expect((await post("/api/message", { id: "WTAIL1" })).status).toBe(400);
+		expect((await post("/api/message", { id: "NOPE", note: "x" })).status).toBe(
+			404,
+		);
+		expect(
+			(await post("/api/message", { id: "WTAIL2", note: "x" })).status,
+		).toBe(404);
+		const plain = await fetch(`${BASE}/api/message`, {
+			method: "POST",
+			headers: { "content-type": "text/plain" },
+			body: '{"id":"WTAIL1","note":"x"}',
+		});
+		expect(plain.status).toBe(415);
+	});
+});
+
 // then detached `fleet-loop ship`; the E2E waits for the MERGED log line.
 describe("W64 ship trigger", () => {
 	const g = (args: string[], cwd = GREPO) =>
