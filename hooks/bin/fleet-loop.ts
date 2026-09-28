@@ -29,9 +29,13 @@ import {
 
 const argv = process.argv.slice(2);
 const MODE = argv[0];
-if (!MODE || !["once", "watch"].includes(MODE) || !argv.includes("--repo")) {
+if (
+	!MODE ||
+	!["once", "watch", "lanes"].includes(MODE) ||
+	!argv.includes("--repo")
+) {
 	console.error(
-		`usage: fleet-loop once|watch --repo <dir> [--glob lane/autow*] [--main main]\n` +
+		`usage: fleet-loop once|watch|lanes --repo <dir> [--glob lane/autow*] [--main main]\n` +
 			`          [--ladder <cmd template with {branch}>]  default: plain git merge --no-ff\n` +
 			`          [--ladder-timeout 10]                    minutes; watchdog-kills a hung ladder\n` +
 			`          [--dispatch-cmd <template>]              optional policy script\n` +
@@ -222,6 +226,27 @@ async function cycle(): Promise<void> {
 
 	// 3. refill the fleet — policy lives in the repo's dispatch script
 	if (DISPATCH) runTemplate(DISPATCH, "", LADDER_TIMEOUT_MS);
+}
+
+// lanes: the liveness table from .fleet/lanes.json — who's alive, who died
+// without the loop noticing (the check gaps ran ad-hoc after the flip)
+if (MODE === "lanes") {
+	const rows = lanes();
+	if (rows.length === 0) {
+		console.log("no lanes in .fleet/lanes.json");
+		process.exit(0);
+	}
+	for (const l of rows) {
+		let alive = false;
+		try {
+			process.kill(l.pid, 0);
+			alive = true;
+		} catch {}
+		console.log(
+			`${alive ? "ALIVE" : "dead "}  ${l.item.padEnd(10)} ${l.sid.padEnd(16)} pid ${String(l.pid).padEnd(8)} ${l.branch}`,
+		);
+	}
+	process.exit(0);
 }
 
 if (MODE === "once") {
