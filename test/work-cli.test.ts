@@ -530,3 +530,60 @@ describe("migrate-ledger", () => {
 		expect(work("migrate-ledger", join(REPO, "NOPE.md")).code).toBe(2);
 	});
 });
+
+describe("dep-merge ancestor gate (W60)", () => {
+	const g = (...a: string[]) =>
+		Bun.spawnSync(["git", "-C", REPO, ...a], {
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+	const commit = (msg: string) =>
+		g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg);
+
+	test("DONE dep with a sha not on main gates ready/take/done; merge opens it; unverifiable sha fails open", () => {
+		g("symbolic-ref", "HEAD", "refs/heads/main");
+		writeFileSync(join(REPO, "w60-base.txt"), "base");
+		g("add", "-A");
+		commit("w60 base");
+		g("checkout", "-q", "-b", "w60-side");
+		writeFileSync(join(REPO, "w60-side.txt"), "side");
+		g("add", "-A");
+		commit("w60 side");
+		const sha = g("rev-parse", "HEAD").stdout.toString().trim();
+		g("checkout", "-q", "main");
+
+		const dep = idOf(work("add", "dep lane (merge gate)").out);
+		const depOn = idOf(work("add", "dependent lane (merge gate)").out);
+		expect(work("block", depOn, "--on", dep).code).toBe(0);
+
+		// dep lands DONE with the unmerged sha — done output names the gated dependent
+		expect(work("take", dep, "--as", "lane-w60").code).toBe(0);
+		const d = work("done", dep, "--sha", sha);
+		expect(d.code).toBe(0);
+		expect(d.out).toContain(`dep ${dep} done but unmerged (sha not on main)`);
+		expect(d.out).toContain(`${depOn} stays gated`);
+
+		// take refuses with the spec-exact note
+		const t = work("take", depOn, "--as", "lane-w60b");
+		expect(t.code).toBe(2);
+		expect(t.err).toContain(`dep ${dep} done but unmerged (sha not on main)`);
+
+		// ready excludes the item and prints the why-note
+		expect(work("ready").out).toContain(`${depOn} stays gated`);
+		expect(work("ready").out).not.toContain(`· ${depOn}`);
+
+		// fail-open: an unverifiable sha (unknown object) is NOT a verified
+		// negative — the dep counts and the dependent unblocks
+		const dep2 = idOf(work("add", "failopen dep lane").out);
+		const depOn2 = idOf(work("add", "failopen dependent lane").out);
+		expect(work("block", depOn2, "--on", dep2).code).toBe(0);
+		expect(work("take", dep2, "--as", "lane-w60c").code).toBe(0);
+		const d2 = work("done", dep2, "--sha", "0123456789abcdef0123456987654321");
+		expect(d2.out).toContain("startable now");
+		expect(work("take", depOn2, "--as", "lane-w60d").code).toBe(0);
+
+		// merging the side branch makes the sha an ancestor — gate opens
+		g("merge", "-q", "--no-edit", "w60-side");
+		expect(work("take", depOn, "--as", "lane-w60e").code).toBe(0);
+	});
+});

@@ -460,16 +460,76 @@ function emit(
 		);
 }
 
-function deps(id: string): { depends_on: string; state: string | null }[] {
+function deps(
+	id: string,
+): { depends_on: string; state: string | null; result_sha: string | null }[] {
 	return db()
 		.query(
-			"SELECT d.depends_on, w.state FROM work_deps d LEFT JOIN work_items w ON w.id = d.depends_on AND w.project = d.project WHERE d.project = ? AND d.work_id = ?",
+			"SELECT d.depends_on, w.state, w.result_sha FROM work_deps d LEFT JOIN work_items w ON w.id = d.depends_on AND w.project = d.project WHERE d.project = ? AND d.work_id = ?",
 		)
-		.all(PROJECT, id) as { depends_on: string; state: string | null }[];
+		.all(PROJECT, id) as {
+		depends_on: string;
+		state: string | null;
+		result_sha: string | null;
+	}[];
+}
+
+// ---- W60 dep-merge ancestor gate ------------------------------------------
+// A dependency's DONE only unblocks when its result_sha is actually an
+// ANCESTOR of the integration branch (main) — the 2026-09-26 gaps incident
+// had W263 marked DONE with a sha living only on its lane branch, and the
+// dependent built against that ghost. done ≠ merged.
+//
+// Fail-open doctrine (lookup failure is never death): no project worktree,
+// missing git, or a git error (unknown sha/ref) all read as "cannot know" —
+// the dep counts. Only a VERIFIED negative (`git merge-base --is-ancestor`
+// exit 1) gates. Spawned with an argument array; exit 1 is expected control
+// flow, never an error.
+const _ancestry = new Map<string, boolean | null>(); // per-run memo: one git probe per sha
+
+function projectWorktree(): string | null {
+	// PROJECT is the git COMMON dir (<repo>/.git for a normal checkout) — the
+	// integration worktree lives beside it. Bare/odd layouts have none → null
+	// → fail-open (same suffix logic as mirrorPath()).
+	if (PROJECT.endsWith("/.git")) return PROJECT.slice(0, -"/.git".length);
+	return null;
+}
+
+function shaOnMain(sha: string): boolean | null {
+	const wt = projectWorktree();
+	if (!wt || !existsSync(wt)) return null; // no worktree to ask — fail-open
+	const hit = _ancestry.get(sha);
+	if (hit !== undefined) return hit;
+	const r = Bun.spawnSync(
+		["git", "-C", wt, "merge-base", "--is-ancestor", sha, "main"],
+		{ stdout: "ignore", stderr: "ignore" },
+	);
+	const v = r.exitCode === 0 ? true : r.exitCode === 1 ? false : null; // >1 = git trouble — never a verdict
+	_ancestry.set(sha, v);
+	return v;
+}
+
+function unmergedDeps(id: string): { dep: string; sha: string }[] {
+	const out: { dep: string; sha: string }[] = [];
+	for (const d of deps(id)) {
+		if (d.state !== "DONE" || !d.result_sha) continue; // no sha recorded — nothing to verify, DONE counts
+		if (shaOnMain(d.result_sha) === false)
+			out.push({ dep: d.depends_on, sha: d.result_sha });
+	}
+	return out;
+}
+
+function unmergedNote(id: string): string | null {
+	const u = unmergedDeps(id);
+	return u.length
+		? u
+				.map((x) => `dep ${x.dep} done but unmerged (sha not on main)`)
+				.join("; ")
+		: null;
 }
 
 function depsMet(id: string): boolean {
-	return deps(id).every((d) => d.state === "DONE");
+	return deps(id).every((d) => d.state === "DONE") && !unmergedDeps(id).length;
 }
 
 // reaches(id, target): would a dependency edge id→target create/extend a cycle?
@@ -513,16 +573,28 @@ function rollUp(id: string): void {
 // in READY whose deps are now all DONE is startable — emit work.ready per such
 // item (payload note "unblocked by <id>") so the board flags it ▶ and a lane
 // can self-serve the chain without re-deriving it. Same gate as take: depsMet.
-function freeDependents(id: string): string[] {
+function freeDependents(id: string): {
+	freed: string[];
+	gated: { id: string; note: string }[];
+} {
 	const waiting = db()
 		.query(
 			"SELECT d.work_id FROM work_deps d JOIN work_items w ON w.id = d.work_id AND w.project = d.project WHERE d.project = ? AND d.depends_on = ? AND w.state = 'READY'",
 		)
 		.all(PROJECT, id) as { work_id: string }[];
-	const freed = waiting.map((r) => r.work_id).filter((wid) => depsMet(wid));
+	const freed: string[] = [];
+	const gated: { id: string; note: string }[] = [];
+	for (const { work_id: wid } of waiting) {
+		const ds = deps(wid);
+		if (!ds.every((d) => d.state === "DONE")) continue; // not ready anyway — unchanged behavior
+		const note = unmergedNote(wid);
+		if (note)
+			gated.push({ id: wid, note }); // W60: deps done but sha unmerged — stays gated
+		else freed.push(wid);
+	}
 	for (const wid of freed)
 		emit("work.ready", wid, { unblocked_by: id, note: `unblocked by ${id}` });
-	return freed;
+	return { freed, gated };
 }
 
 function nextChildId(parent: string): string {
@@ -734,14 +806,19 @@ if (cmd === "add") {
 } else if (cmd === "list" || cmd === "ready") {
 	const mode = cmd === "ready" ? "ready" : (rest[0] ?? "open");
 	let rows: Item[];
+	const unmergedNotes: string[] = [];
 	if (mode === "ready") {
-		rows = (
-			db()
-				.query(
-					"SELECT * FROM work_items WHERE project = ? AND state = 'READY' ORDER BY priority DESC, id",
-				)
-				.all(PROJECT) as Item[]
-		).filter((r) => depsMet(r.id as string));
+		const all = db()
+			.query(
+				"SELECT * FROM work_items WHERE project = ? AND state = 'READY' ORDER BY priority DESC, id",
+			)
+			.all(PROJECT) as Item[];
+		rows = all.filter((r) => depsMet(r.id as string));
+		for (const r of all) {
+			if (rows.includes(r)) continue;
+			const note = unmergedNote(r.id as string);
+			if (note) unmergedNotes.push(`${note} — ${r.id} stays gated`);
+		}
 	} else if (mode === "all") {
 		rows = db()
 			.query("SELECT * FROM work_items WHERE project = ? ORDER BY id")
@@ -754,6 +831,7 @@ if (cmd === "add") {
 			.all(PROJECT) as Item[];
 	}
 	console.log(rows.map(renderRow).join("\n") || dim("(none)"));
+	for (const n of unmergedNotes) console.log(dim(`  ${n}`));
 } else if (cmd === "mine") {
 	const as = flag("--as");
 	if (!as) die("usage: mine --as <sid>");
@@ -830,13 +908,15 @@ if (cmd === "add") {
 		die(
 			`${id} requires [${missing.join(",")}] — session ${as.slice(0, 8)} advertises [${caps.join(",") || "none"}] — dispatch to a capable agent`,
 		);
-	if (!depsMet(id))
-		die(
-			`${id} has unmet dependencies: ${deps(id)
-				.filter((d) => d.state !== "DONE")
-				.map((d) => d.depends_on)
-				.join(", ")}`,
+	if (!depsMet(id)) {
+		const unmet = deps(id)
+			.filter((d) => d.state !== "DONE")
+			.map((d) => d.depends_on);
+		const unmerged = unmergedDeps(id).map(
+			(x) => `dep ${x.dep} done but unmerged (sha not on main)`,
 		);
+		die(`${id} has unmet dependencies: ${[...unmet, ...unmerged].join(", ")}`);
+	}
 	// compare-and-set: two lanes racing for the last READY item → exactly one wins
 	const r = db()
 		.query(
@@ -905,15 +985,15 @@ if (cmd === "add") {
 	const tx = db().transaction(() => {
 		setState(id, "DONE", null, sha);
 		emit("work.done", id, { sha: sha ?? "" });
-		const freed = freeDependents(id);
+		const unblocked = freeDependents(id);
 		releaseClaim(
 			(it.owner_sid as string) ?? "",
 			it.scope as string | null,
 			it.id as string,
 		);
-		return freed;
+		return unblocked;
 	});
-	const freed = tx();
+	const { freed, gated } = tx();
 	rollUp(id);
 	const p = it.parent_id;
 	if (p) rollUp(p as string);
@@ -923,6 +1003,10 @@ if (cmd === "add") {
 	if (freed.length)
 		console.log(
 			`${amber("▶")} startable now: ${cyan(freed.join(", "))} ${dim(`— unblocked by ${id}`)}`,
+		);
+	for (const g of gated)
+		console.log(
+			`${amber("●")} ${g.note} — ${cyan(g.id)} stays gated (W60 dep-merge gate)`,
 		);
 	// W52: retire the item's per-item worktree if it has one (clean → removed,
 	// dirty → kept with a note; branch suspenders/<id> always survives)
