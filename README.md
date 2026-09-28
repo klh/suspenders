@@ -119,7 +119,7 @@ A worked session — bootstrap, register work, capability-gated dispatch, consul
 
 ## Status
 
-In production on a multi-repo fleet (macOS + Bun + Claude Code); schema v5. [speedy-claude](https://github.com/klh/speedy) installs suspenders as its control plane.
+In production on a multi-repo fleet (macOS + Bun + Claude Code); schema v5. [speedy](https://github.com/klh/speedy) installs suspenders as its control plane.
 
 ## Licensing
 
