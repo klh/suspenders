@@ -25,6 +25,39 @@ import { HTML } from "./fleet-board-html.ts";
 // sibling CLIs resolve relative to this file — the board is relocatable
 const CLI = (f: string) => new URL(f, import.meta.url).pathname;
 
+// row shapes the board SELECTs out of governor.db — SQLite rows are untyped,
+// so every query asserts its shape once (schema: hooks/lib/govdb.ts). A
+// subset query still asserts to the full row; the extra columns are absent.
+interface EventRow {
+	id: number;
+	ts: number;
+	source: string;
+	kind: string;
+	scope: string | null;
+	payload: string | null;
+	target: string | null;
+}
+
+interface WorkItemRow {
+	project: string;
+	id: string;
+	parent_id: string | null;
+	title: string;
+	description: string | null;
+	state: string;
+	priority: number;
+	owner_sid: string | null;
+	created_by: string | null;
+	scope: string | null;
+	why_parallel: string | null;
+	result_sha: string | null;
+	required: number;
+	created_at: number;
+	updated_at: number;
+	requires: string | null;
+	origin: string | null;
+}
+
 const db = openGovernorDb();
 const PORT =
 	Number(process.argv[process.argv.indexOf("--port") + 1] ?? 7799) || 7799;
@@ -209,7 +242,7 @@ function normOptions(v: unknown): string {
 	}
 	if (!Array.isArray(v) || !v.length) return "";
 	return JSON.stringify(
-		v.slice(0, 8).map((o: any) =>
+		v.slice(0, 8).map((o) =>
 			typeof o === "string"
 				? { label: o, tradeoff: null }
 				: {
@@ -222,8 +255,11 @@ function normOptions(v: unknown): string {
 
 // enrichment straight off the (immutable) source event — task_id from
 // payload.work ONLY, never guessed from the note text
-function enrich(d: { event_id: number; target: string }, e: any): void {
-	let p: any = {};
+function enrich(
+	d: { event_id: number; target: string },
+	e: { source?: string | null; payload?: string | null } | null | undefined,
+): void {
+	let p: Record<string, unknown> = {};
 	try {
 		p = e?.payload ? JSON.parse(e.payload) : {};
 	} catch {}
@@ -261,7 +297,7 @@ function syncDecisions(): void {
 		.query(
 			"SELECT id, ts, source, target, payload FROM events WHERE kind LIKE 'NEED%' AND target IS NOT NULL AND id NOT IN (SELECT event_id FROM decisions) ORDER BY id",
 		)
-		.all() as any[]) {
+		.all() as EventRow[]) {
 		db.query(
 			"INSERT OR IGNORE INTO decisions (event_id, target, state, delivery, created_at, answer_token) VALUES (?, ?, 'OPEN', ?, ?, ?)",
 		).run(
@@ -285,7 +321,10 @@ function syncDecisions(): void {
 			d,
 			db
 				.query("SELECT source, payload FROM events WHERE id = ?")
-				.get(d.event_id),
+				.get(d.event_id) as {
+				source: string;
+				payload: string | null;
+			} | null,
 		);
 	}
 	// a decision addressed to a lane that died before pickup reads as FAILED
@@ -294,7 +333,7 @@ function syncDecisions(): void {
 	// all along — see targetAlive) repairs itself when the target shows life.
 	for (const d of db
 		.query("SELECT event_id, target FROM decisions WHERE state = 'OPEN'")
-		.all() as any[])
+		.all() as { event_id: number; target: string }[])
 		db.query("UPDATE decisions SET delivery = ? WHERE event_id = ?").run(
 			targetAlive(d.target, now) || pickedUp(d.event_id, d.target)
 				? "DELIVERED"
@@ -369,7 +408,9 @@ function writeGuard(req: Request, _url: URL): Response | null {
 // another site can't forge it cross-origin) and must parse.
 async function readJson(
 	req: Request,
-): Promise<{ ok: true; body: any } | { ok: false; resp: Response }> {
+): Promise<
+	{ ok: true; body: Record<string, unknown> } | { ok: false; resp: Response }
+> {
 	const ct = (req.headers.get("content-type") ?? "")
 		.split(";")[0]
 		.trim()
@@ -491,7 +532,9 @@ const failNote = (id: string): string | null => {
 				"SELECT payload FROM events WHERE kind = 'work.failed' AND json_extract(payload, '$.work') = ? ORDER BY id DESC LIMIT 1",
 			)
 			.get(id) as { payload: string | null } | null;
-		const note = r?.payload ? (JSON.parse(r.payload) as any).note : null;
+		const note = r?.payload
+			? (JSON.parse(r.payload) as { note?: unknown }).note
+			: null;
 		return note ? String(note).slice(0, 300) : null;
 	} catch {
 		return null;
@@ -545,7 +588,7 @@ function ownerLabel(sid: string | null | undefined): string | null {
 		: null;
 }
 
-const payloadOf = (raw: string | null): any => {
+const payloadOf = (raw: string | null): Record<string, unknown> => {
 	try {
 		return raw ? JSON.parse(raw) : {};
 	} catch {
@@ -580,7 +623,20 @@ function transcriptTail(
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i].trim();
 		if (!line) continue;
-		let j: any;
+		let j:
+			| {
+					timestamp?: string | null;
+					message?: {
+						role?: string;
+						content?: {
+							type?: string;
+							text?: string;
+							name?: string;
+							input?: Record<string, unknown> | null;
+						}[];
+					};
+			  }
+			| undefined;
 		try {
 			j = JSON.parse(line);
 		} catch {
@@ -622,7 +678,7 @@ function unblockedBy(): Map<string, string | null> {
 		.query(
 			"SELECT payload FROM events WHERE kind = 'work.ready' ORDER BY id DESC LIMIT 500",
 		)
-		.all() as any[]) {
+		.all() as { payload: string | null }[]) {
 		const pl = payloadOf(r.payload);
 		if (!pl?.work) continue;
 		const key = `${String(pl.project ?? "")}\u0000${String(pl.work)}`;
@@ -633,7 +689,7 @@ function unblockedBy(): Map<string, string | null> {
 }
 
 function taskShape(
-	w: any,
+	w: WorkItemRow,
 	openDecisions: number,
 	unblocked: Map<string, string | null> = new Map(),
 ): Record<string, unknown> {
@@ -674,7 +730,7 @@ function tasks(p: string | null): unknown[] {
 						`SELECT * FROM work_items WHERE ${where} ORDER BY updated_at DESC`,
 					)
 					.all()
-	) as any[];
+	) as WorkItemRow[];
 	const openByTask = new Map<string, number>();
 	for (const r of db
 		.query(
@@ -695,25 +751,26 @@ function tasks(p: string | null): unknown[] {
 // the drawer's event feed: last 50 events tied to the item — payload.work
 // match (project-stamped) or scope match, newest first
 function workEvents(p: string, id: string): unknown[] {
-	return db
-		.query(
-			`SELECT id, ts, source, kind, payload FROM events
-			WHERE (json_extract(payload, '$.work') = ? AND json_extract(payload, '$.project') = ?)
-				OR (scope = ? AND (json_extract(payload, '$.project') = ? OR json_extract(payload, '$.project') IS NULL))
-			ORDER BY id DESC LIMIT 50`,
-		)
-		.all(id, p, id, p)
-		.map((e: any) => {
-			const pl = payloadOf(e.payload);
-			return {
-				id: e.id,
-				ts: e.ts,
-				kind: e.kind,
-				source: e.source,
-				note: pl.note != null ? String(pl.note) : null,
-				sha: pl.sha != null ? String(pl.sha) : null,
-			};
-		});
+	return (
+		db
+			.query(
+				`SELECT id, ts, source, kind, payload FROM events
+				WHERE (json_extract(payload, '$.work') = ? AND json_extract(payload, '$.project') = ?)
+					OR (scope = ? AND (json_extract(payload, '$.project') = ? OR json_extract(payload, '$.project') IS NULL))
+				ORDER BY id DESC LIMIT 50`,
+			)
+			.all(id, p, id, p) as EventRow[]
+	).map((e) => {
+		const pl = payloadOf(e.payload);
+		return {
+			id: e.id,
+			ts: e.ts,
+			kind: e.kind,
+			source: e.source,
+			note: pl.note != null ? String(pl.note) : null,
+			sha: pl.sha != null ? String(pl.sha) : null,
+		};
+	});
 }
 
 // decisions linked to the item, any state — the drawer shows the full story
@@ -723,7 +780,12 @@ function taskDecisions(p: string, id: string): unknown[] {
 			.query(
 				"SELECT event_id, state, question, answer_note FROM decisions WHERE project = ? AND task_id = ? ORDER BY event_id DESC",
 			)
-			.all(p, id) as any[]
+			.all(p, id) as {
+			event_id: number;
+			state: string;
+			question: string | null;
+			answer_note: string | null;
+		}[]
 	).map((d) => ({
 		event_id: d.event_id,
 		state: d.state,
@@ -750,7 +812,7 @@ function activity(p: string | null, limit: number): unknown[] {
 						"SELECT id, ts, source, kind, payload, target FROM events ORDER BY id DESC LIMIT ?",
 					)
 					.all(limit)
-	) as any[];
+	) as EventRow[];
 	return evs.map((e) => {
 		const pl = payloadOf(e.payload);
 		return {
@@ -773,11 +835,11 @@ function settingsCommands(kind: string): string[] {
 	try {
 		const s = JSON.parse(
 			readFileSync(`${process.env.HOME}/.claude/settings.json`, "utf8"),
-		);
+		) as {
+			hooks?: Record<string, { hooks?: { command?: string }[] }[]>;
+		};
 		return (s?.hooks?.[kind] ?? [])
-			.flatMap((m: any) =>
-				(m?.hooks ?? []).map((h: any) => String(h?.command ?? "")),
-			)
+			.flatMap((m) => (m?.hooks ?? []).map((h) => String(h?.command ?? "")))
 			.map((c) => c.replaceAll("$HOME", process.env.HOME ?? "~"));
 	} catch {
 		return [];
@@ -866,21 +928,42 @@ async function setupChecks(): Promise<unknown[]> {
 	];
 }
 
-function sessions(): unknown[] {
-	return db
-		.query(
-			"SELECT sid, role, state, parent_sid, project, hb FROM sessions ORDER BY state, sid",
-		)
-		.all()
-		.map((s: any) => ({
-			sid: s.sid,
-			label: label(s.sid, s.role),
-			role: s.role,
-			state: s.state,
-			parent: s.parent_sid,
-			project: s.project,
-			hbAgo: ago(s.hb),
-		}));
+// session registry row + the API view the /api/data feed serves
+interface SessionRow {
+	sid: string;
+	role: string | null;
+	state: string;
+	parent_sid: string | null;
+	project: string | null;
+	hb: number;
+}
+
+interface SessionView {
+	sid: string;
+	label: string;
+	role: string | null;
+	state: string;
+	parent: string | null;
+	project: string | null;
+	hbAgo: number;
+}
+
+function sessions(): SessionView[] {
+	return (
+		db
+			.query(
+				"SELECT sid, role, state, parent_sid, project, hb FROM sessions ORDER BY state, sid",
+			)
+			.all() as SessionRow[]
+	).map((s) => ({
+		sid: s.sid,
+		label: label(s.sid, s.role),
+		role: s.role,
+		state: s.state,
+		parent: s.parent_sid,
+		project: s.project,
+		hbAgo: ago(s.hb),
+	}));
 }
 
 function board(): Record<string, unknown>[] {
@@ -894,7 +977,7 @@ function board(): Record<string, unknown>[] {
 			.query(
 				"SELECT id, state, owner_sid, origin, title, priority, result_sha, requires, updated_at FROM work_items WHERE project = ? ORDER BY priority DESC, id",
 			)
-			.all(project) as any[];
+			.all(project) as WorkItemRow[];
 		const doneIds = new Set(
 			items.filter((w) => w.state === "DONE").map((w) => w.id),
 		);
@@ -902,11 +985,15 @@ function board(): Record<string, unknown>[] {
 			.query(
 				"SELECT work_id, depends_on FROM work_deps WHERE project = ? AND depends_on NOT IN (SELECT id FROM work_items WHERE project = ? AND state = 'DONE')",
 			)
-			.all(project, project) as any[];
-		const blocked = new Set(depRows.map((r: any) => r.work_id));
+			.all(project, project) as { work_id: string; depends_on: string }[];
+		const blocked = new Set(depRows.map((r) => r.work_id));
 		const openDeps: Record<string, string[]> = {};
-		for (const r of depRows) (openDeps[r.work_id] ??= []).push(r.depends_on);
-		const shape = (w: any) => ({
+		for (const r of depRows) {
+			const deps = openDeps[r.work_id] ?? [];
+			deps.push(r.depends_on);
+			openDeps[r.work_id] = deps;
+		}
+		const shape = (w: WorkItemRow) => ({
 			id: w.id,
 			state: w.state,
 			owner: w.owner_sid,
@@ -964,53 +1051,69 @@ function board(): Record<string, unknown>[] {
 }
 
 function claims(): unknown[] {
-	return db
-		.query("SELECT sid, scope, intent, hot, ts FROM claims ORDER BY sid, scope")
-		.all()
-		.map((c: any) => ({
-			sid: c.sid,
-			scope: c.scope,
-			intent: c.intent,
-			hot: !!c.hot,
-			tsAgo: ago(c.ts),
-		}));
+	return (
+		db
+			.query(
+				"SELECT sid, scope, intent, hot, ts FROM claims ORDER BY sid, scope",
+			)
+			.all() as {
+			sid: string;
+			scope: string;
+			intent: string | null;
+			hot: number;
+			ts: number;
+		}[]
+	).map((c) => ({
+		sid: c.sid,
+		scope: c.scope,
+		intent: c.intent,
+		hot: !!c.hot,
+		tsAgo: ago(c.ts),
+	}));
 }
 
 function events(): unknown[] {
-	return db
-		.query(
-			"SELECT id, ts, source, kind, scope, payload, target FROM events ORDER BY id DESC LIMIT 50",
-		)
-		.all()
-		.map((e: any) => {
-			let note = "";
-			try {
-				note = e.payload
-					? Object.entries(JSON.parse(e.payload))
-							.map(([k, v]) => `${k}=${String(v).slice(0, 40)}`)
-							.join(" ")
-					: "";
-			} catch {
-				note = "(malformed)";
-			}
-			return {
-				id: e.id,
-				tsAgo: ago(e.ts),
-				source: e.source,
-				kind: e.kind,
-				scope: e.scope,
-				target: e.target,
-				note,
-			};
-		});
+	return (
+		db
+			.query(
+				"SELECT id, ts, source, kind, scope, payload, target FROM events ORDER BY id DESC LIMIT 50",
+			)
+			.all() as EventRow[]
+	).map((e) => {
+		let note = "";
+		try {
+			note = e.payload
+				? Object.entries(JSON.parse(e.payload))
+						.map(([k, v]) => `${k}=${String(v).slice(0, 40)}`)
+						.join(" ")
+				: "";
+		} catch {
+			note = "(malformed)";
+		}
+		return {
+			id: e.id,
+			tsAgo: ago(e.ts),
+			source: e.source,
+			kind: e.kind,
+			scope: e.scope,
+			target: e.target,
+			note,
+		};
+	});
 }
 
 function laneFacts(sid: string): Record<string, unknown> {
 	const rows = db
 		.query("SELECT key, value FROM facts WHERE key = ? OR key = ?")
-		.all(`lane.${sid}.state`, `lane.${sid}.capsule`) as any[];
+		.all(`lane.${sid}.state`, `lane.${sid}.capsule`) as {
+		key: string;
+		value: string;
+	}[];
 	const out: Record<string, unknown> = {};
-	for (const r of rows) out[r.key.split(".").pop()!] = r.value;
+	for (const r of rows) {
+		const short = r.key.split(".").pop();
+		if (short) out[short] = r.value;
+	}
 	return out;
 }
 
@@ -1021,18 +1124,19 @@ function inbox(sid: string): unknown[] {
 				event_id: number;
 			} | null
 		)?.event_id ?? 0;
-	return db
-		.query(
-			"SELECT id, ts, source, kind, payload FROM events WHERE target = ? AND id > ? ORDER BY id",
-		)
-		.all(sid, cur)
-		.map((e: any) => ({
-			id: e.id,
-			tsAgo: ago(e.ts),
-			source: e.source,
-			kind: e.kind,
-			note: e.payload,
-		}));
+	return (
+		db
+			.query(
+				"SELECT id, ts, source, kind, payload FROM events WHERE target = ? AND id > ? ORDER BY id",
+			)
+			.all(sid, cur) as EventRow[]
+	).map((e) => ({
+		id: e.id,
+		tsAgo: ago(e.ts),
+		source: e.source,
+		kind: e.kind,
+		note: e.payload,
+	}));
 }
 
 // records per docs/decisions-api.md — legacy column names (event_id/target/
@@ -1047,13 +1151,30 @@ function decisionRecords(): Record<string, unknown>[] {
 			LEFT JOIN work_items w ON w.project = d.project AND w.id = d.task_id
 			ORDER BY (d.state = 'OPEN') DESC, d.event_id DESC LIMIT 200`,
 		)
-		.all() as any[];
+		.all() as {
+		event_id: number;
+		target: string;
+		asked_by: string | null;
+		project: string | null;
+		task_id: string | null;
+		question: string | null;
+		options: string | null;
+		state: string;
+		delivery: string | null;
+		answer_note: string | null;
+		answer_to: string | null;
+		answer_token: string | null;
+		created_at: number;
+		answered_at: number | null;
+		ack_ts: number | null;
+		task_title: string | null;
+	}[];
 	return rows.map((d) => {
 		let options: { label: string; tradeoff?: string | null }[] = [];
 		try {
 			options = d.options ? JSON.parse(d.options) : [];
 		} catch {}
-		let advice: any;
+		let advice: unknown;
 		let adviceError: string | undefined;
 		const a = db
 			.query("SELECT value FROM facts WHERE key = ?")
@@ -1102,12 +1223,14 @@ function decisionRecords(): Record<string, unknown>[] {
 function decisionsPayload(history: boolean): unknown {
 	syncDecisions();
 	const recs = decisionRecords();
-	const open = recs.filter((r: any) => r.state === "OPEN");
+	const open = recs.filter((r) => r.state === "OPEN") as {
+		project?: string | null;
+	}[];
 	// the default feed stays OPEN-only; &history=1 adds the resolved rows
 	// (ANSWERED / ACKNOWLEDGED / CANCELLED) for the collapsed history view
 	const shown = history ? recs : open;
 	const byProject: Record<string, number> = {};
-	for (const r of open as any[])
+	for (const r of open)
 		if (r.project) byProject[r.project] = (byProject[r.project] ?? 0) + 1;
 	return { ts: Date.now(), count: open.length, byProject, decisions: shown };
 }
@@ -1155,11 +1278,11 @@ function llm(): unknown {
 	};
 }
 
-function payload(): unknown {
+function payload() {
 	syncDecisions();
 	const ss = sessions();
 	const labels: Record<string, string> = {};
-	for (const s of ss as any[]) labels[s.sid] = s.label;
+	for (const s of ss) labels[s.sid] = s.label;
 	for (const c of db.query("SELECT DISTINCT sid FROM claims").all() as {
 		sid: string;
 	}[]) {
@@ -1210,8 +1333,8 @@ function payload(): unknown {
 }
 
 function payloadFor(sid: string): unknown {
-	const base = payload() as any;
-	const s = base.sessions.find((x: any) => x.sid === sid);
+	const base = payload();
+	const s = base.sessions.find((x) => x.sid === sid);
 	return {
 		...base,
 		focus: sid,
@@ -1459,7 +1582,7 @@ Bun.serve({
 			const id = url.searchParams.get("id") ?? "";
 			const w = db
 				.query("SELECT * FROM work_items WHERE project = ? AND id = ?")
-				.get(p, id) as any;
+				.get(p, id) as WorkItemRow | null;
 			if (!w)
 				return json(
 					{
@@ -1578,7 +1701,12 @@ Bun.serve({
 				.query(
 					"SELECT state, answer_note, answer_token, answer_to FROM decisions WHERE event_id = ?",
 				)
-				.get(id) as any;
+				.get(id) as {
+				state: string;
+				answer_note: string | null;
+				answer_token: string | null;
+				answer_to: string | null;
+			} | null;
 			// reject unknown ids instead of silently answering nothing
 			if (!row)
 				return json({ ok: false, error: `unknown decision id: ${id}` }, 404);
