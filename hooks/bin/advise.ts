@@ -17,6 +17,16 @@ if (!id) {
 }
 const URL_ =
   process.env.SUSPENDERS_LLM_URL ?? "http://127.0.0.1:8901/v1/chat/completions";
+// safe parse — a malformed SUSPENDERS_LLM_URL must not throw inside the catch
+// below: the failure path itself has to be throw-proof (same guard as the
+// board's LLM_ORIGIN)
+const LLM_HOST = (() => {
+  try {
+    return new URL(URL_).host;
+  } catch {
+    return "(unparseable SUSPENDERS_LLM_URL)";
+  }
+})();
 const KEY = process.env.SUSPENDERS_LLM_KEY;
 const MODEL =
   process.env.SUSPENDERS_LLM_MODEL ?? (await defaultModel(URL_, KEY));
@@ -154,7 +164,7 @@ try {
     JSON.stringify({
       for: id,
       model: MODEL,
-      host: new URL(URL_).host,
+      host: LLM_HOST,
       pt: j.usage?.prompt_tokens ?? 0,
       ct: j.usage?.completion_tokens ?? 0,
       tt:
@@ -173,7 +183,7 @@ try {
     JSON.stringify({
       for: id,
       model: MODEL,
-      host: new URL(URL_).host,
+      host: LLM_HOST,
       pt: 0,
       ct: 0,
       tt: 0,
@@ -181,11 +191,21 @@ try {
       error: msg.slice(0, 200),
     }),
   );
+  // connection refused / timeout = no advice LLM reachable (machine without
+  // the local fleet, belt down): a graceful skip, not a failure. The fork
+  // stays open for the human; a cloud SUSPENDERS_LLM_URL unchanged —
+  // this branch is only the fetch throwing, i.e. no HTTP answer at all
+  // (HTTP failures throw the `LLM <status>` error above and stay failures).
+  const unavailable = !msg.startsWith("LLM ");
   db.query(
     "INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'advise', 1, ?)",
-  ).run(`${fk}.error`, msg, Date.now());
-  console.error(`advise #${id} failed: ${msg}`);
-  process.exit(2);
+  ).run(`${fk}.error`, unavailable ? `unavailable: ${msg}` : msg, Date.now());
+  console.error(
+    unavailable
+      ? `advise #${id}: no advice LLM at ${LLM_HOST} (${msg.slice(0, 120)}) — advice unavailable, fork stays open`
+      : `advise #${id} failed: ${msg}`,
+  );
+  process.exit(unavailable ? 0 : 2);
 }
 
 const grab = (m: string) =>
