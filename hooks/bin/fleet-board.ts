@@ -7,7 +7,7 @@
 // then open http://127.0.0.1:<port> — dropdown lists every known session;
 // focusing a session shows its project's TODO / IN-FLIGHT / DONE board,
 // its claims, inbox, lane state, and the event tail.
-import { openGovernorDb } from "../lib/govdb.ts";
+import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { HTML } from "./fleet-board-html.ts";
 
@@ -150,7 +150,9 @@ function syncDecisions(): void {
 	for (const r of db.query("SELECT event_id FROM decisions WHERE answer_token IS NULL").all() as { event_id: number }[])
 		db.query("UPDATE decisions SET answer_token = ? WHERE event_id = ?").run(crypto.randomUUID(), r.event_id);
 	// backfill: one row per NEED% event with a concrete target (dead-letter
-	// alias targets included)
+	// alias targets included). LIKE is case-insensitive for ASCII — this is
+	// the accept set isDecisionKind() (hooks/lib/govdb.ts) mirrors exactly;
+	// change them together.
 	for (const e of db
 		.query("SELECT id, ts, source, target, payload FROM events WHERE kind LIKE 'NEED%' AND target IS NOT NULL AND id NOT IN (SELECT event_id FROM decisions) ORDER BY id")
 		.all() as any[]) {
@@ -905,7 +907,7 @@ Bun.serve({
 			if (!id) return json({ ok: false, error: "missing event id" }, 400);
 			const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
 			if (!ev) return json({ ok: false, error: "unknown event id: " + id }, 404);
-			if (!ev.kind.startsWith("NEED")) return json({ ok: false, error: "not a decision event: " + id }, 400);
+			if (!isDecisionKind(ev.kind)) return json({ ok: false, error: "not a decision event: " + id }, 400);
 			syncDecisions();
 			const row = db.query("SELECT state FROM decisions WHERE event_id = ?").get(id) as { state: string } | null;
 			if (row && (row.state === "ANSWERED" || row.state === "ACKNOWLEDGED")) return json({ ok: false, error: "already answered" }, 409);
@@ -923,7 +925,7 @@ Bun.serve({
 			if (!id) return json({ ok: false, error: "missing event id" }, 400);
 			const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
 			if (!ev) return json({ ok: false, error: "unknown event id: " + id }, 404);
-			if (!ev.kind.startsWith("NEED")) return json({ ok: false, error: "not a decision event: " + id }, 400);
+			if (!isDecisionKind(ev.kind)) return json({ ok: false, error: "not a decision event: " + id }, 400);
 			const child = Bun.spawn([process.execPath, CLI("advise.ts"), String(id)], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 			child.unref();
 			return json({ ok: true, started: true });

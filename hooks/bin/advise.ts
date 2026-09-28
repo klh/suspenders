@@ -8,7 +8,7 @@
 // env:   SUSPENDERS_LLM_URL   (default http://127.0.0.1:8901/v1/chat/completions)
 //        SUSPENDERS_LLM_MODEL (default "local")
 //        SUSPENDERS_LLM_KEY   (optional bearer token)
-import { openGovernorDb } from "../lib/govdb.ts";
+import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
 
 const id = Number(process.argv[2] ?? 0);
 if (!id) {
@@ -39,7 +39,7 @@ const db = openGovernorDb();
 const ev = db.query("SELECT id, ts, source, kind, scope, payload, target FROM events WHERE id = ?").get(id) as
 	| { id: number; ts: number; source: string; kind: string; scope: string | null; payload: string | null; target: string | null }
 	| null;
-if (!ev || !ev.kind.startsWith("NEED")) {
+if (!ev || !isDecisionKind(ev.kind)) {
 	console.error(`event #${id} is ${ev ? ev.kind : "missing"} — advise wants a NEED% fork`);
 	process.exit(1);
 }

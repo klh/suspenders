@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
 import { Database } from "bun:sqlite";
+import { isDecisionKind } from "../hooks/lib/govdb.ts";
 
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-board-"));
 const REPO = mkdtempSync(join(tmpdir(), "suspenders-boardrepo-"));
@@ -253,6 +254,38 @@ describe("endpoint hardening", () => {
 		run("coord.ts", ["emit", "NOTE", "--to", "board-lane", "--note", "not a fork", "--as", "board-lane"]);
 		const nonNeed = (await getData()).events.find((e: any) => e.kind === "NOTE").id;
 		expect((await post("/api/ack", { id: nonNeed })).status).toBe(400);
+	});
+
+	test("decision-kind variants (need-decision/need_decision) list AND advise — W54 regression", async () => {
+		// a lane emitted need-decision; the board listed it (SQL LIKE 'NEED%'
+		// is case-insensitive) then /api/advise refused it (400 "not a decision
+		// event"). Both gates now share isDecisionKind().
+		expect(run("coord.ts", ["emit", "need-decision", "--to", "board-lane", "--note", "advise the lowercase fork", "--as", "board-lane"]).code).toBe(0);
+		const lower = fork(await getDecisions(), "advise the lowercase fork");
+		expect(lower).toBeDefined();
+		expect((await post("/api/advise", { id: lower.id })).json.ok).toBe(true);
+		expect(run("coord.ts", ["emit", "need_decision", "--to", "board-lane", "--note", "ack the underscore fork", "--as", "board-lane"]).code).toBe(0);
+		const under = fork(await getDecisions(), "ack the underscore fork");
+		expect(under).toBeDefined();
+		expect((await post("/api/ack", { id: under.id })).json.ok).toBe(true);
+	});
+
+	test("isDecisionKind accepts NEED_DECISION/need-decision/need_decision, rejects other kinds", () => {
+		for (const k of ["NEED_DECISION", "need-decision", "need_decision", "NEED_INFO"]) expect(isDecisionKind(k)).toBe(true);
+		for (const k of ["NOTE", "work.claimed", "decision", "awaiting-input", "", "xNEED"]) expect(isDecisionKind(k)).toBe(false);
+	});
+
+	test("advise entry accepts need-decision (pre-seeded advice fact → idempotent exit, no LLM call)", () => {
+		run("coord.ts", ["emit", "need-decision", "--to", "board-lane", "--note", "entry gate", "--as", "board-lane"]);
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		const ev = db.query("SELECT id FROM events WHERE kind = 'need-decision' AND json_extract(payload, '$.note') = 'entry gate'").get() as { id: number };
+		// advise.ts checks the fact BEFORE any fetch — seeding it proves the
+		// kind gate passed without ever reaching the (dead) LLM URL
+		db.query("INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'advise', 1, ?)").run(`advice.${ev.id}`, JSON.stringify({ rec: "seeded" }), Date.now());
+		db.close();
+		const r = run("advise.ts", [String(ev.id)]);
+		expect(r.code).toBe(0);
+		expect(r.out).toContain("already advised");
 	});
 
 	test("answer validation: id, to, note and token are all required", async () => {

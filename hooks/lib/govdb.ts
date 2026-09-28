@@ -28,6 +28,17 @@ export function projectIdentity(): string {
 // work_items.requires ⊆ sessions.capabilities or work take refuses
 export const CAPABILITIES = ["shell", "fs", "git", "build", "mcp", "vision", "browser", "network"];
 
+// W54 — THE decision-kind gate, shared by every consumer of NEED% forks
+// (advise.ts, the board's /api/advise + /api/ack). coord emit passes kinds
+// through verbatim, and a lane shipped 'need-decision'; syncDecisions'
+// backfill uses SQL LIKE 'NEED%', which SQLite matches case-INsensitively —
+// so the board listed forks the case-sensitive startsWith("NEED") gates then
+// refused to advise on (live 500). Uppercase-only normalization keeps this
+// EXACTLY equal to that LIKE accept set (stripping [-_] would widen it).
+export function isDecisionKind(kind: string): boolean {
+	return kind.toUpperCase().startsWith("NEED");
+}
+
 // W15 — lane-level wall-time metric. Per-item claim→done is distorted when a
 // lane works items back-to-back (serialized multi-claims), so replay the Work
 // Graph bus events instead of trusting item timestamps: wall = first claim →
