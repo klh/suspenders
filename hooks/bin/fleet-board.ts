@@ -880,7 +880,7 @@ Bun.serve({
 					if (!alias) return json({ ok: false, error: cands.length > 1 ? "ambiguous sid: " + to : "unknown target session: " + to }, 400);
 				}
 			}
-			const p = Bun.spawnSync(["bun", CLI("coord.ts"), "emit", "ANSWER", "--to", to, "--note", note, "--as", "fleet-board"], {
+			const p = Bun.spawnSync([process.execPath, CLI("coord.ts"), "emit", "ANSWER", "--to", to, "--note", note, "--as", "fleet-board"], {
 				stdout: "pipe",
 				stderr: "pipe",
 			});
@@ -924,7 +924,7 @@ Bun.serve({
 			const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
 			if (!ev) return json({ ok: false, error: "unknown event id: " + id }, 404);
 			if (!ev.kind.startsWith("NEED")) return json({ ok: false, error: "not a decision event: " + id }, 400);
-			const child = Bun.spawn(["bun", CLI("advise.ts"), String(id)], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+			const child = Bun.spawn([process.execPath, CLI("advise.ts"), String(id)], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 			child.unref();
 			return json({ ok: true, started: true });
 		}
