@@ -265,8 +265,15 @@ function retireMerged(b: string): void {
 
 // a failed ladder: abort the merge, log the tail, count the strike, park at 3
 function mergeFail(b: string, tail: string): void {
-	// a failed ladder leaves MERGE_HEAD behind — abort it; NEVER reset --hard
-	if (existsSync(`${REPO}/.git/MERGE_HEAD`)) run(["git", "merge", "--abort"]);
+	// a failed ladder leaves MERGE_HEAD behind — abort it; NEVER reset --hard.
+	// A plain abort can itself fail on staged debris (run() ignores the exit
+	// code) — verify, and escalate straight to the surgical heal: cycle-start
+	// heal is a full cycle too late, and the debris poisons the NEXT branch's
+	// attempt inside the same cycle (autow316/319 innocent strikes, 2026-09-28)
+	if (existsSync(`${REPO}/.git/MERGE_HEAD`)) {
+		run(["git", "merge", "--abort"]);
+		if (existsSync(`${REPO}/.git/MERGE_HEAD`)) healCrashedMerge();
+	}
 	log(
 		`FAIL ${b} — ladder failed, merge aborted, branch left for inspection${tail ? `: ${tail}` : ""}`,
 	);
