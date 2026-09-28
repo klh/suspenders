@@ -7,7 +7,13 @@
 
 Built on a SQLite database (sessions, claims, locks, events, work graph) wired into Claude Code's hook system, plus a live board that shows fleet state at one-second resolution.
 
-![](pages/screenshot.png)
+| ![Decisions view](pages/screenshot.png "Decisions view")                                                                                               |
+| :----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Decisions** — open questions surface as red cards with the asking agent, the task they block, and an LLM recommendation you can edit before sending. |
+
+| ![Tasks view](pages/screenshot-tasks.png "Tasks view")                                             | ![Setup view](pages/screenshot-setup.png "Setup view")                                                                  |
+| :------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------- |
+| **Tasks** — every work item across projects: state, owner, age, and which ones wait on a decision. | **Setup** — installation checks for hook wiring, the monitor agent, and the advice endpoint, each with its fix command. |
 
 ## What problem does it solve
 
@@ -39,19 +45,29 @@ Every CLI is also usable from scripts — the board's answer box and the monitor
 
 ## Components
 
-| Surface | What it does |
-|---|---|
-| **Control plane** (`lib/govdb.ts`) | SQLite/WAL — sessions, claims, locks, events, facts, cursors, work graph; one database serves every repo, partitioned per project |
-| **Hook gates** (`gate.ts`) | One entrypoint: secrets gate (gitleaks + inline detection, `cd`-aware), edit-enforce, file-lease governor, mutation-size cap (denies >40-line raw mutations on existing files; `SUSPENDERS_MAX_MUTATION`), operational-ledger marker guard (no new TODO/IN-FLIGHT/BLOCKED/NEXT markers in ledgers), config guard, claim-done stop gate — the Edit/Write gates chain in one process |
-| **Work graph** (`bin/work.ts`) | `add / split / take / done / ready / mine / orphaned / reclaim / release / migrate-ledger` — compare-and-swap claims, dependency gating, capability requirements; splits beyond 2 children must reference a registered plan item; every mutation re-exports the project graph to `.workgraph.jsonl` so the queue is committed and fresh clones see it offline (reads fall back to it when the DB cannot serve the project); `migrate-ledger` ingests a Markdown ledger's unresolved items into the graph (deduped, idempotent, tombstones the ledger) |
-| **Coordination bus** (`bin/coord.ts`) | bootstrap, inbox, emit, wait, pause/resume with continuation capsules, consults, facts, broadcasts, `lease-release`, `metrics` (per-item wall vs agent time, lane dwell, friction — daily snapshot facts for trend diffing), `diff` (deltas read model — see the audit-trail section of the protocol doc) |
-| **Consult knowledge base** (`coord kb`) | `consult-reply` harvests every answered consult as a (problem, solution) pair (FTS5); a new consult resolves against the store **before** routing to a live expert — the asker gets the stored solution instantly, with provenance and an `--no-kb` escape hatch. `kb stats\|search\|list` |
-| **Fleet board** (`bin/fleet-board.ts`) | Live dashboard — Decisions / Tasks / Activity / Governor / Setup views, project filter, task drawer, decision history; `--demo` seeds example data. Write endpoints for answering decisions, dismissing, and requesting recommendations (`/api/advise` → `bin/advise.ts`) |
-| **Advice worker** (`bin/advise.ts`) | An LLM (any OpenAI-compatible API; model autodiscovered from `/v1/models`) reads the decision with control-plane context and writes a recommendation the human can accept, edit, or ignore |
-| **Monitor** (`bin/monitor.ts`) | Read-only health; `--fix` sweeps stale sessions and locks; three-state verdicts (ZOMBIE / SUSPECT / UNKNOWN); alerts the coordinator |
-| **Usage windows** (`bin/quota-window.ts`) | Remembers observed 429 resets and predicts the next 5-hour cliff: exit 0 safe / 1 near cliff / 2 unknown |
-| **Progress protocol** (`bin/progress.ts`) | Small file-based progress bar; the statusline aggregates it; doubles as the lane-level heartbeat |
-| **macOS agents** (`hooks/launchd/`) | 15-min fleet monitor + LLM keepwarm |
+| Surface                                   | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Control plane** (`lib/govdb.ts`)        | SQLite/WAL — sessions, claims, locks, events, facts, cursors, work graph; one database serves every repo, partitioned per project                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **Hook gates** (`gate.ts`)                | One entrypoint: secrets gate (gitleaks + inline detection, `cd`-aware), edit-enforce, file-lease governor, mutation-size cap (denies >40-line raw mutations on existing files; `SUSPENDERS_MAX_MUTATION`), operational-ledger marker guard (no new TODO/IN-FLIGHT/BLOCKED/NEXT markers in ledgers), config guard, claim-done stop gate — the Edit/Write gates chain in one process                                                                                                                                                                    |
+| **Work graph** (`bin/work.ts`)            | `add / split / take / done / ready / mine / orphaned / reclaim / release / migrate-ledger` — compare-and-swap claims, dependency gating, capability requirements; splits beyond 2 children must reference a registered plan item; every mutation re-exports the project graph to `.workgraph.jsonl` so the queue is committed and fresh clones see it offline (reads fall back to it when the DB cannot serve the project); `migrate-ledger` ingests a Markdown ledger's unresolved items into the graph (deduped, idempotent, tombstones the ledger) |
+| **Coordination bus** (`bin/coord.ts`)     | bootstrap, inbox, emit, wait, pause/resume with continuation capsules, consults, facts, broadcasts, `lease-release`, `metrics` (per-item wall vs agent time, lane dwell, friction — daily snapshot facts for trend diffing), `diff` (deltas read model — see the audit-trail section of the protocol doc)                                                                                                                                                                                                                                             |
+| **Consult knowledge base** (`coord kb`)   | `consult-reply` harvests every answered consult as a (problem, solution) pair (FTS5); a new consult resolves against the store **before** routing to a live expert — the asker gets the stored solution instantly, with provenance and an `--no-kb` escape hatch. `kb stats\|search\|list`                                                                                                                                                                                                                                                            |
+| **Fleet board** (`bin/fleet-board.ts`)    | Live dashboard — Decisions / Tasks / Activity / Governor / Setup views, project filter, task drawer, decision history; `--demo` seeds example data. Write endpoints for answering decisions, dismissing, and requesting recommendations (`/api/advise` → `bin/advise.ts`) — details in [docs/board-api.md](docs/board-api.md) and [docs/decisions-api.md](docs/decisions-api.md)                                                                                                                                                                      |
+| **Advice worker** (`bin/advise.ts`)       | An LLM (any OpenAI-compatible API; model autodiscovered from `/v1/models`) reads the decision with control-plane context and writes a recommendation the human can accept, edit, or ignore                                                                                                                                                                                                                                                                                                                                                            |
+| **Monitor** (`bin/monitor.ts`)            | Read-only health; `--fix` sweeps stale sessions and locks; three-state verdicts (ZOMBIE / SUSPECT / UNKNOWN); alerts the coordinator                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **Usage windows** (`bin/quota-window.ts`) | Remembers observed 429 resets and predicts the next 5-hour cliff: exit 0 safe / 1 near cliff / 2 unknown                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **Progress protocol** (`bin/progress.ts`) | Small file-based progress bar; the statusline aggregates it; doubles as the lane-level heartbeat                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **macOS agents** (`hooks/launchd/`)       | Four launchd agents: 15-min fleet monitor, LLM keepwarm, board keep-alive, rolling governor.db backups                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+
+## How a decision resolves
+
+1. A lane needs a call made mid-flight — it emits `NEED_DECISION` instead of blocking silently.
+2. The board surfaces it: a red card with the asker, the task it blocks, and its age.
+3. Optionally you press **Get recommendation** — the advice worker gathers claims, recent events, and work-graph shape, then asks your configured LLM. A recommendation lands inline (recommendation, rationale, risk, model); one click fills the answer box.
+4. You edit and send — the answer goes back to the lane as an `ANSWER` event. Recommendations are suggestions; only you send.
+5. The same pipe carries consults between agents — and every answered consult is harvested into the knowledge base, so the next person to ask resolves instantly against the store.
+
+The full message-flow diagram (lanes, coordinator, board, advice worker, zombie reclaim) is rendered at the top of the [project page](https://klh.github.io/suspenders/).
 
 ## Architecture
 
@@ -73,50 +89,7 @@ governor.db (SQLite/WAL, ~/.cache/claude-governor/)
 fleet board — decisions · tasks · activity · governor · setup
 ```
 
-Decision flow: a lane emits `NEED_DECISION` → the board lists it with the task it blocks → optionally `advise.ts` asks your configured LLM for a recommendation → the human edits and sends → the lane receives the `ANSWER` event on its next poll and continues.
-
-### Messaging and consults
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant L as Lane (worker session)
-    participant C as Coordinator session
-    participant G as governor.db
-    participant B as Fleet board (browser)
-    participant A as advise.ts (LLM worker)
-    participant H as Human operator
-
-    L->>G: work take W7 (claim, capability-checked)
-    L->>G: emit checkpoint --sha
-    L->>G: emit NEED_DECISION --note "queue vs stream?"
-
-    G->>B: 1s poll → decision card
-    B->>H: "2 decisions need you"
-
-    alt human wants a recommendation
-        H->>B: click "Get recommendation"
-        B->>A: POST /api/advise (spawn, detached)
-        A->>G: read claims, recent events, work items
-        A->>A: LLM call (OpenAI-compatible, model autodiscovered)
-        A->>G: fact advice.<id> + ADVICE event
-        G->>B: recommendation renders on the card
-        B->>H: "use" fills the answer field
-    end
-
-    H->>B: edit answer, click send
-    B->>G: emit ANSWER --to <lane> --note "…"
-    G->>L: lane inbox sees ANSWER on next poll
-
-    L->>G: coord who-knows "retry contracts?"
-    G->>C: consult C## — "? C## from <lane>"
-    C->>G: coord consult-reply C## "<answer>"
-    G->>L: answer lands in lane inbox
-
-    Note over G,H: stale heartbeat + stale transcript → zombie alert; nothing is reclaimed without a human
-    G->>B: zombie chip
-    H->>G: work reclaim W7 → re-dispatch at the frozen transcript
-```
+Every work-graph mutation mirrors the project graph to `.workgraph.jsonl` — the queue is committed to git, and fresh clones read it offline when the database cannot serve the project.
 
 ## Examples
 
@@ -131,10 +104,12 @@ A worked session — bootstrap, register work, capability-gated dispatch, consul
 ## Docs
 
 - [Coordination protocol](docs/coordination-protocol.md) — a copy-paste CLAUDE.md section for a multi-agent repo: reporting discipline, integration steps, pause/resume, capability dispatch, zombie policy, usage windows, audit trail (`coord diff`), workgraph mirror.
+- [Board API](docs/board-api.md) — the board's HTTP surface (read endpoints, write endpoints, demo mode).
+- [Decisions API](docs/decisions-api.md) — the decisions surface: events, advise routing, ack semantics.
 
 ## Status
 
-In use for months on a multi-repo fleet (macOS + Bun + Claude Code); schema v4. Extracted from the
+In use for months on a multi-repo fleet (macOS + Bun + Claude Code); schema v5. Extracted from the
 [speedy-claude](https://github.com/klh/speedy-claude) setup on 2026-09-25 — speedy-claude now installs
 suspenders as its control plane.
 
