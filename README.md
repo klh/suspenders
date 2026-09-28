@@ -114,6 +114,7 @@ A worked session — bootstrap, register work, capability-gated dispatch, consul
 - [Coordination protocol](docs/coordination-protocol.md) — a copy-paste CLAUDE.md section for a multi-agent repo: reporting discipline, integration steps, pause/resume, capability dispatch, zombie policy, usage windows, audit trail (`coord diff`), workgraph mirror.
 - [Board API](docs/board-api.md) — the board's HTTP surface (read endpoints, write endpoints, demo mode).
 - [Decisions API](docs/decisions-api.md) — the decisions surface: events, advise routing, ack semantics.
+- [fleet-loop](docs/fleet-loop.md) — the generic merge/dispatch loop: watchdog cadence, ladder contract, 3-strike park, retire lifecycle.
 
 ## Status
 
