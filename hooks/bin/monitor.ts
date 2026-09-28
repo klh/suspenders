@@ -9,7 +9,11 @@
 // known blind spot (backlog W9), surfaced by `work orphaned` instead.
 // usage: bun ~/.claude/bin/monitor.ts [--fix]
 import { statSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
-import { openGovernorDb, sweepStaleSessions } from "../lib/govdb.ts";
+import {
+	openGovernorDb,
+	projectIdentity,
+	sweepStaleSessions,
+} from "../lib/govdb.ts";
 
 const db = openGovernorDb();
 const now = Date.now();
@@ -359,7 +363,9 @@ for (const [key, kids] of bursts) {
 // Threshold from fact fleet.zombie_after_ms (default 45min). WAIT_RATE /
 // PAUSED sessions are expected-silent, never zombies. Remediation (reclaim
 // + re-dispatch pointing at the frozen transcript) belongs to the canonical
-// coordinator; alerts dedupe via fact zombie.<id> (6h).
+// coordinator; alerts dedupe via fact zombie.<id> (6h). W62: past
+// fleet.zombie_reclaim_after_ms (default 7d) the monitor itself reclaims
+// the item to READY — own-project only, audit line per reclaim.
 const ZOMBIE_MS = Number(
 	(
 		db
@@ -374,6 +380,26 @@ const STALL_MS = Number(
 			.get() as { value: string } | null
 	)?.value ?? 15 * 60_000,
 );
+// W62 zombie reaper: a lane verifiably zombie (two-signal rule, above) for
+// longer than fleet.zombie_reclaim_after_ms (default 7 DAYS) is auto-
+// reclaimed to READY — via the manual `work reclaim` verb, spawned with
+// argument arrays, so claim release + work.released event + mirror export
+// all happen in the verb's own code path (never re-implemented here).
+// NEVER cross-project: projectIdentity() is cwd-bound, so a cwd-less
+// launchd run ("/") matches nothing and the reaper stays inert — reclaiming
+// a foreign project's frozen lane is strictly worse than leaving it one
+// more pass. Set the fact to 0 to reclaim on the first confirmed verdict,
+// or negative to disable reclamation entirely.
+const RECLAIM_MS = Number(
+	(
+		db
+			.query(
+				"SELECT value FROM facts WHERE key = 'fleet.zombie_reclaim_after_ms'",
+			)
+			.get() as { value: string } | null
+	)?.value ?? 7 * 24 * 3_600_000,
+);
+const OWN_PROJECT = projectIdentity();
 // W51: transcript liveness by CONTENT — the newest entry's own `timestamp`
 // (mtime alone can lie: compaction or a partial-line flush touches the file
 // without a new entry). Tail-read only; a mid-write unparseable last line is
@@ -501,6 +527,21 @@ for (const { project } of zProjects) {
 				}
 			} else if (seen) db.query("DELETE FROM facts WHERE key = ?").run(fk);
 		}
+		// W62 reaper bookkeeping: the 7-day clock starts at the FIRST verified
+		// two-signal ZOMBIE verdict (fact zombie.since.<id>, written once —
+		// INSERT OR IGNORE — so re-alerts re-alert but never reset the clock).
+		// Any non-zombie verdict (lane back alive, suspect, telemetry unknown)
+		// deletes the clock so a later re-death fully re-arms.
+		// WAITING/PAUSED/WAIT_RATE exited earlier; STALLED exits as ACTIVE below
+		// without arming the clock.
+		const fkSince = `zombie.since.${w.id}`;
+		if (verdict === "ZOMBIE") {
+			db.query(
+				"INSERT OR IGNORE INTO facts (key, value, source, version, ts) VALUES (?, 'zombie', 'monitor', 1, ?)",
+			).run(fkSince, now);
+		} else {
+			db.query("DELETE FROM facts WHERE key = ?").run(fkSince);
+		}
 		if (verdict === "ACTIVE") continue;
 		const fk = `zombie.${w.id}`;
 		const seen = db.query("SELECT ts FROM facts WHERE key = ?").get(fk) as {
@@ -526,6 +567,42 @@ for (const { project } of zProjects) {
 			issues.push(
 				`zombie ${w.id}: ${label} (alerted ${Math.round((now - seen.ts) / 60000)}min ago)`,
 			);
+		}
+		// W62 zombie reaper: past the window, hand the item back to the graph
+		// via the manual reclaim verb's same code path — one audit line per
+		// reclaim (id, owner sid, age) on the monitor's output
+		// (/tmp/fleet-monitor.log under launchd). A failed reclaim degrades to
+		// an issue line; the monitor keeps running (lookup failure is never
+		// death).
+		if (verdict === "ZOMBIE" && project === OWN_PROJECT) {
+			const since = db
+				.query("SELECT ts FROM facts WHERE key = ?")
+				.get(fkSince) as { ts: number } | null;
+			if (since && now - since.ts > RECLAIM_MS) {
+				const age = `${((now - since.ts) / 86_400_000).toFixed(1)}d`;
+				const wt = OWN_PROJECT.endsWith("/.git")
+					? OWN_PROJECT.slice(0, -"/.git".length)
+					: OWN_PROJECT;
+				const r = Bun.spawnSync(
+					[
+						process.execPath,
+						new URL("./work.ts", import.meta.url).pathname,
+						"reclaim",
+						w.id,
+					],
+					{ cwd: wt, stdout: "pipe", stderr: "pipe" },
+				);
+				if (r.exitCode === 0) {
+					db.query("DELETE FROM facts WHERE key = ?").run(fkSince);
+					fixed.push(
+						`reclaimed zombie ${w.id} (owner ${w.owner_sid.slice(0, 10)}, zombie ${age}) → READY`,
+					);
+				} else {
+					issues.push(
+						`zombie reclaim failed for ${w.id} (owner ${w.owner_sid.slice(0, 10)}): work reclaim exited ${r.exitCode}`,
+					);
+				}
+			}
 		}
 	}
 }
