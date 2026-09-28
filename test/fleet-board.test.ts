@@ -345,7 +345,7 @@ describe("board api v3 (docs/board-api.md)", () => {
 		expect(feed.tasks.length).toBeGreaterThan(1);
 		for (const t of feed.tasks) {
 			expect(t.project).toBe(proj);
-			expect(Object.keys(t).sort()).toEqual(["age_s", "id", "open_decisions", "owner_label", "owner_sid", "parent_id", "project", "requires", "scope", "state", "tail", "title"]);
+			expect(Object.keys(t).sort()).toEqual(["age_s", "id", "open_decisions", "owner_label", "owner_sid", "parent_id", "project", "requires", "scope", "state", "tail", "title", "unblocked_by"]);
 		}
 		const alpha = feed.tasks.find((t: any) => t.id === w1);
 		const beta = feed.tasks.find((t: any) => t.id === w2);
@@ -368,6 +368,26 @@ describe("board api v3 (docs/board-api.md)", () => {
 		expect(run("work.ts", ["supersede", w2, "--by", w1]).code).toBe(0);
 		const after = await (await fetch(`${BASE}/api/tasks?project=${q(proj)}`)).json();
 		expect(after.tasks.find((t: any) => t.id === w2)).toBeUndefined();
+	});
+
+	test("/api/tasks: done→ready auto-start — unblocked_by flags the freed dependent", async () => {
+		const w1 = addWork("auto-start root", ["--scope", "asr"]);
+		const w2 = addWork("auto-start dependent", ["--scope", "asd"]);
+		run("work.ts", ["block", w2, "--on", w1]);
+		// done emits work.ready; the flag rides the newest unblock event
+		expect(run("work.ts", ["take", w1, "--as", "w50-tester"]).code).toBe(0);
+		expect(run("work.ts", ["done", w1, "--as", "w50-tester", "--sha", "abc1234"]).code).toBe(0);
+		const feed = await (await fetch(`${BASE}/api/tasks?project=${q(proj)}`)).json();
+		const dep = feed.tasks.find((t: any) => t.id === w2);
+		expect(dep.state).toBe("READY");
+		expect(dep.unblocked_by).toBe(w1);
+		// the drawer's task object shares the shape ("…as above" in board-api.md)
+		const drawer = await (await fetch(`${BASE}/api/task?project=${q(proj)}&id=${w2}`)).json();
+		expect(drawer.task.unblocked_by).toBe(w1);
+		// self-clearing: once the freed item is claimed, the flag drops
+		expect(run("work.ts", ["take", w2, "--as", "w50-tester"]).code).toBe(0);
+		const later = await (await fetch(`${BASE}/api/tasks?project=${q(proj)}`)).json();
+		expect(later.tasks.find((t: any) => t.id === w2).unblocked_by).toBeNull();
 	});
 
 	test("/api/task: 404 shape for a missing id; events + decisions linkage, newest first", async () => {

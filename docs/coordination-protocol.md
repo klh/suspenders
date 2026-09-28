@@ -7,6 +7,7 @@ agent — see the [README](../README.md)).
 ## Multi-agent coordination protocol (coordinator and all lanes)
 
 ### Reporting: state changes only
+
 Emit only **state changes**, in this shape:
 
 ```text
@@ -29,6 +30,7 @@ bun ~/.claude/bin/coord.ts emit landed --scope <scope> --sha <sha> --as <sid>
 ```
 
 ### Event bus
+
 - Checkpoint commits (every 10–20 min): `coord emit checkpoint --sha <sha> --as <sid>`
 - Landings: `coord emit landed ...` + `coord fact set integration.head <sha>`
 - Waiting on another lane: `coord wait --as <sid> --scope <other-scope> --max-seconds 600`
@@ -44,6 +46,7 @@ bun ~/.claude/bin/coord.ts emit landed --scope <scope> --sha <sha> --as <sid>
   task state to them.
 
 ### Lane completion reports
+
 The event is the report — the coordinator renders prose from it:
 
 ```bash
@@ -64,6 +67,7 @@ Do not narrate implementation history, repeat test counts on success, or add
 prose where a structured field exists. Exact counts go to facts/logs.
 
 ### Integration ladder
+
 - Per-lane: cheap targeted checks
 - Per-merge: qlty + affected tests, merged onto integration HEAD — a lane is
   done when the merge is green
@@ -75,6 +79,7 @@ prose where a structured field exists. Exact counts go to facts/logs.
   lanes
 
 ### Cooperative preemption (pause / reroute / resume)
+
 ```bash
 coord pause <sid> --reason "incoming contract change" --scope src/auth --intervention "LiveController API rewrite"
 # lane hits a safe boundary → checkpoints, writes its capsule, then waits:
@@ -82,6 +87,7 @@ coord capsule set --as <sid> --task=live4 --checkpoint=91ab72c --base=f30b910 --
 # in-band change lands, then:
 coord resume <sid> --onto <new-head> --note "applyPreview: (x) → (x, ctx); MediaMonitor → factory"
 ```
+
 - `coord state --as <sid>` between tool rounds: run/PAUSED + inbox count + integration HEAD. PAUSE_REQUESTED goes out as soon as the coordinator knows a collision is coming — the lane checkpoints early instead of working past the intervention.
 - Continuation capsule (facts `lane.<sid>.capsule`): task, checkpoint, base, step, next, assumptions — the minimum restart packet; survives session compaction.
 - Claims while paused default to SOFT (other lanes may drift in, drift-logged); hot-mark the scope only if the intervention must exclude everyone.
@@ -92,6 +98,7 @@ coord resume <sid> --onto <new-head> --note "applyPreview: (x) → (x, ctx); Med
 - **Subagent lanes claim under their injected lane id** — SessionStart prints `SUBAGENT LANE <parent#agent>` and that id is what `work take/done` and `coord emit` get as `--as`; a raw-sid claim lands on the parent's account (W24/W30). Named lanes get an explicit `--as <lane-name>` from the spawner instead.
 
 ### Work Graph (the task database)
+
 - Session start: `coord bootstrap --as <sid> --role coordinator|worker` → identity + OWNED + READY pool + inbox + head
 - Register work: `work add <title> --scope <scope> --by <sid>` — the graph is partitioned per project (repo root)
 - Take before implementing: `work take <id> --as <sid>` (CAS; a lost race is informational — pick another)
@@ -103,54 +110,71 @@ coord resume <sid> --onto <new-head> --note "applyPreview: (x) → (x, ctx); Med
 - Spawn gate: READY work exists + fleet under target + rate headroom + acceptable coupling → spawn; high coupling = review/test lanes, never more implementation lanes
 - Keep task state in the graph, not in Markdown files
 
+### Auto-start chains (done→ready surface)
+
+- `work done` emits a `work.ready` event per newly freed dependent (note "unblocked by <id>") and prints `▶ startable now: <ids>`; the board Tasks view flags those items ▶ startable
+- Pick-up is explicit: from a fresh session `coord bootstrap --as <sid> --role worker` then `work take <id> --as <sid>` — or an idle lane self-serves from `work ready` / the ▶ rows
+- No detached-spawn one-liner is prescribed — the spawn gate (coupling, fleet target, rate headroom) still applies
+
 ### Capability-aware dispatch (schema v2)
+
 - Work declares needs, sessions advertise what they offer: `work add <title> --requires shell,git` · `coord bootstrap --as <sid> --caps shell,fs,git,build,mcp,vision,browser,network` — lanes inherit the parent's caps unless overridden
 - `work take` refuses `requires ⊄ capabilities` — a NO-SHELL agent type cannot be dispatched shell-requiring work twice. Vocabulary: shell, fs, git, build, mcp, vision, browser, network (`CAPABILITIES` in hooks/lib/govdb.ts)
 - Top-level sessions advertise the full set automatically (SessionStart); NULL on either side = legacy = no constraint
 
 ### Coordinator identity
+
 - Exactly one coordinator identity: publish it — `coord fact set coordinator.sid <sid>` — and target that sid on the bus. Messages sent to display names instead of the published sid go nowhere.
 
 ### Zombie lanes (three-state, multi-signal)
+
 - CLAIMED/RUNNING + session RUNNING + hb stale + transcript stale (beyond fact `fleet.zombie_after_ms`, default 45m) = **ZOMBIE**; one stale signal = **SUSPECT**; telemetry missing = **UNKNOWN**
 - PAUSED / WAIT_RATE lanes are expected-silent, never zombies. Sessions blocked on an open decision are **WAITING** — surfaced separately, never swept. `monitor.ts --fix` (launchd `com.suspenders.fleet-monitor`, 15-min) detects and alerts the coordinator — it never reclaims automatically
 - Remediation: `work orphaned` → reclaim → re-dispatch pointing at the frozen transcript (its context is the salvage); sessions record `transcript_path` at SessionStart so per-lane telemetry is direct
 
 ### Signalling (self-serve, inbox, checkpoints, decisions)
+
 - Lanes self-serve: between items, poll `coord inbox --as <sid>`; if READY work matches your capabilities, take it yourself instead of waiting for dispatch
 - Checkpoint every landed milestone (`work done --sha` / capsule) so preemption is a resume, not a salvage
 - Decisions: `coord emit NEED_DECISION --to <target> --note "<question>"` — the fleet board lists every open decision for the owner to answer; a question that stays in an agent's context is invisible to everyone else
 - Progress on long tasks: `bin/progress.ts set <id> <done> <total> [label]` — the statusline aggregates entries; these are also the lane-level progress heartbeat
 
 ### Usage windows & degradation
+
 - 5h quota cliffs freeze whole fleets (measured 2026-09-24: staggered lane deaths 15:36–21:07, then a 6h total blackout). `bin/quota-window.ts` remembers observed 429 resets — exit 0 safe / 1 near cliff / 2 unknown; dispatch defers around the cliff and queues re-dispatch behind the reset
 - Degradation path: the local LLM stack (:8901–8903, :4000 Anthropic-shim) keeps lanes running at reduced capability through a blackout — admission control prevents stalls; zombie detection catches what escapes
 
 ### Consults (questions between agents)
+
 - Discover: `coord who-knows "query" [--scope src/x]` — ranks live sessions by recent claims / DONE work / scope touches
 - Ask: `coord consult --best "<question>" [--scope s] --as <sid>` → expert inbox gets `? C## from <asker>`; reply `coord consult-reply C## "<answer>" --as <expert>` (or `--decline`)
 - A consult never claims scope, never pauses a lane, never creates work. WORK = implement / CONSULT = answer / HANDOFF = take ownership. Cross-session questions use native @session messaging with who-knows for discovery.
 
 ### Claims
+
 - Every lane registers via `claim add <sid> <scope...> --intent "..."` at spawn; shared areas get BOTH lanes' claims; hot-mark only after an observed collision
 - Lanes report `{base SHA, commit SHA, changed paths, test status}` — the coordinator operates on immutable commits, never working dirs
 - `claim doctor` after fleet drains
 
 ### Audit trail: `coord diff` (deltas read model)
+
 - Row tables mutate in place; the `deltas` trigger log (schema v5) records every sessions/claims/locks/facts/work_items change as `(seq, ts, tbl, op, pk, before, after)` — "what changed between two points" becomes a query, not archaeology
 - `coord diff --since <seq|event-id>` — terse per-row lines (table · pk · op glyph · changed fields old→new); `--since e42` resolves a bus event to the nearest strictly-later delta seq; `--table work_items` filters; `--last N`; `--json` for machines
 - Use it for post-run audits ("what did that run touch?"), incident forensics, and coordinator after-action reports
 
 ### Workgraph mirror (fresh-clone offline queue)
+
 - Every successful mutating `work` command atomically re-exports the project graph to `<repo>/.workgraph.jsonl` (beads-style): the queue is committed, git history is the audit trail, and a fresh clone sees the queue with zero server access
 - Read verbs (`list/ready/mine/owned/show/orphaned`) fall back to the committed mirror when the DB cannot serve the project — fresh machine, unreachable partition. The DB wins whenever it holds the project's rows; reads never write
 - The mirror lives at the repo root (PROJECT is the git common dir, shared by every worktree); tolerant parse — an absent, truncated, or hand-mangled mirror is never a hard failure
 
 ### Exit checklist (before EXIT)
+
 - Every actionable item exists as a Work Graph item (READY/BLOCKED) — never only in prose/Markdown; every WIP patch or worktree is referenced by an item
 - Claims released; state preserved in events/capsules; terse EXIT only: head, tree, work, wip, claims
 - A stopped session's items stay owned until rebound or `work reclaim`ed — never silently re-queued
 
 ### Coupling rule
+
 Deeply coupled work = ONE implementation lane + parallel review/test lanes.
 4 independent lanes beat 8 coupled ones.

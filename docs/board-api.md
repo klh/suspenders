@@ -24,7 +24,8 @@ newest activity first:
   "owner_sid": "…|null", "owner_label": "lane-name|null", "requires": "shell,git|null",
   "scope": "src/x|null", "parent_id": "W6|null", "age_s": 4210,
   "open_decisions": 1,
-  "tail": { "text": "→ Bash: bun test test/", "ts": "2026-09-28T07:19:35.016Z" } | null
+  "tail": { "text": "→ Bash: bun test test/", "ts": "2026-09-28T07:19:35.016Z" } | null,
+  "unblocked_by": "W6|null"
 }
 ```
 
@@ -32,6 +33,8 @@ newest activity first:
 newest claim intent, else session name, else null. `tail` = the claiming session's latest
 assistant text or tool call, read from the last 32KB of its `sessions.transcript_path`
 JSONL (null when the session has no transcript on this disk — remote or reaped).
+`unblocked_by` = the id of the item whose completion freed this one (newest `work.ready`
+bus event), non-null only while the item is still READY — the UI flags it ▶ startable.
 
 ## GET /api/task?project=&id=
 

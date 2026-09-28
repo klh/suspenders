@@ -1068,7 +1068,8 @@ function taskRow(t, parentId){
   var owner = ownerName(t);
   var od = t.open_decisions || 0;
   var kid = parentId ? '<span class="kidmark">↳</span>' : '';
-  return '<tr data-tid="' + esc(t.id) + '"><td>' + kid + '<button type="button" class="tidbtn mono" data-task="' + esc(t.id) + '" data-proj="' + esc(t.project || '') + '" aria-haspopup="dialog">' + esc(t.id) + '</button></td>' +
+  var ub = (t.state === 'READY' && t.unblocked_by) ? '<span class="dim" title="unblocked by ' + esc(t.unblocked_by) + ' — startable">▶ </span>' : '';
+  return '<tr data-tid="' + esc(t.id) + '"><td>' + kid + ub + '<button type="button" class="tidbtn mono" data-task="' + esc(t.id) + '" data-proj="' + esc(t.project || '') + '" aria-haspopup="dialog">' + esc(t.id) + '</button></td>' +
     '<td class="mono dim">' + esc(projShort(t.project)) + '</td>' +
     '<td class="ttitle">' + esc(String(t.title || '(untitled)')).slice(0, 120) +
       (t.tail && t.tail.text ? '<div class="tail dim">' + esc(t.tail.text) + '</div>' : '') + '</td>' +

@@ -333,7 +333,21 @@ function transcriptTail(sid: string | null | undefined): { text: string; ts: str
 	return null;
 }
 
-function taskShape(w: any, openDecisions: number): Record<string, unknown> {
+// done→ready auto-start (W50): newest work.ready event per item, keyed by
+// project + work id — value is the unblocker's id (who completed the blocking
+// item). A stale event never sticks: taskShape only flags items still READY.
+function unblockedBy(): Map<string, string | null> {
+	const m = new Map<string, string | null>();
+	for (const r of db.query("SELECT payload FROM events WHERE kind = 'work.ready' ORDER BY id DESC LIMIT 500").all() as any[]) {
+		const pl = payloadOf(r.payload);
+		if (!pl?.work) continue;
+		const key = String(pl.project ?? "") + "\u0000" + String(pl.work);
+		if (!m.has(key)) m.set(key, pl.unblocked_by != null ? String(pl.unblocked_by) : null);
+	}
+	return m;
+}
+
+function taskShape(w: any, openDecisions: number, unblocked: Map<string, string | null> = new Map()): Record<string, unknown> {
 	return {
 		project: w.project,
 		id: w.id,
@@ -347,6 +361,7 @@ function taskShape(w: any, openDecisions: number): Record<string, unknown> {
 		age_s: ago(w.updated_at),
 		open_decisions: openDecisions,
 		tail: transcriptTail(w.owner_sid),
+		unblocked_by: w.state === "READY" ? (unblocked.get(String(w.project) + "\u0000" + String(w.id)) ?? null) : null,
 	};
 }
 
@@ -364,7 +379,8 @@ function tasks(p: string | null): unknown[] {
 		n: number;
 	}[])
 		openByTask.set(r.project + "\u0000" + r.task_id, r.n);
-	return rows.map((w) => taskShape(w, openByTask.get(w.project + "\u0000" + w.id) ?? 0));
+	const unblocked = unblockedBy();
+	return rows.map((w) => taskShape(w, openByTask.get(w.project + "\u0000" + w.id) ?? 0, unblocked));
 }
 
 // the drawer's event feed: last 50 events tied to the item — payload.work
@@ -819,7 +835,7 @@ Bun.serve({
 			const w = db.query("SELECT * FROM work_items WHERE project = ? AND id = ?").get(p, id) as any;
 			if (!w) return json({ ok: false, error: `no work item ${id || "(none)"} in ${p || "(no project)"}` }, 404);
 			const openN = (db.query("SELECT COUNT(*) AS n FROM decisions WHERE state = 'OPEN' AND project = ? AND task_id = ?").get(p, id) as { n: number }).n;
-			return json({ ok: true, projects: projectList(), task: taskShape(w, openN), events: workEvents(p, id), decisions: taskDecisions(p, id) });
+			return json({ ok: true, projects: projectList(), task: taskShape(w, openN, unblockedBy()), events: workEvents(p, id), decisions: taskDecisions(p, id) });
 		}
 		if (url.pathname === "/api/activity") {
 			// newest-first bus feed; limit default 80, cap 300

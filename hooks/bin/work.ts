@@ -303,9 +303,23 @@ function rollUp(id: string): void {
 	if (unsatisfied.length === 0) {
 		setState(id, "DONE");
 		emit("work.done", id, { auto: "all required children done/superseded" });
+		freeDependents(id);
 		const p = it.parent_id;
 		if (p) rollUp(p as string);
 	}
+}
+
+// done→ready auto-start (W50): when an item lands DONE, each dependent still
+// in READY whose deps are now all DONE is startable — emit work.ready per such
+// item (payload note "unblocked by <id>") so the board flags it ▶ and a lane
+// can self-serve the chain without re-deriving it. Same gate as take: depsMet.
+function freeDependents(id: string): string[] {
+	const waiting = db()
+		.query("SELECT d.work_id FROM work_deps d JOIN work_items w ON w.id = d.work_id AND w.project = d.project WHERE d.project = ? AND d.depends_on = ? AND w.state = 'READY'")
+		.all(PROJECT, id) as { work_id: string }[];
+	const freed = waiting.map((r) => r.work_id).filter((wid) => depsMet(wid));
+	for (const wid of freed) emit("work.ready", wid, { unblocked_by: id, note: `unblocked by ${id}` });
+	return freed;
 }
 
 function nextChildId(parent: string): string {
@@ -522,13 +536,16 @@ if (cmd === "add") {
 	const tx = db().transaction(() => {
 		setState(id, "DONE", null, sha);
 		emit("work.done", id, { sha: sha ?? "" });
+		const freed = freeDependents(id);
 		releaseClaim((it.owner_sid as string) ?? "", it.scope as string | null, it.id as string);
+		return freed;
 	});
-	tx();
+	const freed = tx();
 	rollUp(id);
 	const p = it.parent_id;
 	if (p) rollUp(p as string);
 	console.log(`${green("✓")} ${cyan(id)} DONE${sha ? ` @${sha.slice(0, 8)}` : ""}`);
+	if (freed.length) console.log(`${amber("▶")} startable now: ${cyan(freed.join(", "))} ${dim(`— unblocked by ${id}`)}`);
 } else if (cmd === "fail") {
 	const id = pos[0];
 	const note = flag("--note") ?? "";
