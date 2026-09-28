@@ -397,6 +397,12 @@ if (MODE === "dispatch") {
 				`${store}/objects/info/alternates`,
 				`${REPO}/.git/objects\n`,
 			);
+			g([
+				"remote",
+				"add",
+				"origin",
+				sh(["git", "-C", REPO, "remote", "get-url", "origin"]),
+			]);
 		}
 	}
 	const agentArgs =
