@@ -546,6 +546,13 @@ if (cmd === "add") {
 	if (p) rollUp(p as string);
 	console.log(`${green("✓")} ${cyan(id)} DONE${sha ? ` @${sha.slice(0, 8)}` : ""}`);
 	if (freed.length) console.log(`${amber("▶")} startable now: ${cyan(freed.join(", "))} ${dim(`— unblocked by ${id}`)}`);
+	// W52: retire the item's per-item worktree if it has one (clean → removed,
+	// dirty → kept with a note; branch suspenders/<id> always survives)
+	const wtDir = `${PROJECT.slice(0, -4)}.worktrees/${id}`;
+	if (existsSync(wtDir)) {
+		const w = Bun.spawnSync([process.execPath, new URL("./worktree.ts", import.meta.url).pathname, "retire", id], { stdout: "inherit", stderr: "inherit" });
+		if (w.exitCode === 3) console.log(`${amber("●")} worktree kept (dirty) — ${wtDir}`);
+	}
 } else if (cmd === "fail") {
 	const id = pos[0];
 	const note = flag("--note") ?? "";
