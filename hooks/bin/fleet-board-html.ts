@@ -1272,12 +1272,12 @@ var KCOLS = [
   { key: 'DONE', label: 'done', states: ['DONE'], cap: 12 }
 ];
 var starting = {}; // 'proj\u0000id' -> start POST in flight (rebuild-proof)
-function startItem(id, proj, btn){
+function startItem(id, proj, btn, agent){
   var k = proj + '\u0000' + id;
   if (starting[k]) return;
   starting[k] = true;
   if (btn) btn.disabled = true;
-  postJSON('/api/start', { project: proj, id: id }).then(function(j){
+  postJSON('/api/start', { project: proj, id: id, agent: agent || 'claude' }).then(function(j){
     delete starting[k];
     if (j && j.ok) toast('lane ' + String(j.sid || '') + ' dispatching on ' + id);
     else toast('start failed: ' + String((j && j.error) || 'unknown error'));
@@ -1295,7 +1295,8 @@ function kanbanCard(t){
   html += '<div class="ktitle">' + esc(String(t.title || '(untitled)')).slice(0, 140) + '</div>';
   html += '<div class="klane dim">lane ' + esc(t.owner_label || t.owner_sid || 'unclaimed') + (t.origin ? ' · ' + esc(String(t.origin)) : '') + '</div>';
   if (t.tail && t.tail.text) html += '<div class="ktail">' + esc(t.tail.text) + '</div>';
-  if (startable) html += '<button type="button" class="kstart" data-start="' + esc(t.id) + '" data-startproj="' + esc(t.project || '') + '">▶ start lane</button>';
+  if (startable) html += '<button type="button" class="kstart" data-start="' + esc(t.id) + '" data-startproj="' + esc(t.project || '') + '" data-agent="claude">▶ claude</button>' +
+    '<button type="button" class="kstart" data-start="' + esc(t.id) + '" data-startproj="' + esc(t.project || '') + '" data-agent="codex">▶ codex</button>';
   return html + '</div>';
 }
 function renderKanban(){
@@ -1837,7 +1838,7 @@ byId('tasksTbl').addEventListener('click', function(e){
 });
 byId('kanban').addEventListener('click', function(e){
   var s = e.target.closest && e.target.closest('[data-start]');
-  if (s) { startItem(s.getAttribute('data-start'), s.getAttribute('data-startproj'), s); return; }
+  if (s) { startItem(s.getAttribute('data-start'), s.getAttribute('data-startproj'), s, s.getAttribute('data-agent')); return; }
   var b = e.target.closest && e.target.closest('[data-task]');
   if (b) { openTask(b.getAttribute('data-task'), b.getAttribute('data-proj'), b); return; }
   var c = e.target.closest && e.target.closest('.kcard');

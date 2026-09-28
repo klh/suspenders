@@ -2032,14 +2032,23 @@ Bun.serve({
 			if (!parsed.ok) return parsed.resp;
 			const project = String(parsed.body?.project ?? "");
 			const id = String(parsed.body?.id ?? "");
+			const agent =
+				String(parsed.body?.agent ?? "claude") === "codex" ? "codex" : "claude";
 			if (!project || !id)
 				return json({ ok: false, error: "missing project or id" }, 400);
 			if (DEMO)
 				return json({ ok: false, error: "demo board — no real lanes" }, 409);
-			const claude = Bun.which("claude");
-			if (!claude)
+			const claude =
+				Bun.which(agent) ??
+				(agent === "codex"
+					? "/opt/homebrew/bin/codex"
+					: `${process.env.HOME}/.local/bin/claude`);
+			if (!existsSync(claude))
 				return json(
-					{ ok: false, error: "claude binary not found on the board's PATH" },
+					{
+						ok: false,
+						error: `${agent} binary not found on the board's PATH`,
+					},
 					409,
 				);
 			const w = db
@@ -2084,13 +2093,15 @@ Bun.serve({
 					repo,
 					"--item",
 					id,
+					"--agent",
+					agent,
 				],
 				{
 					stdin: "ignore",
 					stdout: "ignore",
 					stderr: "ignore",
 					// a launchd board can miss the user PATH — hand the lane's
-					// `claude` spawn the dir we just resolved it from
+					// agent spawn the dir we just resolved it from
 					env: {
 						...process.env,
 						PATH: `${dirname(claude)}:${process.env.PATH ?? ""}`,
