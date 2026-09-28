@@ -113,15 +113,18 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/advise    fire the advice worker for a fork (async; lands as fact advice.<id>)
 - POST /api/comment   route a review line-comment to a work item's owning lane (coord NOTE; id, file, line, note required — note capped at 2000)
 - POST /api/message   message a work item's owning lane as the coordinator (coord NOTE; id, note required — note capped at 2000)
-- POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not READY, demo, or claude missing)
+- POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not a READY item, demo, or agent missing)
 - POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, or while a lane lives)
+- POST /api/orchestrate            LLM proposes a plan item + parallel children from a goal (project, goal required; read-only — nothing registers, 502 when no parseable plan comes back)
+- POST /api/orchestrate/register   register a proposed plan as a plan-gated work split through the work CLI (project, title, children required; children 2..8; the plan item is the split parent — the AGENTS.md add-plan-then-split flow)
 
 ## Advice LLM
 
 SUSPENDERS_LLM_URL points at an OpenAI-compatible chat endpoint used by the
-advice worker (default http://127.0.0.1:8901 — belt's code specialist). If
-the endpoint is unreachable, advice is marked unavailable and the fork stays
-open for the human; nothing else on the board depends on it.
+advice worker and the orchestrate box (default http://127.0.0.1:8901 —
+belt's code specialist). If the endpoint is unreachable, advice is marked
+unavailable and the fork stays open for the human; orchestrate answers 502
+and nothing registers. Nothing else on the board depends on it.
 
 ## Companion repos
 
@@ -1567,6 +1570,281 @@ if (DEMO) {
 	writeFileSync(`${REG_DIR}/.demo-sealed`, ""); // any successful demo run seals this home against silent re-seeding after a wipe
 }
 
+// W57 — orchestrate box part 1: config + endpoint constants + model resolve.
+// The LLM proposes a plan item + parallel children from a goal; the human
+// registers it as a plan-gated work split (endpoints below, before /llms.txt).
+// The advice contract applies: the LLM proposes, the human registers — the
+// proposal is never auto-registered.
+const ORCH = {
+	MIN_CHILDREN: 2,
+	MAX_CHILDREN: 8,
+	TITLE_MAX: 120,
+	BRIEF_MAX: 400,
+	GOAL_MAX: 2000,
+	CTX_ITEMS: 40,
+	CTX_ENTRIES: 60,
+};
+
+// same endpoint contract as advise.ts (full chat-completions URL)
+const ORCH_URL =
+	process.env.SUSPENDERS_LLM_URL ?? "http://127.0.0.1:8901/v1/chat/completions";
+const ORCH_KEY = process.env.SUSPENDERS_LLM_KEY;
+const ORCH_HOST = (() => {
+	try {
+		return new URL(ORCH_URL).host;
+	} catch {
+		return "(unparseable SUSPENDERS_LLM_URL)";
+	}
+})();
+let orchModel: string | null = null;
+async function orchModelResolve(): Promise<string> {
+	if (orchModel) return orchModel;
+	try {
+		const r = await fetch(ORCH_URL.replace(/\/chat\/completions$/, "/models"), {
+			headers: ORCH_KEY ? { authorization: `Bearer ${ORCH_KEY}` } : {},
+			signal: AbortSignal.timeout(5000),
+		});
+		if (r.ok) {
+			const j = (await r.json()) as { data?: { id?: string }[] };
+			orchModel = j.data?.[0]?.id ?? "local";
+			return orchModel;
+		}
+	} catch {}
+	return "local";
+}
+const ORCH_SYS = `You propose work decompositions for a coding-agent fleet. From the goal and repo context, output STRICT JSON only — no prose, no markdown fences:
+{"title": "<plan title, imperative, <=120 chars>", "children": [{"title": "<child task title, imperative, independently actionable, <=120 chars>", "brief": "<one sentence of scope guidance, <=400 chars>"}]}
+Rules: 2-6 children; children run in parallel — no shared-file edits, no ordering between them; never invent ids.`;
+
+interface OrchProposal {
+	title: string;
+	children: { title: string; brief: string }[];
+}
+
+// tolerate the failure modes local models actually produce: <think> blocks,
+// markdown fences, prose around the object. Returns null when nothing
+// proposal-shaped survives — the endpoint answers 502 and the human retries.
+function parseProposal(text: string): OrchProposal | null {
+	const noThink = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+	const start = noThink.indexOf("{");
+	const end = noThink.lastIndexOf("}");
+	if (start < 0 || end <= start) return null;
+	let j: unknown;
+	try {
+		j = JSON.parse(noThink.slice(start, end + 1));
+	} catch {
+		return null;
+	}
+	if (typeof j !== "object" || j === null) return null;
+	const o = j as Record<string, unknown>;
+	if (typeof o.title !== "string" || !Array.isArray(o.children)) return null;
+	const kids: { title: string; brief: string }[] = [];
+	for (const c of o.children) {
+		if (typeof c !== "object" || c === null) continue;
+		const co = c as Record<string, unknown>;
+		const t =
+			typeof co.title === "string"
+				? co.title.trim().slice(0, ORCH.TITLE_MAX)
+				: "";
+		const b =
+			typeof co.brief === "string"
+				? co.brief.trim().slice(0, ORCH.BRIEF_MAX)
+				: "";
+		if (t) kids.push({ title: t, brief: b });
+	}
+	const title = o.title.trim().slice(0, ORCH.TITLE_MAX);
+	if (!title || kids.length < ORCH.MIN_CHILDREN) return null;
+	return { title, children: kids.slice(0, ORCH.MAX_CHILDREN) };
+}
+
+// bounded repo context: open work items (dedupe vs the goal is the model's
+// job) + top-level entries as a cheap shape hint
+function orchContext(project: string, repo: string): string {
+	const items = (
+		db
+			.query(
+				"SELECT id, state, title FROM work_items WHERE project = ? AND state NOT IN ('DONE','SUPERSEDED','SHATTERED') ORDER BY id LIMIT ?",
+			)
+			.all(project, ORCH.CTX_ITEMS) as {
+			id: string;
+			state: string;
+			title: string;
+		}[]
+	)
+		.map((r) => `- ${r.id} ${r.state}: ${r.title}`)
+		.join("\n");
+	const entries = readdirSync(repo)
+		.filter((e) => e !== ".git" && e !== "node_modules")
+		.sort()
+		.slice(0, ORCH.CTX_ENTRIES)
+		.join(", ");
+	return `OPEN WORK ITEMS:\n${items || "(none)"}\nTOP-LEVEL: ${entries}`;
+}
+
+// one llm.call telemetry event per orchestrate round-trip, success or not —
+// the routing log shows failed calls too (advise.ts W28 pattern)
+function orchTelemetry(payload: Record<string, unknown>): void {
+	db.query(
+		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'orchestrate', 'llm.call', NULL, ?, NULL)",
+	).run(Date.now(), JSON.stringify(payload));
+}
+
+async function orchestrate(
+	project: string,
+	goal: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+	const repo = project.replace(/\/\.git$/, "");
+	if (!existsSync(repo))
+		return {
+			status: 404,
+			body: { ok: false, error: `project directory missing: ${repo}` },
+		};
+	const ctx = orchContext(project, repo);
+	const t0 = Date.now();
+	const model = await orchModelResolve();
+	let content = "";
+	let pt = 0;
+	let ct = 0;
+	let tt = 0;
+	let llmError: string | null = null;
+	try {
+		const r = await fetch(ORCH_URL, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				...(ORCH_KEY ? { authorization: `Bearer ${ORCH_KEY}` } : {}),
+			},
+			body: JSON.stringify({
+				model,
+				messages: [
+					{ role: "system", content: ORCH_SYS },
+					{
+						role: "user",
+						content: `GOAL:\n${goal}\n\nREPO CONTEXT:\n${ctx}`,
+					},
+				],
+				max_tokens: 1200,
+				temperature: 0.2,
+			}),
+			signal: AbortSignal.timeout(120_000),
+		});
+		if (!r.ok)
+			throw new Error(`LLM ${r.status}: ${(await r.text()).slice(0, 200)}`);
+		const j = (await r.json()) as {
+			choices?: { message?: { content?: string } }[];
+			usage?: {
+				prompt_tokens?: number;
+				completion_tokens?: number;
+				total_tokens?: number;
+			};
+		};
+		content = j.choices?.[0]?.message?.content ?? "";
+		pt = j.usage?.prompt_tokens ?? 0;
+		ct = j.usage?.completion_tokens ?? 0;
+		tt = j.usage?.total_tokens ?? pt + ct;
+	} catch (e) {
+		llmError = e instanceof Error ? e.message : String(e);
+	}
+	orchTelemetry({
+		for: "orchestrate",
+		model,
+		host: ORCH_HOST,
+		pt,
+		ct,
+		tt,
+		ms: Date.now() - t0,
+		...(llmError ? { error: llmError.slice(0, 200) } : {}),
+	});
+	if (llmError)
+		return { status: 502, body: { ok: false, error: llmError.slice(0, 300) } };
+	const proposal = parseProposal(content);
+	if (!proposal)
+		return {
+			status: 502,
+			body: {
+				ok: false,
+				error:
+					"orchestrator returned no parseable plan (want JSON {title, children[]}) — rephrase the goal and retry",
+			},
+		};
+	return {
+		status: 200,
+		body: { ok: true, proposal, model, ms: Date.now() - t0 },
+	};
+}
+
+// register: plan item first, then the plan-gated split — the plan item IS
+// the split parent (AGENTS.md flow). Children ids are read back from the
+// work graph, not parsed out of CLI prose (lesson.silent-noop-mutations).
+function orchRegister(
+	project: string,
+	title: string,
+	kids: string[],
+): { status: number; body: Record<string, unknown> } {
+	const repo = project.replace(/\/\.git$/, "");
+	if (!existsSync(repo))
+		return {
+			status: 404,
+			body: { ok: false, error: `project directory missing: ${repo}` },
+		};
+	const run = (args: string[]): { out: string; err: string; code: number } => {
+		const p = Bun.spawnSync([process.execPath, CLI("work.ts"), ...args], {
+			cwd: repo,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		return {
+			out: p.stdout.toString(),
+			err: p.stderr.toString(),
+			code: p.exitCode,
+		};
+	};
+	const add = run(["add", `plan: ${title}`, "--by", "board"]);
+	if (add.code !== 0)
+		return {
+			status: 500,
+			body: {
+				ok: false,
+				error: `plan registration failed: ${(add.err || add.out).slice(0, 300)}`,
+			},
+		};
+	const m = add.out.split("\n")[0]?.match(/(W\d+(?:\.\d+)*) READY/);
+	if (!m)
+		return {
+			status: 500,
+			body: {
+				ok: false,
+				error: `plan registered but id unparsable: ${add.out.slice(0, 200)}`,
+			},
+		};
+	const pid = m[1];
+	const split = run([
+		"split",
+		pid,
+		...kids,
+		"--reason",
+		"independent-scopes",
+		"--plan",
+		pid,
+	]);
+	if (split.code !== 0)
+		return {
+			status: 500,
+			body: {
+				ok: false,
+				error: `split failed: ${(split.err || split.out).slice(0, 300)}`,
+			},
+		};
+	const children = (
+		db
+			.query(
+				"SELECT id, title FROM work_items WHERE project = ? AND parent_id = ? ORDER BY id",
+			)
+			.all(project, pid) as { id: string; title: string }[]
+	).map((r) => ({ id: r.id, title: r.title }));
+	return { status: 200, body: { ok: true, plan: pid, children } };
+}
+
 Bun.serve({
 	port: PORT,
 	hostname: BIND,
@@ -2243,14 +2521,66 @@ Bun.serve({
 			child.unref();
 			return json({ ok: true, item: id, branch, ladder: ship.ladder });
 		}
+		if (req.method === "POST" && url.pathname === "/api/orchestrate") {
+			// W57 — propose only: an LLM round-trip, zero work-graph writes.
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			if (DEMO)
+				return json({ ok: false, error: "demo board — no real lanes" }, 409);
+			const parsed = await readJson(req);
+			if (!parsed.ok) return parsed.resp;
+			const project = String(parsed.body?.project ?? "");
+			const goal = String(parsed.body?.goal ?? "")
+				.trim()
+				.slice(0, ORCH.GOAL_MAX);
+			if (!project || !goal)
+				return json({ ok: false, error: "missing project or goal" }, 400);
+			const r = await orchestrate(project, goal);
+			return json(r.body, r.status);
+		}
+		if (req.method === "POST" && url.pathname === "/api/orchestrate/register") {
+			// W57 — the one click: register the proposal as a plan item + a
+			// plan-gated split via the work CLI in the target repo.
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			if (DEMO)
+				return json({ ok: false, error: "demo board — no real lanes" }, 409);
+			const parsed = await readJson(req);
+			if (!parsed.ok) return parsed.resp;
+			const project = String(parsed.body?.project ?? "");
+			const title = String(parsed.body?.title ?? "")
+				.trim()
+				.slice(0, ORCH.TITLE_MAX);
+			const raw = Array.isArray(parsed.body?.children)
+				? (parsed.body.children as unknown[])
+				: [];
+			const kids = raw
+				.map((c) =>
+					typeof c === "string"
+						? c.trim().slice(0, ORCH.TITLE_MAX)
+						: typeof (c as { title?: unknown })?.title === "string"
+							? String((c as { title?: unknown }).title)
+									.trim()
+									.slice(0, ORCH.TITLE_MAX)
+							: "",
+				)
+				.filter((t) => t.length > 0);
+			if (!project) return json({ ok: false, error: "missing project" }, 400);
+			if (!title) return json({ ok: false, error: "missing title" }, 400);
+			if (kids.length < ORCH.MIN_CHILDREN || kids.length > ORCH.MAX_CHILDREN)
+				return json({ ok: false, error: "children must number 2..8" }, 400);
+			const r = orchRegister(project, title, kids);
+			return json(r.body, r.status);
+		}
 		if (url.pathname === "/llms.txt")
-			// static plain-text agent contract (see LLMS_TXT above)
-			return new Response(LLMS_TXT, {
-				headers: {
-					"content-type": "text/plain; charset=utf-8",
-					"cache-control": "no-store",
-				},
-			});
+			if (url.pathname === "/llms.txt")
+				// static plain-text agent contract (see LLMS_TXT above)
+				return new Response(LLMS_TXT, {
+					headers: {
+						"content-type": "text/plain; charset=utf-8",
+						"cache-control": "no-store",
+					},
+				});
 		if (url.pathname === "/")
 			return new Response(HTML, {
 				headers: {
@@ -2262,7 +2592,7 @@ Bun.serve({
 	},
 });
 console.log(
-	`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise /api/comment /api/start /api/ship)`,
+	`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise /api/comment /api/start /api/ship /api/orchestrate)`,
 );
 
 // best-effort Bonjour/mDNS: while the board runs, http://suspenders.local:PORT

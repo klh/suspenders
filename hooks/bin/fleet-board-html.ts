@@ -117,6 +117,23 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
   font:12px ui-monospace, Menlo, monospace; padding:3px 6px;
 }
 #tasksTbl .num { text-align:right; font-variant-numeric:tabular-nums; color:#98958e; }
+/* W57 orchestrate box — LLM proposes a plan + parallel children from a goal; the human registers it as a plan-gated work split */
+.orch { border:1px solid rgba(255,255,255,.14); border-radius:6px; padding:10px 12px; margin:0 0 12px; background:rgba(255,255,255,.03); }
+.orchrow { display:flex; gap:8px; align-items:center; }
+#orchGoal { flex:1; background:#121110; color:#e8e6e1; border:1px solid rgba(255,255,255,.16); border-radius:4px; font:12px ui-monospace, Menlo, monospace; padding:5px 8px; }
+#orchGoal:focus { outline:none; border-color:#d8900f; }
+#orchGo { background:none; border:1px solid #d8900f; border-radius:4px; color:#d8900f; font:inherit; font-size:11px; padding:4px 10px; cursor:pointer; }
+#orchGo:disabled { opacity:.45; cursor:default; }
+#orchGo:hover:not(:disabled) { background:rgba(216,144,15,.12); }
+.orchplan { margin-top:8px; }
+.orchtitle { font-size:12px; font-weight:600; }
+.orchmeta { font-size:10px; margin:2px 0 6px; }
+.orchkid { font-size:11px; padding:3px 0; border-top:1px solid rgba(255,255,255,.06); }
+.orchkidn { color:#d8900f; margin-right:4px; }
+.orchbrief { font-size:10px; margin-left:14px; }
+.orchactions { margin-top:8px; display:flex; gap:8px; }
+.orchdisc { background:none; border:1px solid rgba(255,255,255,.22); border-radius:4px; color:#98958e; font:inherit; font-size:11px; padding:2px 8px; cursor:pointer; }
+.orchdisc:hover { color:#e8e6e1; }
 .tidbtn { background:none; border:none; padding:0; color:#d8900f; font:inherit; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
 /* W65 lanes kanban — one column per work-graph state, cards carry the lane's live tail */
 .kwrap { overflow-x:auto; }
@@ -290,6 +307,14 @@ button.lanesend:disabled { opacity:.45; cursor:default; }
   </div>
 </section>
 <section id="tab-tasks" hidden>
+  <div id="orch" class="orch">
+    <div class="orchrow">
+      <input id="orchGoal" type="text" placeholder="goal — the LLM proposes a plan + parallel children; register = work split" aria-label="orchestration goal">
+      <button id="orchGo" type="button">orchestrate</button>
+    </div>
+    <div id="orchErr"></div>
+    <div id="orchOut"></div>
+  </div>
   <div class="taskbar">
     <label class="plabel" for="taskProj">project</label>
     <select id="taskProj"><option value="all">all projects</option></select>
@@ -1938,6 +1963,86 @@ sel.addEventListener('change', function(){
   projBaseline = true; // fresh scope — re-baseline toasts
   tick();
 });
+// --- W57 orchestrate box: LLM proposes a plan + parallel children from a
+// goal; the human registers it as a plan-gated work split (POST
+// /api/orchestrate → /api/orchestrate/register). Target = the global project
+// filter; the proposal is read-only until registered.
+var orch = { busy: false, regBusy: false, err: null, prop: null, model: '', ms: 0, proj: '' };
+function orchProject(){
+  var v = sel.value;
+  return v && v !== 'all' ? v : null;
+}
+function renderOrch(){
+  var errEl = byId('orchErr');
+  if (orch.err) errBanner(errEl, orch.err, function(){ orch.err = null; renderOrch(); });
+  else clearErr(errEl);
+  var go = byId('orchGo');
+  if (go) { go.disabled = orch.busy; setText(go, orch.busy ? 'proposing…' : 'orchestrate'); }
+  var out = byId('orchOut');
+  if (!out) return;
+  if (!orch.prop) { sigSet(out, 'idle', ''); return; }
+  var h = '<div class="orchplan">';
+  h += '<div class="orchtitle">' + esc(orch.prop.title) + '</div>';
+  h += '<div class="orchmeta dim">proposed by ' + esc(orch.model || 'llm') + ' in ' + (orch.ms/1000).toFixed(1) + 's · ' + esc(projShort(orch.proj)) + '</div>';
+  for (var i = 0; i < orch.prop.children.length; i++) {
+    var c = orch.prop.children[i];
+    h += '<div class="orchkid"><span class="orchkidn">' + (i+1) + '.</span> ' + esc(c.title) +
+      (c.brief ? '<div class="orchbrief dim">' + esc(c.brief) + '</div>' : '') + '</div>';
+  }
+  h += '<div class="orchactions">' +
+    '<button type="button" class="kstart" id="orchReg">register plan split</button> ' +
+    '<button type="button" class="orchdisc" id="orchDisc">discard</button></div></div>';
+  sigSet(out, JSON.stringify(orch.prop) + orch.busy + orch.regBusy, h);
+}
+function doOrchestrate(){
+  if (orch.busy || orch.regBusy) return;
+  var proj = orchProject();
+  if (!proj) { orch.err = 'pick a project in the header filter first'; orch.prop = null; renderOrch(); return; }
+  var goal = (byId('orchGoal').value || '').trim();
+  if (!goal) { orch.err = 'type a goal first'; renderOrch(); return; }
+  orch.busy = true; orch.err = null; renderOrch();
+  fetch('/api/orchestrate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: proj, goal: goal }), signal: AbortSignal.timeout(130000) })
+    .then(function(r){ return r.json().catch(function(){ return {}; }); })
+    .then(function(j){
+      j = j || {};
+      if (j.ok) {
+        orch.prop = j.proposal; orch.model = j.model || ''; orch.ms = j.ms || 0; orch.proj = proj;
+      } else {
+        orch.err = String(j.error || 'orchestrate failed (HTTP ' + r.status + ')');
+      }
+      renderOrch();
+    })
+    .catch(function(e){ orch.busy = false; orch.err = String((e && e.message) || e); renderOrch(); });
+}
+function orchReg(){
+  if (!orch.prop || orch.busy || orch.regBusy) return;
+  orch.regBusy = true;
+  postJSON('/api/orchestrate/register', { project: orch.proj, title: orch.prop.title, children: orch.prop.children.map(function(c){ return { title: c.title }; }) }).then(function(j){
+    orch.regBusy = false;
+    if (j && j.ok) {
+      toast('registered ' + j.plan + ' → ' + (j.children || []).length + ' children');
+      orch.prop = null; byId('orchGoal').value = '';
+      pollTasks();
+    } else {
+      orch.err = String((j && j.error) || 'register failed');
+    }
+    renderOrch();
+  });
+}
+function orchDisc(){ if (orch.busy || orch.regBusy) return; orch.prop = null; renderOrch(); }
+(function(){
+  var inp = byId('orchGoal');
+  if (inp) inp.addEventListener('keydown', function(e){ if (e.key === 'Enter') { e.preventDefault(); doOrchestrate(); } });
+  var go = byId('orchGo');
+  if (go) go.addEventListener('click', doOrchestrate);
+  document.addEventListener('click', function(e){
+    var t = e.target.closest && e.target.closest('#orchReg');
+    if (t) { orchReg(); return; }
+    var d = e.target.closest && e.target.closest('#orchDisc');
+    if (d) orchDisc();
+  });
+})();
+
 function renderAll(){
   renderConn();
   renderFleet();
