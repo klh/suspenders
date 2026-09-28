@@ -92,6 +92,7 @@ const ITEM_FLAGS = [
 	"--reason",
 	"--keep",
 	"--sha",
+	"--origin",
 	"--note",
 	"--on",
 	"--as",
