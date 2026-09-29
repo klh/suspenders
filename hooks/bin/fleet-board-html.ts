@@ -151,6 +151,9 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
 .ktail { margin-top:4px; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#98958e; }
 .kstart { margin-top:6px; background:none; border:1px solid #d8900f; border-radius:4px; color:#d8900f; font:inherit; font-size:11px; padding:2px 8px; cursor:pointer; }
 .kstart:hover { background:rgba(216,144,15,.12); }
+/* executor dropdown + play (board dispatch): compact row, no layout blowout */
+.kexec { margin-top:6px; display:flex; gap:6px; align-items:center; }
+.kexecsel { background:#141413; border:1px solid #d8900f; border-radius:4px; color:#d8900f; font:inherit; font-size:11px; padding:2px 4px; max-width:170px; cursor:pointer; }
 .kempty { font-size:11px; padding:2px 0 6px; }
 .ttitle { word-break:break-word; max-width:480px; }
 .tail { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:480px; }
@@ -1297,6 +1300,26 @@ var KCOLS = [
   { key: 'DONE', label: 'done', states: ['DONE'], cap: 12 }
 ];
 var starting = {}; // 'proj\u0000id' -> start POST in flight (rebuild-proof)
+var execPick = {}; // 'proj\u0000id' -> chosen executor (survives card rebuilds)
+var execOpts = [
+  { value: 'claude', label: 'claude' },
+  { value: 'codex', label: 'codex' }
+];
+function pollExecutors(){
+  fetch('/api/executors', { signal: AbortSignal.timeout(8000) })
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if (!j || j.ok === false || !Array.isArray(j.executors)) return;
+      var opts = [];
+      for (var i = 0; i < j.executors.length; i++) {
+        var x = j.executors[i];
+        if (x && x.value) opts.push({ value: String(x.value), label: String(x.label || x.value) });
+      }
+      if (opts.length >= 2) execOpts = opts;
+      renderKanban(); // repaint cards with the live belt targets
+    })
+    .catch(function(){}); // dropdown falls back to claude/codex only
+}
 function startItem(id, proj, btn, agent){
   var k = proj + '\u0000' + id;
   if (starting[k]) return;
@@ -1304,7 +1327,7 @@ function startItem(id, proj, btn, agent){
   if (btn) btn.disabled = true;
   postJSON('/api/start', { project: proj, id: id, agent: agent || 'claude' }).then(function(j){
     delete starting[k];
-    if (j && j.ok) toast('lane ' + String(j.sid || '') + ' dispatching on ' + id);
+    if (j && j.ok) toast('dispatching ' + id + ' on ' + (agent || 'claude') + ' — lane ' + String(j.sid || ''));
     else toast('start failed: ' + String((j && j.error) || 'unknown error'));
     pollTasks();
   });
@@ -1320,8 +1343,16 @@ function kanbanCard(t){
   html += '<div class="ktitle">' + esc(String(t.title || '(untitled)')).slice(0, 140) + '</div>';
   html += '<div class="klane dim">lane ' + esc(t.owner_label || t.owner_sid || 'unclaimed') + (t.origin ? ' · ' + esc(String(t.origin)) : '') + '</div>';
   if (t.tail && t.tail.text) html += '<div class="ktail">' + esc(t.tail.text) + '</div>';
-  if (startable) html += '<button type="button" class="kstart" data-start="' + esc(t.id) + '" data-startproj="' + esc(t.project || '') + '" data-agent="claude">▶ claude</button>' +
-    '<button type="button" class="kstart" data-start="' + esc(t.id) + '" data-startproj="' + esc(t.project || '') + '" data-agent="codex">▶ codex</button>';
+  if (startable) {
+    var pick = execPick[t.project + '\u0000' + t.id] || 'claude';
+    var opts = '';
+    for (var xi = 0; xi < execOpts.length; xi++) {
+      var xo = execOpts[xi];
+      opts += '<option value="' + esc(xo.value) + '"' + (xo.value === pick ? ' selected' : '') + '>' + esc(xo.label) + '</option>';
+    }
+    html += '<div class="kexec"><select class="kexecsel" aria-label="executor for ' + esc(t.id) + '">' + opts + '</select>' +
+      '<button type="button" class="kstart" data-start="' + esc(t.id) + '" data-startproj="' + esc(t.project || '') + '" title="dispatch on the chosen executor">▶</button></div>';
+  }
   return html + '</div>';
 }
 function renderKanban(){
@@ -1863,11 +1894,22 @@ byId('tasksTbl').addEventListener('click', function(e){
 });
 byId('kanban').addEventListener('click', function(e){
   var s = e.target.closest && e.target.closest('[data-start]');
-  if (s) { startItem(s.getAttribute('data-start'), s.getAttribute('data-startproj'), s, s.getAttribute('data-agent')); return; }
+  if (s) {
+    var card = s.closest('.kcard');
+    var selEl = card ? card.querySelector('.kexecsel') : null;
+    startItem(s.getAttribute('data-start'), s.getAttribute('data-startproj'), s, selEl ? selEl.value : 'claude');
+    return;
+  }
   var b = e.target.closest && e.target.closest('[data-task]');
   if (b) { openTask(b.getAttribute('data-task'), b.getAttribute('data-proj'), b); return; }
   var c = e.target.closest && e.target.closest('.kcard');
   if (c) openTask(c.getAttribute('data-kid'), c.getAttribute('data-kproj'), c);
+});
+byId('kanban').addEventListener('change', function(e){
+  var s = e.target.classList && e.target.classList.contains('kexecsel') ? e.target : null;
+  if (!s) return;
+  var card = s.closest('.kcard');
+  if (card) execPick[(card.getAttribute('data-kproj') || '') + '\u0000' + (card.getAttribute('data-kid') || '')] = s.value;
 });
 var theadEl = document.querySelector('#tasksTbl thead');
 if (theadEl) theadEl.addEventListener('click', function(e){
@@ -2054,6 +2096,7 @@ function setCollapsed(v){
   renderDecisions();
 }
 setInterval(tick, 1000);
+pollExecutors(); // belt targets for the dispatch dropdown (page-load, not polled)
 if (!location.hash) history.replaceState(null, '', '#decisions');
 setTab(TABS[location.hash.slice(1)] ? location.hash.slice(1) : 'decisions', true);
 applyHashFilter(); // honor #filter=<text> on first paint (deep-link from the statusline)

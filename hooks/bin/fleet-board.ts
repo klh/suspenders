@@ -18,6 +18,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { hostname } from "node:os";
 import { dirname } from "node:path";
 import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
 import { HTML } from "./fleet-board-html.ts";
@@ -74,6 +75,117 @@ const LLM_ORIGIN = (() => {
 		return "http://127.0.0.1:8901";
 	}
 })();
+// board dispatch executors (the READY-card dropdown): the two local coding
+// agents plus live LLM targets from belt's remote registry. `remotes.ts
+// check --json` runs server-side, cached 60s — the probes are multi-second
+// and the board polls every second.
+const BELT_REPO = process.env.BELT_REPO ?? "/Volumes/Sensitive/github/klh/belt";
+const WORK_CLI = CLI("work.ts");
+const COORD_CLI = CLI("coord.ts");
+interface BeltEndpoint {
+	machine?: string;
+	port?: number;
+	protocol?: string;
+	model?: string;
+	ok?: boolean;
+	roles?: string[];
+}
+let beltCache: { at: number; rows: BeltEndpoint[] } | null = null;
+const beltCheck = async (): Promise<BeltEndpoint[]> => {
+	if (beltCache && Date.now() - beltCache.at < 60_000) return beltCache.rows;
+	let rows: BeltEndpoint[] = [];
+	try {
+		const p = Bun.spawn(
+			[process.execPath, `${BELT_REPO}/bin/remotes.ts`, "check", "--json"],
+			{ stdout: "pipe", stderr: "ignore" },
+		);
+		const out = await new Response(p.stdout).text();
+		await p.exited;
+		const parsed: unknown = JSON.parse(out);
+		if (Array.isArray(parsed)) rows = parsed as BeltEndpoint[];
+	} catch {}
+	beltCache = { at: Date.now(), rows };
+	return rows;
+};
+// one bun sibling-CLI call — stdout+stderr folded, trimmed
+const runCli = (
+	args: string[],
+	cwd?: string,
+): { code: number; out: string } => {
+	const p = Bun.spawnSync([process.execPath, ...args], {
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		...(cwd ? { cwd } : {}),
+	});
+	return {
+		code: p.exitCode ?? 1,
+		out: `${p.stdout.toString()}${p.stderr.toString()}`.trim(),
+	};
+};
+// one llm:* dispatch: route the item's title+description through belt's
+// remotes router (role-based), land the answer on the item's coord thread,
+// release the board claim either way. Fire-and-forget — the HTTP answer
+// returns while belt routes. cwd = the item's repo: coord stamps
+// payload.project from the cwd and the drawer timeline matches on it.
+const llmRoute = async (job: {
+	item: string;
+	repo: string;
+	role: string;
+	target: string;
+	sid: string;
+	title: string;
+	desc: string;
+}): Promise<void> => {
+	const prompt = `${job.title}${job.desc ? ` — ${job.desc}` : ""}`.slice(
+		0,
+		4000,
+	);
+	let ok = false;
+	let answer = "";
+	try {
+		const cmd = [
+			process.execPath,
+			`${BELT_REPO}/bin/remotes.ts`,
+			"route",
+			job.role,
+			prompt,
+		];
+		const p = Bun.spawn(cmd, {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			cwd: job.repo,
+		});
+		const [out, err] = await Promise.all([
+			new Response(p.stdout).text(),
+			new Response(p.stderr).text(),
+		]);
+		await p.exited;
+		ok = p.exitCode === 0;
+		answer = ok
+			? out.trim()
+			: `route failed: ${(err.trim() || out.trim() || `exit ${p.exitCode}`).slice(0, 400)}`;
+	} catch (e) {
+		answer = `route failed: ${e instanceof Error ? e.message : String(e)}`;
+	}
+	const note = `${ok ? "llm.answer" : "llm.error"} (${job.target}): ${answer.slice(0, 1800)}`;
+	runCli(
+		[
+			COORD_CLI,
+			"emit",
+			"llm.result",
+			"--scope",
+			job.item,
+			"--as",
+			job.sid,
+			"--note",
+			note,
+		],
+		job.repo,
+	);
+	runCli([WORK_CLI, "release", job.item, "--as", job.sid], job.repo);
+};
 // this install's wiring scripts — the setup checks look for THEM in
 // ~/.claude/settings.json, not just any suspenders install
 const gatePath = new URL("../gate.ts", import.meta.url).pathname;
@@ -102,6 +214,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - GET /api/task       one work item + its bus events + its decisions (?project=<path>&id=<id>)
 - GET /api/activity   newest-first coord bus feed (?project=<path>&limit=<n>; default 80, cap 300)
 - GET /api/setup      advisory wiring checks (hooks, monitor agent, advice LLM, bind)
+- GET /api/executors  dispatch targets for the READY-card dropdown: claude, codex, then belt's live openai endpoints as llm:<machine>:<model or port> (belt check cached 60s; failed probes included)
 - GET /api/diff       per-item branch diff for the drawer: repo + branch suspenders/<id> (worktree.ts naming), base = merge-base with main (fallback master); JSON {ok,id,branch,base,stat,diff}, patch tail-capped at 200KB
 - GET /api/tail       live lane tail for the drawer: the owning lane's .fleet/lane-<sid>.log (last 32KB) + transcript recent lines; JSON {ok,id,sid,log,transcript,recent}
 - GET /llms.txt       this file
@@ -113,7 +226,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/advise    fire the advice worker for a fork (async; lands as fact advice.<id>)
 - POST /api/comment   route a review line-comment to a work item's owning lane (coord NOTE; id, file, line, note required — note capped at 2000)
 - POST /api/message   message a work item's owning lane as the coordinator (coord NOTE; id, note required — note capped at 2000)
-- POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not a READY item, demo, or agent missing)
+- POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not a READY item, demo, or agent missing; agent=llm:machine:model routes through belt's remotes router instead: claim as the board lane, remotes.ts route the title+description, llm.result on the item thread, claim released)
 - POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, or while a lane lives)
 - POST /api/orchestrate            LLM proposes a plan item + parallel children from a goal (project, goal required; read-only — nothing registers, 502 when no parseable plan comes back)
 - POST /api/orchestrate/register   register a proposed plan as a plan-gated work split through the work CLI (project, title, children required; children 2..8; the plan item is the split parent — the AGENTS.md add-plan-then-split flow)
@@ -1912,6 +2025,30 @@ Bun.serve({
 		if (url.pathname === "/api/setup")
 			// advisory wiring checks — each carries its own fix, never throws
 			return json({ ok: true, checks: await setupChecks() });
+		if (url.pathname === "/api/executors") {
+			// dispatch dropdown feed: the local agents first, then belt's live
+			// openai endpoints as llm:<machine>:<model or port> — failed
+			// probes ride along (the owner may dispatch to a down target)
+			const rows = await beltCheck();
+			const llms: { value: string; label: string }[] = [];
+			for (const r of rows) {
+				if (r.protocol !== "openai") continue;
+				const tail = r.model ?? String(r.port ?? "");
+				if (!r.machine || !tail) continue;
+				llms.push({
+					value: `llm:${r.machine}:${tail}`,
+					label: `${r.machine} · ${tail}${r.ok === false ? " (down)" : ""}`,
+				});
+			}
+			return json({
+				ok: true,
+				executors: [
+					{ value: "claude", label: "claude" },
+					{ value: "codex", label: "codex" },
+					...llms,
+				],
+			});
+		}
 		if (url.pathname === "/api/diff") {
 			// W55 — per-item diff for the drawer: the lane branch vs its base.
 			// Branch = suspenders/<id> (worktree.ts naming); base = merge-base
@@ -2310,33 +2447,39 @@ Bun.serve({
 			if (!parsed.ok) return parsed.resp;
 			const project = String(parsed.body?.project ?? "");
 			const id = String(parsed.body?.id ?? "");
+			const raw = String(parsed.body?.agent ?? "claude");
 			const agent =
-				String(parsed.body?.agent ?? "claude") === "codex" ? "codex" : "claude";
+				raw === "codex" ? "codex" : raw.startsWith("llm:") ? raw : "claude";
 			if (!project || !id)
 				return json({ ok: false, error: "missing project or id" }, 400);
 			if (DEMO)
 				return json({ ok: false, error: "demo board — no real lanes" }, 409);
-			const claude =
-				Bun.which(agent) ??
-				(agent === "codex"
-					? "/opt/homebrew/bin/codex"
-					: `${process.env.HOME}/.local/bin/claude`);
-			if (!existsSync(claude))
-				return json(
-					{
-						ok: false,
-						error: `${agent} binary not found on the board's PATH`,
-					},
-					409,
-				);
+			let claude = "";
+			if (!agent.startsWith("llm:")) {
+				claude =
+					Bun.which(agent) ??
+					(agent === "codex"
+						? "/opt/homebrew/bin/codex"
+						: `${process.env.HOME}/.local/bin/claude`);
+				if (!existsSync(claude))
+					return json(
+						{
+							ok: false,
+							error: `${agent} binary not found on the board's PATH`,
+						},
+						409,
+					);
+			}
 			const w = db
 				.query(
-					"SELECT state, owner_sid, project FROM work_items WHERE project = ? AND id = ?",
+					"SELECT state, owner_sid, project, title, description FROM work_items WHERE project = ? AND id = ?",
 				)
 				.get(project, id) as {
 				state: string;
 				owner_sid: string | null;
 				project: string;
+				title: string;
+				description: string | null;
 			} | null;
 			if (!w)
 				return json(
@@ -2362,6 +2505,66 @@ Bun.serve({
 					{ ok: false, error: `project directory missing: ${repo}` },
 					409,
 				);
+			if (agent.startsWith("llm:")) {
+				// board-forced LLM dispatch: claim the item as the board lane
+				// (the same take the agent dispatch uses) so nobody double-
+				// dispatches while belt routes; the answer lands as llm.result
+				// on the item's thread and the claim releases either way
+				const rest = agent.slice(4);
+				const c1 = rest.indexOf(":");
+				const machine = c1 > 0 ? rest.slice(0, c1) : rest;
+				const tail = c1 > 0 ? rest.slice(c1 + 1) : "";
+				const ep = (await beltCheck()).find(
+					(r) =>
+						r.machine === machine &&
+						r.protocol === "openai" &&
+						(r.model === tail || String(r.port ?? "") === tail),
+				);
+				if (!ep)
+					return json(
+						{
+							ok: false,
+							error: `unknown llm target ${agent} — belt registry unreachable?`,
+						},
+						409,
+					);
+				const role = ep.roles?.includes("general")
+					? "general"
+					: (ep.roles?.[0] ?? "");
+				if (!role)
+					return json(
+						{ ok: false, error: `${agent} serves no route role` },
+						409,
+					);
+				const sid = `autow${id.replace(/^W/, "").replace(/\./g, "")}`;
+				const take = runCli(
+					[
+						WORK_CLI,
+						"take",
+						id,
+						"--as",
+						sid,
+						"--origin",
+						`${hostname()}:llm:${machine}`,
+					],
+					repo,
+				);
+				if (take.code !== 0)
+					return json(
+						{ ok: false, error: `claim failed: ${take.out.slice(0, 300)}` },
+						409,
+					);
+				void llmRoute({
+					item: id,
+					repo,
+					role,
+					target: `${machine}:${tail}`,
+					sid,
+					title: w.title,
+					desc: w.description ?? "",
+				});
+				return json({ ok: true, item: id, sid, executor: agent });
+			}
 			const child = Bun.spawn(
 				[
 					process.execPath,
