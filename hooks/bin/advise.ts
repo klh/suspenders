@@ -8,6 +8,7 @@
 // env:   SUSPENDERS_LLM_URL   (default http://127.0.0.1:8901/v1/chat/completions)
 //        SUSPENDERS_LLM_MODEL (default "local")
 //        SUSPENDERS_LLM_KEY   (optional bearer token)
+import { readFileSync } from "node:fs";
 import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
 import {
 	chatRemote,
@@ -223,12 +224,32 @@ async function tryBeltRoute(
 	question: string,
 ): Promise<{ text: string; model: string; host: string; ms: number } | null> {
 	const base = process.env.SUSPENDERS_BELT_URL ?? "http://127.0.0.1:7791";
+	const token =
+		process.env.SUSPENDERS_BELT_TOKEN ??
+		(() => {
+			try {
+				const keys = Object.keys(
+					JSON.parse(
+						readFileSync(
+							`${process.env.HOME}/.claude/local-llm/belt-tokens.json`,
+							"utf8",
+						),
+					),
+				);
+				return keys[0];
+			} catch {
+				return undefined;
+			}
+		})();
 	try {
 		const r = await fetch(`${base}/api/route`, {
 			method: "POST",
-			headers: { "content-type": "application/json" },
+			headers: {
+				"content-type": "application/json",
+				...(token ? { authorization: `Bearer ${token}` } : {}),
+			},
 			body: JSON.stringify({
-				role: "advise",
+				role: "reasoning", // an advise fork is a reasoning task — "advise" matches no registry role
 				execute: true,
 				max_tokens: 500,
 				temperature: 0.2,
