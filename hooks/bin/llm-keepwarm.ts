@@ -36,8 +36,33 @@ const paint =
 const dim = paint("2");
 const green = paint("32");
 const red = paint("31");
-const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
+const fmtMs = (ms: number) =>
+	ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 const parts = PORTS.map((p, i) =>
-	results[i] < 0 ? red(`✗ :${p} down`) : `${green("✓")} ${dim(`:${p}`)} ${dim(fmtMs(results[i]))}`,
+	results[i] < 0
+		? red(`✗ :${p} down`)
+		: `${green("✓")} ${dim(`:${p}`)} ${dim(fmtMs(results[i]))}`,
 );
-console.log(`${dim(`keepwarm ${new Date().toISOString()}`)}  ${parts.join("  ")}`);
+console.log(
+	`${dim(`keepwarm ${new Date().toISOString()}`)}  ${parts.join("  ")}`,
+);
+
+// W90 remote registry liveness — probe-only, never WoL: waking a hibernating
+// NAS every 4 min would defeat hibernation. Endpoints opt in via
+// keepwarm_probe in ~/.claude/local-llm/remotes.json.
+import { endpointsWithRole, probeEndpoint } from "../lib/remotes.ts";
+const probeables = endpointsWithRole("general").filter(
+	(e) => e.endpoint.keepwarm_probe,
+);
+if (probeables.length) {
+	const remote = await Promise.all(
+		probeables.map(async ({ machine, endpoint }) => {
+			const h = await probeEndpoint(machine, endpoint);
+			const name = `${machine.name}:${endpoint.port}`;
+			return h.alive
+				? `${green("✓")} ${dim(name)} ${dim(fmtMs(h.ms))}`
+				: `${red(`✗ ${name}`)} ${dim("silent")}`;
+		}),
+	);
+	console.log(`${dim(`  remotes`)}  ${remote.join("  ")}`);
+}
