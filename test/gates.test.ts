@@ -241,7 +241,7 @@ describe("gate.ts live spawns", () => {
 			hook("Edit", {
 				file_path: f,
 				old_string: "line1",
-				new_string: "line1 edited",
+				new_string: "line1 = 2;",
 			}),
 		);
 		expect(decision(r)).toBe("allow");
@@ -249,7 +249,7 @@ describe("gate.ts live spawns", () => {
 
 	test("pre-files: 45-line Edit payload on existing file → mutation-size deny", () => {
 		const f = fixture("stable\n", ".ts");
-		const big = Array.from({ length: 45 }, (_, i) => `mutation ${i}`).join(
+		const big = Array.from({ length: 45 }, (_, i) => `const m${i} = ${i};`).join(
 			"\n",
 		);
 		const r = spawnGate(
@@ -264,7 +264,7 @@ describe("gate.ts live spawns", () => {
 
 	test("pre-files: SUSPENDERS_MAX_MUTATION=0 disables the deny", () => {
 		const f = fixture("stable\n", ".ts");
-		const big = Array.from({ length: 45 }, (_, i) => `mutation ${i}`).join(
+		const big = Array.from({ length: 45 }, (_, i) => `const m${i} = ${i};`).join(
 			"\n",
 		);
 		const r = spawnGate(
@@ -279,7 +279,7 @@ describe("gate.ts live spawns", () => {
 
 	test("pre-files: raised cap admits the payload", () => {
 		const f = fixture("stable\n", ".ts");
-		const big = Array.from({ length: 45 }, (_, i) => `mutation ${i}`).join(
+		const big = Array.from({ length: 45 }, (_, i) => `const m${i} = ${i};`).join(
 			"\n",
 		);
 		const r = spawnGate(
@@ -293,7 +293,7 @@ describe("gate.ts live spawns", () => {
 	});
 
 	test("pre-files: Write to a NEW file is exempt regardless of size", () => {
-		const big = Array.from({ length: 100 }, (_, i) => `fresh ${i}`).join("\n");
+		const big = Array.from({ length: 100 }, (_, i) => `const fresh${i} = ${i};`).join("\n");
 		const r = spawnGate(
 			"pre-files",
 			hook("Write", { file_path: phantom("new-file.ts"), content: big }),

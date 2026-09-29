@@ -25,7 +25,6 @@ import {
 	mkdirSync,
 	readFileSync,
 	rmSync,
-	statSync,
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
@@ -215,12 +214,11 @@ function retireMerged(b: string): void {
 	// (or missing) worktree with no commits is ambiguous; ambiguity defers
 	// to don't-touch: skip retire under a 10-min worktree-age grace.
 	if (!tracked) {
-		// mid-spawn evidence, not blanket skip: a fresh worktree OR a
-		// DISPATCHED log line <10min old means a lane may still be
-		// registering (gaps' async wrapper, autow298/299); neither piece of
-		// evidence → dead debris (no entry, no worktree) retires normally
-		const st = statSync(wt, { throwIfNoEntry: false });
-		if (st && Date.now() - st.birthtimeMs < 10 * 60_000) return;
+		// mid-spawn evidence only: a DISPATCHED log line <10min old means the
+		// async wrapper may not have registered the lane yet (gaps
+		// autow298/299). A fresh worktree WITHOUT dispatch evidence retires —
+		// worktree-age was dropped after it blocked legit retire for 10min
+		// (W64 tests, 2026-09-29)
 		try {
 			const line = readFileSync(`${REPO}/.fleet/loop.log`, "utf8")
 				.split("\n")
@@ -304,6 +302,9 @@ function mergeOne(b: string): void {
 	// 2026-09-28 gaps stall). The marker tells the next cycle whether a
 	// merge runner is genuinely alive or the state is debris.
 	const marker = `${REPO}/.fleet/merge-active`;
+	// ship mode on a fresh repo has no .fleet/ yet (watch always did) — W64
+	// tests caught the ENOENT (2026-09-29)
+	mkdirSync(`${REPO}/.fleet`, { recursive: true });
 	writeFileSync(
 		marker,
 		JSON.stringify({
