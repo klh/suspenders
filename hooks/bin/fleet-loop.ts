@@ -551,6 +551,11 @@ if (MODE === "dispatch") {
 	// (claude-code:unrecognized_model, 2026-09-28)
 	delete env.ANTHROPIC_MODEL;
 	delete env.ANTHROPIC_SMALL_FAST_MODEL;
+	// the DEFAULT_*_MODEL trio joined the scrub 2026-09-29: a board launched
+	// from a GLM-routed shell passed them into lanes, which failed model init
+	delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+	delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+	delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
 	if (AGENT === "codex") {
 		env.GIT_DIR = `${wt}/.gitstore`;
 		env.GIT_WORK_TREE = wt;
