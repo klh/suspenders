@@ -214,6 +214,74 @@ async function tryRemoteAdvise(
 	process.exit(0);
 }
 
+/** W89.2 — belt as FIRST candidate: POST /api/route {role:"advise",
+ *  execute:true} lets belt pick the best healthy target from its own
+ *  metrics (local swarm, NAS, cloud). Null when belt is unreachable —
+ *  the local and remote paths below stay as fallbacks. */
+async function tryBeltRoute(
+	sys: string,
+	question: string,
+): Promise<{ text: string; model: string; host: string; ms: number } | null> {
+	const base = process.env.SUSPENDERS_BELT_URL ?? "http://127.0.0.1:7791";
+	try {
+		const r = await fetch(`${base}/api/route`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				role: "advise",
+				execute: true,
+				max_tokens: 500,
+				temperature: 0.2,
+				messages: [
+					{ role: "system", content: sys },
+					{
+						role: "user",
+						content: `DECISION FORK:\n${question}\n\nCONTROL-PLANE CONTEXT:\n${ctx}`,
+					},
+				],
+			}),
+			signal: AbortSignal.timeout(300_000),
+		});
+		if (!r.ok) return null;
+		const j = (await r.json()) as {
+			reply?: string;
+			target?: { model?: string; machine?: string; port?: number };
+			ms?: number;
+		};
+		if (!j.reply) return null;
+		return {
+			text: j.reply,
+			model: j.target?.model ?? "belt",
+			host: `belt(${j.target?.machine ?? "?"})`,
+			ms: j.ms ?? 0,
+		};
+	} catch {
+		return null;
+	}
+}
+
+// W89.2: belt picks first — metrics-based routing across the whole fleet;
+// local SUSPENDERS_LLM_URL and the remote registry stay as fallbacks
+const belt = await tryBeltRoute(sys, question);
+if (belt) {
+	db.query(
+		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)",
+	).run(
+		Date.now(),
+		JSON.stringify({
+			for: id,
+			model: belt.model,
+			host: belt.host,
+			pt: 0,
+			ct: 0,
+			tt: 0,
+			ms: belt.ms,
+		}),
+	);
+	storeAdvice(belt.text, { model: belt.model, host: belt.host });
+	process.exit(0);
+}
+
 const t0 = Date.now();
 try {
 	const r = await fetch(URL_, {
