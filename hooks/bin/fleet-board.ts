@@ -21,6 +21,7 @@ import {
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
+import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "./fleet-board-html.ts";
 
 // sibling CLIs resolve relative to this file — the board is relocatable
@@ -89,6 +90,8 @@ interface BeltEndpoint {
 	model?: string;
 	ok?: boolean;
 	roles?: string[];
+	ip?: string;
+	host?: string;
 }
 let beltCache: { at: number; rows: BeltEndpoint[] } | null = null;
 const beltCheck = async (): Promise<BeltEndpoint[]> => {
@@ -107,6 +110,47 @@ const beltCheck = async (): Promise<BeltEndpoint[]> => {
 	beltCache = { at: Date.now(), rows };
 	return rows;
 };
+// W105 — model + locality visibility. belt's registry at the resolveBelt
+// chain (belt-locate.ts: env → belt.json → belt.local → localhost:7791) with
+// the belt-tokens.json bearer; the remotes.ts CLI spawn stays as the fallback
+// when belt's HTTP API is unreachable. Cached 60s — the board polls every
+// second, the probes are multi-second.
+let regCache: { at: number; rows: BeltEndpoint[] } | null = null;
+const beltRegistry = async (): Promise<BeltEndpoint[]> => {
+	if (regCache && Date.now() - regCache.at < 60_000) return regCache.rows;
+	let rows: BeltEndpoint[] = [];
+	const belt = await resolveBelt();
+	if (belt) {
+		try {
+			const r = await fetch(`${belt.url}/api/remotes`, {
+				headers: belt.token ? { authorization: `Bearer ${belt.token}` } : {},
+				signal: AbortSignal.timeout(5000),
+			});
+			if (r.ok) {
+				const j = (await r.json()) as { rows?: BeltEndpoint[] };
+				if (Array.isArray(j.rows)) rows = j.rows;
+			}
+		} catch {}
+	}
+	if (!rows.length) rows = await beltCheck(); // same registry, CLI path
+	regCache = { at: Date.now(), rows };
+	return rows;
+};
+// LOCAL = LAN/loopback endpoint (private ip, .local mDNS name); REMOTE =
+// everything else — the routing doctrine's default (glm-5.3-flash via z.ai)
+// and the stock CLI model endpoints (Anthropic/OpenAI) are cloud-hosted.
+const rowLocality = (r: { ip?: string; host?: string }): "local" | "remote" => {
+	const ip = r.ip ?? "";
+	const host = (r.host ?? "").toLowerCase();
+	return host.endsWith(".local") ||
+		ip === "::1" ||
+		ip.startsWith("127.") ||
+		ip.startsWith("192.168.") ||
+		ip.startsWith("10.") ||
+		/^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+		? "local"
+		: "remote";
+};
 // one bun sibling-CLI call — stdout+stderr folded, trimmed
 const runCli = (
 	args: string[],
@@ -122,6 +166,26 @@ const runCli = (
 		code: p.exitCode ?? 1,
 		out: `${p.stdout.toString()}${p.stderr.toString()}`.trim(),
 	};
+};
+// W105 — plumb executor+model+locality into the lane registry at dispatch
+// time: facts lane.<sid>.executor / .model / .locality (governor.db), keyed
+// by the sid the lane will bootstrap under (autow<id> for board dispatches).
+// The board UI reads them back for the MODEL badges; direct facts-table
+// writes are the same trust class as the board-owned decisions table.
+const laneExecFacts = (
+	sid: string,
+	executor: string,
+	model: string,
+	locality: string,
+): void => {
+	for (const [k, v] of [
+		["executor", executor],
+		["model", model],
+		["locality", locality],
+	] as const)
+		db.query(
+			"INSERT OR REPLACE INTO facts (key, value, source, ts) VALUES (?, ?, 'fleet-board', ?)",
+		).run(`lane.${sid}.${k}`, v, Date.now());
 };
 // one llm:* dispatch: route the item's title+description through belt's
 // remotes router (role-based), land the answer on the item's coord thread,
@@ -214,7 +278,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - GET /api/task       one work item + its bus events + its decisions (?project=<path>&id=<id>)
 - GET /api/activity   newest-first coord bus feed (?project=<path>&limit=<n>; default 80, cap 300)
 - GET /api/setup      advisory wiring checks (hooks, monitor agent, advice LLM, bind)
-- GET /api/executors  dispatch targets for the READY-card dropdown: claude, codex, then belt's live openai endpoints as llm:<machine>:<model or port> (belt check cached 60s; failed probes included)
+- GET /api/executors  dispatch targets for the READY-card dropdown: claude, codex, then belt's live openai endpoints as llm:<machine>:<model or port> (belt's registry at the resolveBelt chain + CLI fallback, cached 60s; failed probes included; each entry carries its model id and a local/remote locality marker — W105)
 - GET /api/diff       per-item branch diff for the drawer: repo + branch suspenders/<id> (worktree.ts naming), base = merge-base with main (fallback master); JSON {ok,id,branch,base,stat,diff}, patch tail-capped at 200KB
 - GET /api/tail       live lane tail for the drawer: the owning lane's .fleet/lane-<sid>.log (last 32KB) + transcript recent lines; JSON {ok,id,sid,log,transcript,recent}
 - GET /llms.txt       this file
@@ -816,6 +880,27 @@ function unblockedBy(): Map<string, string | null> {
 	return m;
 }
 
+// W105 — the lane registry's executor/model/locality, stamped into facts at
+// dispatch time (laneExecFacts, /api/start) and read back for any lane here.
+function laneModelOf(sid: string | null | undefined): {
+	executor: string | null;
+	model: string | null;
+	locality: string | null;
+} {
+	if (!sid) return { executor: null, model: null, locality: null };
+	const get = (k: string): string | null =>
+		(
+			db
+				.query("SELECT value FROM facts WHERE key = ?")
+				.get(`lane.${sid}.${k}`) as { value: string } | null
+		)?.value ?? null;
+	return {
+		executor: get("executor"),
+		model: get("model"),
+		locality: get("locality"),
+	};
+}
+
 function taskShape(
 	w: WorkItemRow,
 	openDecisions: number,
@@ -834,6 +919,7 @@ function taskShape(
 		age_s: ago(w.updated_at),
 		open_decisions: openDecisions,
 		tail: transcriptTail(w.owner_sid),
+		...laneModelOf(w.owner_sid),
 		unblocked_by:
 			w.state === "READY"
 				? (unblocked.get(`${String(w.project)}\u0000${String(w.id)}`) ?? null)
@@ -1074,6 +1160,9 @@ interface SessionView {
 	parent: string | null;
 	project: string | null;
 	hbAgo: number;
+	executor: string | null;
+	model: string | null;
+	locality: string | null;
 }
 
 function sessions(): SessionView[] {
@@ -1091,6 +1180,7 @@ function sessions(): SessionView[] {
 		parent: s.parent_sid,
 		project: s.project,
 		hbAgo: ago(s.hb),
+		...laneModelOf(s.sid),
 	}));
 }
 
@@ -2028,23 +2118,43 @@ Bun.serve({
 		if (url.pathname === "/api/executors") {
 			// dispatch dropdown feed: the local agents first, then belt's live
 			// openai endpoints as llm:<machine>:<model or port> — failed
-			// probes ride along (the owner may dispatch to a down target)
-			const rows = await beltCheck();
-			const llms: { value: string; label: string }[] = [];
+			// probes ride along (the owner may dispatch to a down target).
+			// W105: every entry carries its model id + locality so the UI can
+			// badge cards/lanes with WHERE the model actually runs.
+			const rows = await beltRegistry();
+			const llms: {
+				value: string;
+				label: string;
+				model: string;
+				locality: string;
+			}[] = [];
 			for (const r of rows) {
 				if (r.protocol !== "openai") continue;
 				const tail = r.model ?? String(r.port ?? "");
 				if (!r.machine || !tail) continue;
+				const loc = rowLocality(r);
 				llms.push({
 					value: `llm:${r.machine}:${tail}`,
-					label: `${r.machine} · ${tail}${r.ok === false ? " (down)" : ""}`,
+					label: `${r.machine} · ${tail}${r.ok === false ? " (down)" : ""} (${loc})`,
+					model: r.model ?? tail,
+					locality: loc,
 				});
 			}
 			return json({
 				ok: true,
 				executors: [
-					{ value: "claude", label: "claude" },
-					{ value: "codex", label: "codex" },
+					{
+						value: "claude",
+						label: "claude",
+						model: "claude",
+						locality: "remote",
+					},
+					{
+						value: "codex",
+						label: "codex",
+						model: "codex",
+						locality: "remote",
+					},
 					...llms,
 				],
 			});
@@ -2554,6 +2664,7 @@ Bun.serve({
 						{ ok: false, error: `claim failed: ${take.out.slice(0, 300)}` },
 						409,
 					);
+				laneExecFacts(sid, agent, ep.model ?? tail, rowLocality(ep));
 				void llmRoute({
 					item: id,
 					repo,
@@ -2565,6 +2676,8 @@ Bun.serve({
 				});
 				return json({ ok: true, item: id, sid, executor: agent });
 			}
+			const sid = `autow${id.replace(/^W/, "").replace(/\./g, "")}`;
+			laneExecFacts(sid, agent, agent, "remote");
 			const child = Bun.spawn(
 				[
 					process.execPath,
@@ -2593,7 +2706,7 @@ Bun.serve({
 			return json({
 				ok: true,
 				item: id,
-				sid: `autow${id.replace(/^W/, "").replace(/\./g, "")}`,
+				sid,
 			});
 		}
 		if (req.method === "POST" && url.pathname === "/api/ship") {

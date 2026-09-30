@@ -71,9 +71,26 @@ checks, never throw:
 | llm           | Advice LLM endpoint     | `GET $SUSPENDERS_LLM_URL/v1/models` (default `http://127.0.0.1:8901`) answers within 1.5 s | local LLM stack docs          |
 | bind          | LAN binding             | informational: SUSPENDERS_BIND value                                                       | —                             |
 
+## GET /api/executors
+
+`{ ok, executors: [{ value, label, model, locality }] }` — dispatch targets for
+the READY-card executor dropdown (W105): `claude` and `codex` first, then
+belt's live openai endpoints as `llm:<machine>:<model or port>`. Registry
+source: belt's `/api/remotes` at the resolveBelt chain (bearer token from
+`~/.claude/local-llm/belt-tokens.json`), falling back to the
+`remotes.ts check --json` CLI spawn; cached 60 s. `locality` is `local` for
+LAN/loopback endpoints (private ip, `.local` mDNS name) and `remote` for
+everything else — the routing doctrine's default (`glm-5.3-flash` via z.ai)
+and the stock CLI model endpoints count as remote.
+
 ## POST /api/start
 
-`{ project, id }` required. Starts (dispatches) a lane on a READY work item by
+`{ project, id, agent? }` — `agent` is `claude` (default) | `codex` |
+`llm:<machine>:<model or port>` (routes through belt's remotes router). On a
+successful dispatch the board stamps the lane registry (W105): facts
+`lane.<sid>.executor` / `lane.<sid>.model` / `lane.<sid>.locality` in
+governor.db, read back on `/api/tasks` + `/api/data` for the MODEL badges.
+Starts (dispatches) a lane on a READY work item by
 spawning `fleet-loop.ts dispatch --repo <project minus a trailing /.git> --item <id>`
 detached. Validation order — first failure wins:
 

@@ -151,10 +151,17 @@ button.dismiss { background:none; border:none; padding:0; color:#98958e; font:in
 .ktail { margin-top:4px; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#98958e; }
 .kstart { margin-top:6px; background:none; border:1px solid #d8900f; border-radius:4px; color:#d8900f; font:inherit; font-size:11px; padding:2px 8px; cursor:pointer; }
 .kstart:hover { background:rgba(216,144,15,.12); }
-/* executor dropdown + play (board dispatch): compact row, no layout blowout */
+/* executor dropdown + play (board dispatch): one clean row — the select
+   fills the card width, the play button hangs at its natural height inside
+   the row (its old margin-top pushed it 3px low; W104) */
 .kexec { margin-top:6px; display:flex; gap:6px; align-items:center; }
-.kexecsel { background:#141413; border:1px solid #d8900f; border-radius:4px; color:#d8900f; font:inherit; font-size:11px; padding:2px 4px; max-width:170px; cursor:pointer; }
+.kexec .kstart { margin-top:0; flex:none; }
+.kexecsel { background:#141413; border:1px solid #d8900f; border-radius:4px; color:#d8900f; font:inherit; font-size:11px; padding:2px 4px; max-width:250px; flex:1 1 auto; min-width:0; cursor:pointer; }
 .kempty { font-size:11px; padding:2px 0 6px; }
+/* W105 model badges — amber = remote model, green = local (LAN/loopback) */
+.kmodel, .lmodel { display:inline-block; margin-top:4px; border:1px solid #af2f12; border-radius:2px; padding:0 6px; font-size:9.5px; text-transform:uppercase; letter-spacing:.06em; color:#c96a4f; }
+.lmodel { margin-top:0; margin-left:6px; }
+.kmodel.loc, .lmodel.loc { border-color:#5c7a35; color:#7da652; }
 .ttitle { word-break:break-word; max-width:480px; }
 .tail { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:480px; }
 .akind { display:inline-block; border:1px solid rgba(255,255,255,.18); border-radius:2px; padding:0 6px; font-size:9.5px; text-transform:uppercase; letter-spacing:.06em; color:#98958e; }
@@ -603,12 +610,17 @@ function renderConn(){
   }
 }
 // --- fleet health (Governor tab): summary line + one chip per lane ---
+// W105 model badge: which model runs the lane + local/remote marker
+function lanesBadge(s){
+  if (!s.model) return '';
+  return ' · <span class="lmodel' + (s.locality === 'local' ? ' loc' : '') + '">' + esc(String(s.model)) + (s.locality ? ' (' + esc(String(s.locality)) + ')' : '') + '</span>';
+}
 function chipHtml(s, zombies, needs){
   var z = zombieFor(s.sid, zombies);
   var flagged = !!(needs && needs[s.sid] && needs[s.sid].length);
   var bits = '<b>' + esc(s.label) + '</b> · <span class="st">' + esc(stateLabel(s.state, flagged)) + '</span> · heartbeat ' + ago(s.hbAgo);
   if (s.progressAgo != null) bits += ' · progress ' + ago(s.progressAgo);
-  if (s.project) bits += ' · <span class="mono">' + esc(s.project) + '</span>';
+  if (s.project) bits += ' · <span class="mono">' + esc(s.project) + lanesBadge(s) + '</span>';
   return '<span class="chip' + (z ? ' zombie' : '') + '" title="' + esc(s.sid) + '">' + bits + '</span>';
 }
 function renderFleet(){
@@ -1342,6 +1354,7 @@ function kanbanCard(t){
     '<span class="kage dim">' + agoShort(t.age_s) + '</span></div>';
   html += '<div class="ktitle">' + esc(String(t.title || '(untitled)')).slice(0, 140) + '</div>';
   html += '<div class="klane dim">lane ' + esc(t.owner_label || t.owner_sid || 'unclaimed') + (t.origin ? ' · ' + esc(String(t.origin)) : '') + '</div>';
+  if (t.model) html += '<span class="kmodel' + (t.locality === 'local' ? ' loc' : '') + '" title="model running this lane">' + esc(String(t.model)) + (t.locality ? ' (' + esc(String(t.locality)) + ')' : '') + '</span>';
   if (t.tail && t.tail.text) html += '<div class="ktail">' + esc(t.tail.text) + '</div>';
   if (startable) {
     var pick = execPick[t.project + '\u0000' + t.id] || 'claude';
@@ -1371,11 +1384,13 @@ function renderKanban(){
   buildOwnerDisp(ts);
   if (hashFilter) ts = ts.filter(function(t){ return hashMatch([t.id, t.title, ownerKey(t), ownerName(t), t.project]); });
   var html = '<div class="kanban">';
+  var shownAll = [];
   for (var c = 0; c < KCOLS.length; c++) {
     var col = KCOLS[c];
     var items = ts.filter(function(t){ return col.states.indexOf(t.state) >= 0; });
     items.sort(function(a, b){ return (a.age_s || 0) - (b.age_s || 0); }); // newest activity first
     var shown = col.cap ? items.slice(0, col.cap) : items;
+    shownAll = shownAll.concat(shown);
     html += '<div class="kcol"><h3>' + esc(col.label) + '<span class="kcount">' + items.length + '</span></h3>';
     for (var i = 0; i < shown.length; i++) html += kanbanCard(shown[i]);
     if (!items.length) html += '<div class="kempty dim">(empty)</div>';
@@ -1383,7 +1398,27 @@ function renderKanban(){
     html += '</div>';
   }
   html += '</div>';
-  sigSet(el, html, html);
+  // W104: the card html embeds per-second data (age ticks, live tails) — a
+  // full sigSet at 1Hz destroys an open executor dropdown mid-pick. Rebuild
+  // only when the STRUCTURE changed; refresh ages + tails in place otherwise.
+  var kstruct = html.replace(/<span class="kage dim">[^<]*<\/span>/g, '').replace(/<div class="ktail">[^<]*<\/div>/g, '');
+  var prevStructural = el.getAttribute('data-ksig') || '';
+  if (prevStructural === kstruct) { updateKanbanVolatile(el, shownAll); return; }
+  if (el.contains(document.activeElement) && document.activeElement.classList.contains('kexecsel')) return; // picking — defer the swap, next render applies it
+  el.setAttribute('data-ksig', kstruct);
+  sigSet(el, kstruct, html);
+  updateKanbanVolatile(el, shownAll);
+}
+function updateKanbanVolatile(el, shownAll){
+  var cards = el.querySelectorAll('.kcard');
+  for (var i = 0; i < shownAll.length && i < cards.length; i++) {
+    var t = shownAll[i], c = cards[i];
+    if (c.getAttribute('data-kid') !== t.id) continue;
+    var ageEl = c.querySelector('.kage');
+    if (ageEl) ageEl.textContent = agoShort(t.age_s);
+    var tailEl = c.querySelector('.ktail');
+    if (tailEl) tailEl.textContent = (t.tail && t.tail.text) ? t.tail.text : '';
+  }
 }
 function openTask(id, proj, trigger){
   task.id = id; task.proj = proj || null; task.data = null; task.err = null; task.okAt = 0; task.trigger = trigger || null;
