@@ -628,9 +628,16 @@ if (cmd === "emit") {
 	const sub = rest[0];
 	if (sub === "set") {
 		const key = rest[1];
-		const value = rest[2];
-		if (!key || value === undefined)
-			die("usage: fact set <key> <value> [--source s]");
+		let value = rest[2];
+		const txt = arg("--text");
+		if (txt !== undefined) value = txt;
+		// a flag-shaped value was the fact-set corruption bug (2026-09-30):
+		// `fact set k --text "…"` swallowed "--text" as the value and the real
+		// text vanished into an ignored positional — three A/B findings lost
+		if (!key || value === undefined || value.startsWith("--"))
+			die(
+				"usage: fact set <key> <value> | fact set <key> --text <text> [--source s]",
+			);
 		const src = arg("--source") ?? "coord";
 		db.query(
 			"INSERT INTO facts (key, value, source, version, ts) VALUES (?, ?, ?, 1, ?) " +
