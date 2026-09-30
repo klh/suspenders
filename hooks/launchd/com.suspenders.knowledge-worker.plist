@@ -12,7 +12,7 @@
        knowledge ingest is a slow-queue chore, keep it off the paid cloud;
        unset/override via env to route through belt instead) -->
   <key>EnvironmentVariables</key><dict>
-    <key>INGEST_LLM_URL</key><string>http://127.0.0.1:8903</string>
+    <key>INGEST_LLM_URL</key><string>http://127.0.0.1:8903/v1/chat/completions</string>
     <!-- W103 substitution contract: repo root for the mechanical single-file
          test (pointer-row conversion / reject on ingest) -->
     <key>KNOWLEDGE_DOCS_ROOT</key><string>__REPO__</string>
