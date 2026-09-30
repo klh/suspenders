@@ -25,6 +25,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
@@ -188,19 +189,68 @@ function wtPathFromGit(b: string): string | null {
 	return null;
 }
 
-function retireMerged(b: string): void {
-	if (ahead(b) !== 0) return;
-	// ahead=0 is also true for a freshly-dispatched lane's pre-commit branch —
-	// never retire a branch a LIVE lane still owns
+/** live claude/codex process with cwd inside the worktree — contract-free
+ * liveness, independent of lanes.json registration state and DISPATCHED log
+ * formats (gaps 2026-09-30: their dispatch-next registers lanes.json async
+ * 22-55s after spawn and no longer writes DISPATCHED lines, so both
+ * registration-derived guards race the dispatcher). */
+function worktreeLive(wt: string): boolean {
+	try {
+		const pids = runCap(["ps", "-axo", "pid=,comm="])
+			.out.split("\n")
+			.filter((l) => /claude|codex/.test(l))
+			.map((l) => Number.parseInt(l.trim(), 10));
+		if (pids.length === 0) return false;
+		const listing = runCap([
+			"lsof",
+			"-a",
+			"-p",
+			pids.join(","),
+			"-d",
+			"cwd",
+			"-Fpcn",
+		]).out;
+		let pid = 0;
+		for (const line of listing.split("\n")) {
+			if (line.startsWith("p")) pid = Number.parseInt(line.slice(1), 10) || pid;
+			else if (line.startsWith("n") && line.slice(1).startsWith(wt))
+				return true;
+		}
+	} catch {}
+	return false;
+}
+
+/** liveness = tracked pid alive OR any live claude/codex process with cwd in
+ * the worktree. Survives the unregistered spawn window and DISPATCHED-less
+ * dispatchers; replaces the tracked-pid-only guard that raced dispatch-next. */
+function laneIsAlive(b: string): boolean {
 	const tracked = lanes().find((l) => l.branch === b);
 	if (tracked?.pid) {
-		let alive = false;
 		try {
 			process.kill(tracked.pid, 0);
-			alive = true;
+			return true;
 		} catch {}
-		if (alive) return;
 	}
+	const wt =
+		wtPathFromGit(b) ??
+		tracked?.worktree ??
+		`${REPO}/.worktrees/${b.replace(/^.*\//, "")}`;
+	return worktreeLive(wt);
+}
+
+function retireMerged(b: string): void {
+	// kill switch (gaps 2026-09-30: live lanes retired ~90s after dispatch —
+	// marker contract drift vs their new dispatcher). Touch
+	// .fleet/retires-paused to pause ALL retires; delete the file to resume.
+	if (existsSync(`${REPO}/.fleet/retires-paused`)) return;
+	if (ahead(b) !== 0) return;
+	// ahead=0 is also true for a freshly-dispatched lane's pre-commit branch —
+	// never retire a branch a LIVE lane still owns. Tracked-pid alone raced
+	// gaps' dispatch-next (registers lanes.json async, writes no DISPATCHED
+	// lines) — liveness is now tracked pid OR any live claude/codex whose cwd
+	// is inside the worktree (gaps 2026-09-30 incident)
+	if (laneIsAlive(b)) return;
+	const tracked = lanes().find((l) => l.branch === b);
 	// worktree path: git's registry is ground truth — gaps parks lanes under
 	// .claude/worktrees/ (not .worktrees/), so the bare default guess misses
 	// them and branch delete stalls on "used by worktree"
@@ -211,15 +261,9 @@ function retireMerged(b: string): void {
 	// mid-spawn grace (2026-09-28 gaps autow298/299): dispatch registers the
 	// branch immediately but gaps' async wrapper lands the lanes.json entry
 	// 22–55s later — the ladder saw ahead=0 with NO entry, the pid guard had
-	// nothing to check, and retire fired on a lane mid-spawn. A seconds-old
-	// (or missing) worktree with no commits is ambiguous; ambiguity defers
-	// to don't-touch: skip retire under a 10-min worktree-age grace.
+	// nothing to check, and retire fired on a lane mid-spawn.
 	if (!tracked) {
-		// mid-spawn evidence only: a DISPATCHED log line <10min old means the
-		// async wrapper may not have registered the lane yet (gaps
-		// autow298/299). A fresh worktree WITHOUT dispatch evidence retires —
-		// worktree-age was dropped after it blocked legit retire for 10min
-		// (W64 tests, 2026-09-29)
+		// evidence of a recent dispatch → skip (unregistered spawn window)
 		try {
 			const line = readFileSync(`${REPO}/.fleet/loop.log`, "utf8")
 				.split("\n")
@@ -227,6 +271,19 @@ function retireMerged(b: string): void {
 				.find((l) => l.includes("DISPATCHED") && l.includes(b));
 			const ts = line ? Date.parse(line.slice(0, 24)) : Number.NaN;
 			if (Number.isFinite(ts) && Date.now() - ts < 10 * 60_000) return;
+		} catch {}
+		// gaps 2026-09-30: dispatch-next writes NO DISPATCHED lines, so
+		// "no evidence" is the norm, not a signal — a seconds-old worktree is
+		// the pre-spawn window, not debris. Skip while young; genuine debris
+		// (laneIsAlive already confirmed nothing runs in it) retires once aged.
+		// FLEET_UNTRACKED_GRACE_MS=0 fast-forwards the grace (tests, manual
+		// debris cleanup).
+		try {
+			if (
+				Date.now() - statSync(wt).birthtimeMs <
+				Number(process.env.FLEET_UNTRACKED_GRACE_MS ?? 120_000)
+			)
+				return;
 		} catch {}
 	}
 	// REFERENCE BEFORE DELETE (gaps incident 2026-09-28): pin the tip to a
@@ -298,6 +355,11 @@ function mergeOne(b: string): void {
 		retireMerged(b);
 		return;
 	}
+	// never merge a branch a live lane still owns (gaps 2026-09-30: autow351
+	// was merged mid-flight with 3 live pids in its worktree — the ladder
+	// treated ahead>0 as ready and its retire swept the worktree out from
+	// under the agents)
+	if (laneIsAlive(b)) return;
 	// liveness marker: a crash between --no-commit and commit leaves
 	// MERGE_HEAD + staged debris that plain merge --abort cannot clear (the
 	// 2026-09-28 gaps stall). The marker tells the next cycle whether a
