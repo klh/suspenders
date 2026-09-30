@@ -9,7 +9,7 @@
 // exception is take's CAS, which needs the state guard in its WHERE.
 //
 // usage:
-//   work add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid]
+//   work add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid] [--effort S|M|L]
 //   work list [open|ready|all] / work ready / work mine --as <sid> / work owned
 //   work show <id>
 //   work take <id> --as <sid>            (CAS: READY → CLAIMED; refuses taken/unmet-deps/foreign-project)
@@ -93,6 +93,7 @@ const ITEM_FLAGS = [
 	"--on",
 	"--as",
 	"--requires",
+	"--effort",
 ];
 const CAPS = new Set(CAPABILITIES);
 const SCHEMA: Record<string, Spec> = {
@@ -100,7 +101,7 @@ const SCHEMA: Record<string, Spec> = {
 		flags: ITEM_FLAGS,
 		minPos: 1,
 		reqFlags: [],
-		usage: `usage: add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid]`,
+		usage: `usage: add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid] [--effort S|M|L]`,
 	},
 	list: { flags: [], minPos: 0, reqFlags: [], usage: "", lax: true },
 	ready: { flags: [], minPos: 0, reqFlags: [], usage: "", lax: true },
@@ -344,7 +345,7 @@ function mirrorDb(): Database | null {
 	if (!m) return null;
 	const d = new Database(":memory:");
 	d.run(
-		"CREATE TABLE work_items (project TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT, state TEXT NOT NULL DEFAULT 'READY', priority INTEGER NOT NULL DEFAULT 0, owner_sid TEXT, created_by TEXT, scope TEXT, why_parallel TEXT, result_sha TEXT, required INTEGER NOT NULL DEFAULT 1, requires TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (project, id))",
+		"CREATE TABLE work_items (project TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT, state TEXT NOT NULL DEFAULT 'READY', priority INTEGER NOT NULL DEFAULT 0, owner_sid TEXT, created_by TEXT, scope TEXT, why_parallel TEXT, result_sha TEXT, required INTEGER NOT NULL DEFAULT 1, requires TEXT, effort TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (project, id))",
 	);
 	d.run(
 		"CREATE TABLE work_deps (project TEXT NOT NULL, work_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (project, work_id, depends_on))",
@@ -370,6 +371,7 @@ function mirrorDb(): Database | null {
 		"result_sha",
 		"required",
 		"requires",
+		"effort",
 		"created_at",
 		"updated_at",
 	];
@@ -641,10 +643,11 @@ function insertItem(
 	by: string,
 	why: string | null,
 	requires: string | null = null,
+	effort: string | null = null,
 ): void {
 	db()
 		.query(
-			"INSERT INTO work_items (id, parent_id, title, state, priority, created_by, scope, why_parallel, project, required, requires, created_at, updated_at) VALUES (?, ?, ?, 'READY', ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+			"INSERT INTO work_items (id, parent_id, title, state, priority, created_by, scope, why_parallel, project, required, requires, effort, created_at, updated_at) VALUES (?, ?, ?, 'READY', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
 		)
 		.run(
 			id,
@@ -656,6 +659,7 @@ function insertItem(
 			why,
 			PROJECT,
 			requires,
+			effort,
 			Date.now(),
 			Date.now(),
 		);
@@ -689,7 +693,8 @@ function renderRow(r: Item): string {
 	const [g, col] = GLYPH[r.state as string] ?? ["?", dim];
 	const owner = r.owner_sid ? dim(String(r.owner_sid).slice(0, 6)) : "";
 	const req = r.requires ? dim(` ⟨needs ${r.requires}⟩`) : "";
-	return `  ${col(g)} ${cyan(String(r.id).padEnd(7))}${String(r.title).slice(0, 56)}${owner ? `  ${owner}` : ""}${req}`;
+	const efo = r.effort ? dim(` [${r.effort}]`) : "";
+	return `  ${col(g)} ${cyan(String(r.id).padEnd(7))}${String(r.title).slice(0, 56)}${efo}${owner ? `  ${owner}` : ""}${req}`;
 }
 
 function liveTranscript(sid: string): string | null {
@@ -774,13 +779,17 @@ if (cmd === "add") {
 	const title = pos[0];
 	if (!title)
 		die(
-			'usage: add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid]',
+			'usage: add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid] [--effort S|M|L]',
 		);
 	const parent = flag("--parent");
 	const scope = flag("--scope");
 	const priority = Number(flag("--priority") ?? 0);
 	const by = flag("--by") ?? "unknown";
 	const requires = flag("--requires");
+	const effortRaw = flag("--effort");
+	const effort = effortRaw ? effortRaw.trim().toUpperCase() : null;
+	if (effort && !["S", "M", "L"].includes(effort))
+		die(`--effort must be S, M or L (got "${effortRaw}")`);
 	if (requires) {
 		const bad = requires.split(",").filter((c) => !CAPS.has(c.trim()));
 		if (bad.length)
@@ -804,6 +813,7 @@ if (cmd === "add") {
 					.map((c) => c.trim())
 					.join(",")
 			: null,
+		effort,
 	);
 	emit("work.added", id, { scope: scope ?? "" });
 	console.log(
@@ -867,6 +877,7 @@ if (cmd === "add") {
 		"result_sha",
 		"why_parallel",
 		"requires",
+		"effort",
 		"description",
 	] as const) {
 		if (it[k]) console.log(`  ${dim(`${k}:`)} ${it[k]}`);
@@ -1107,7 +1118,9 @@ if (cmd === "add") {
 		for (const t of titles) {
 			const cid = nextChildId(id);
 			// children inherit the parent's capability requirement — a split must
-			// not be able to launder away the dispatch constraint
+			// not be able to launder away the dispatch constraint. The effort
+			// budget rides along: losing it in a shatter would leave the children
+			// silently unsized.
 			insertItem(
 				cid,
 				id,
@@ -1117,6 +1130,7 @@ if (cmd === "add") {
 				it.owner_sid as string,
 				reason,
 				(it.requires as string | null) ?? null,
+				(it.effort as string | null) ?? null,
 			);
 			if (++n === keep) setState(cid, "CLAIMED", it.owner_sid as string);
 		}

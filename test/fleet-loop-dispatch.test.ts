@@ -9,6 +9,7 @@ import {
 	existsSync,
 	lstatSync,
 	mkdtempSync,
+	readFileSync,
 	readlinkSync,
 	readdirSync,
 	rmSync,
@@ -85,7 +86,7 @@ expect(
 
 // dispatch with the agent binary absent: workspace creation and the work
 // claim happen first; the run stops at the Bun.which check
-const dispatch = () => {
+const dispatch = (item: string) => {
 	const p = Bun.spawnSync(
 		[
 			process.execPath,
@@ -94,7 +95,7 @@ const dispatch = () => {
 			"--repo",
 			REPO,
 			"--item",
-			id,
+			item,
 			"--agent",
 			"codex",
 		],
@@ -114,7 +115,7 @@ const dispatch = () => {
 
 describe("codex dispatch workspace parity", () => {
 	test("fresh workspace symlinks build dirs; resume leaves them alone", () => {
-		const d1 = dispatch();
+		const d1 = dispatch(id);
 		expect(d1.err).toContain("codex binary not found");
 		const wt = join(REPO, ".worktrees", id);
 		expect(existsSync(wt)).toBe(true);
@@ -123,9 +124,43 @@ describe("codex dispatch workspace parity", () => {
 		expect(readlinkSync(link)).toBe(join(REPO, "node_modules"));
 
 		// resume (claim already ours, workspace exists): no duplicate, no clobber
-		const d2 = dispatch();
+		const d2 = dispatch(id);
 		expect(d2.err).toContain("codex binary not found");
 		expect(lstatSync(link).isSymbolicLink()).toBe(true);
 		expect(readdirSync(wt).filter((e) => e === "node_modules")).toHaveLength(1);
+	});
+
+	test("brief carries the effort BUDGET line for sized items (W82)", () => {
+		const added = tool("work.ts", "add", "sized codex item", "--effort", "l");
+		const sized = (added.out.match(/W\d+/) ?? [])[0] ?? "";
+		expect(sized).toBeTruthy();
+		expect(
+			tool(
+				"coord.ts",
+				"bootstrap",
+				"--as",
+				`autow${sized.slice(1)}`,
+				"--role",
+				"worker",
+			).code,
+		).toBe(0);
+		// the brief is written before the binary check — a codex dispatch with
+		// no codex on PATH still leaves the brief observable
+		const d = dispatch(sized);
+		expect(d.err).toContain("codex binary not found");
+		const brief = readFileSync(
+			join(REPO, ".fleet", `brief-autow${sized.slice(1)}.md`),
+			"utf8",
+		);
+		expect(brief).toContain("MISSION (from work show):");
+		expect(brief).toContain("effort: L");
+		expect(brief).toContain("BUDGET: effort L");
+		// the unsized sibling item's brief stays BUDGET-free
+		const plain = readFileSync(
+			join(REPO, ".fleet", `brief-autow${id.slice(1)}.md`),
+			"utf8",
+		);
+		expect(plain).toContain("MISSION");
+		expect(plain).not.toContain("BUDGET:");
 	});
 });

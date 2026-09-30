@@ -600,11 +600,19 @@ if (MODE === "dispatch") {
 		"show",
 		item,
 	]);
+	// W82: the effort budget rides the brief explicitly — show carries the
+	// value; the BUDGET line tells the lane what to do with it.
+	const effort = /^ {2}effort: ([SML])$/m.exec(show.out)?.[1];
 	const brief = [
 		`You are lane "${sid}", Work Graph item ${item}, repo ${REPO}.`,
 		``,
 		`MISSION (from work show):`,
 		show.out,
+		...(effort
+			? [
+					`BUDGET: effort ${effort} — pace the lane to it (S: one focused pass, M: checkpoint at least once via work done --sha, L: plan first and checkpoint at each milestone).`,
+				]
+			: []),
 		``,
 		`PROTOCOL: BEFORE any edit, read AGENTS.md in the repo root and follow it (plan-first, shatter judgment, gates, done protocol, final-line vocabulary).`,
 		`Inbox: before planning and again before finishing, check coord inbox — coordinator and board messages arrive there: bun ~/.claude/hooks/suspenders/bin/coord.ts inbox --as ${sid}.`,

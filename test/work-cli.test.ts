@@ -587,3 +587,46 @@ describe("dep-merge ancestor gate (W60)", () => {
 		expect(work("take", depOn, "--as", "lane-w60e").code).toBe(0);
 	});
 });
+
+// W82: effort budgets — an S/M/L field on items, stamped at add, rendered on
+// show + list rows, inherited by split children, rejected outside the
+// vocabulary before any insert.
+describe("add --effort — effort budget (W82)", () => {
+	test("effort normalizes to uppercase and renders on show and list", () => {
+		const id = idOf(work("add", "sized item", "--effort", "m").out);
+		expect(id).toBeTruthy();
+		expect(work("show", id).out).toContain("effort: M");
+		expect(work("list", "all").out).toContain("[M]");
+	});
+
+	test("no --effort leaves the item unsized", () => {
+		const id = idOf(work("add", "unsized item").out);
+		expect(id).toBeTruthy();
+		expect(work("show", id).out).not.toContain("effort:");
+	});
+
+	test("values outside S/M/L die before any insert", () => {
+		const bad = work("add", "badly sized", "--effort", "XL");
+		expect(bad.code).toBe(2);
+		expect(bad.err).toContain("--effort must be S, M or L");
+		expect(work("list", "all").out).not.toContain("badly sized");
+	});
+
+	test("split children inherit the parent's budget", () => {
+		const pid = idOf(work("add", "sized shatter", "--effort", "L").out);
+		const s = work(
+			"split",
+			pid,
+			"child one",
+			"child two",
+			"--reason",
+			"independent-scopes",
+		);
+		expect(s.code).toBe(0);
+		const show = work("show", pid).out;
+		expect(show).toContain(`${pid}.1`);
+		expect(show).toContain(`${pid}.2`);
+		// the two child rows (renderRow tags); the show header carries no tag
+		expect((show.match(/\[L\]/g) ?? []).length).toBe(2);
+	});
+});

@@ -421,6 +421,10 @@ export function openGovernorDb(): Database {
 	// take keeps the first dispatch's stamp across resume re-takes.
 	if (!wiCols.includes("origin"))
 		db.run("ALTER TABLE work_items ADD COLUMN origin TEXT");
+	// effort budget (W82): S/M/L sizing stamped at `work add --effort` —
+	// rendered into dispatch briefs so a lane paces its passes to the item.
+	if (!wiCols.includes("effort"))
+		db.run("ALTER TABLE work_items ADD COLUMN effort TEXT");
 	if (uv < 2) db.run("PRAGMA user_version = 2");
 	// v4 — consult knowledge base: (problem → solution) pairs harvested from
 	// answered consults; new consults resolve against it before routing to a
