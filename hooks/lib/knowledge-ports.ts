@@ -491,8 +491,9 @@ export class LocalLlmDistillClient implements DistillClient {
 }
 
 export class BeltDistillClient implements DistillClient {
-	// belt /api/route: role-based routing — belt may live on another machine
-	// or be a wholly different system; resolveBelt() finds it (#9a chain)
+	// belt /api/route: W96 hint routing ('prefer local distill reasoning' —
+	// belt decides, local-first) — belt may live on another machine or be a
+	// wholly different system; resolveBelt() finds it (#9a chain)
 	async distill(
 		payload: string,
 		hints: {
@@ -522,7 +523,9 @@ export class BeltDistillClient implements DistillClient {
 				...(loc.token ? { authorization: `Bearer ${loc.token}` } : {}),
 			},
 			body: JSON.stringify({
-				role: "reasoning", // an ingest pass is a reasoning task
+				// W96: belt decides, local-first — the hint REPLACES the interim
+				// INGEST_LLM_URL pin (an ingest pass is a distill/reasoning task)
+				hint: "prefer local distill reasoning",
 				execute: true,
 				max_tokens: 1600,
 				temperature: 0.2,

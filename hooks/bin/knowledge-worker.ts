@@ -10,8 +10,10 @@
 // mechanical secrets pass (redactSecrets) before any insert, near-duplicate
 // gate via store.dedupeCheck (older fact kept, skip noted in the ledger).
 // env:   INGEST_LLM_URL / INGEST_LLM_KEY / INGEST_LLM_MODEL — explicit
-//        OpenAI-compatible distill endpoint (enterprise points at their own);
-//        omit and the BeltDistillClient resolves belt via resolveBelt().
+//        OpenAI-compatible distill endpoint (enterprise override — points at
+//        their own gateway); omit (default) and BeltDistillClient resolves
+//        belt via resolveBelt() and sends hint 'prefer local distill
+//        reasoning' — belt decides, local-first (W96).
 //        KNOWLEDGE_STORE_URL — reserved for a remote store adapter.
 // usage: bun hooks/bin/knowledge-worker.ts          (daemon: 5s poll loop)
 //        bun hooks/bin/knowledge-worker.ts --once   (drain queued, exit)

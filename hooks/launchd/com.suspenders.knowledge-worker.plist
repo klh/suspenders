@@ -8,12 +8,11 @@
   </array>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
-  <!-- distill target: local large model by default (owner 2026-09-30 —
-       knowledge ingest is a slow-queue chore, keep it off the paid cloud;
-       unset/override via env to route through belt instead) -->
-  <key>EnvironmentVariables</key><dict>
-    <key>INGEST_LLM_URL</key><string>http://127.0.0.1:8903</string>
-  </dict>
+  <!-- W96 distill target: belt decides, local-first — the worker's
+       BeltDistillClient sends hint 'prefer local distill reasoning' and belt
+       picks the local model again (the :8903 INGEST_LLM_URL pin is retired).
+       Enterprise override stays available: INGEST_LLM_URL env still wins in
+       makeDistillClient(). -->
   <key>StandardOutPath</key><string>/tmp/suspenders-knowledge-worker.log</string>
   <key>StandardErrorPath</key><string>/tmp/suspenders-knowledge-worker.log</string>
 </dict></plist>
