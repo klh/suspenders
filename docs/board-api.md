@@ -118,7 +118,9 @@ order — first failure wins:
 Success: `{ ok: true, item, branch, ladder }`. The ladder is owner config —
 `<repo>/.fleet/ship.json` `{"ladder": "<cmd template with {branch}>"}` — and
 REQUIRED: ship must never do a plain merge behind the repo's quality policy's
-back. The merge goes through fleet-loop's shared `mergeOne` (MERGE_HEAD abort,
+back. Optional `ship.json` keys `"review"` / `"review_tests"` add fleet-loop's
+fresh-context reviewer gate ahead of the ladder (W81 — see docs/fleet-loop.md).
+The merge goes through fleet-loop's shared `mergeOne` (MERGE_HEAD abort,
 ladder timeout, FAIL tail, 3-strike park, retire), so board-shipped branches
 obey the same discipline as loop merges; outcomes land in `<repo>/.fleet/loop.log`.
 

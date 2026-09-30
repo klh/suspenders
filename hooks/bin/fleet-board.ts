@@ -227,7 +227,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/comment   route a review line-comment to a work item's owning lane (coord NOTE; id, file, line, note required — note capped at 2000)
 - POST /api/message   message a work item's owning lane as the coordinator (coord NOTE; id, note required — note capped at 2000)
 - POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not a READY item, demo, or agent missing; agent=llm:machine:model routes through belt's remotes router instead: claim as the board lane, remotes.ts route the title+description, llm.result on the item thread, claim released)
-- POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, or while a lane lives)
+- POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness guards, then the repo's .fleet/ship.json ladder (plus its optional review gate) runs detached via fleet-loop ship (409 without a configured ladder, on demo, or while a lane lives)
 - POST /api/orchestrate            LLM proposes a plan item + parallel children from a goal (project, goal required; read-only — nothing registers, 502 when no parseable plan comes back)
 - POST /api/orchestrate/register   register a proposed plan as a plan-gated work split through the work CLI (project, title, children required; children 2..8; the plan item is the split parent — the AGENTS.md add-plan-then-split flow)
 
@@ -580,11 +580,20 @@ const lanesOf = (repo: string): { pid: number; branch: string }[] => {
 
 // <repo>/.fleet/ship.json — the one-click ship trigger's owner config, same
 // trust class as the loop's --ladder argv. Required: ship must never do a
-// plain merge behind the repo's quality policy's back.
-const readShipJson = (repo: string): { ladder?: string } => {
+// plain merge behind the repo's quality policy's back. W81: "review" /
+// "review_tests" add the fresh-context reviewer gate ahead of the ladder.
+const readShipJson = (
+	repo: string,
+): {
+	ladder?: string;
+	review?: string;
+	review_tests?: string;
+} => {
 	try {
 		return JSON.parse(readFileSync(`${repo}/.fleet/ship.json`, "utf8")) as {
 			ladder?: string;
+			review?: string;
+			review_tests?: string;
 		};
 	} catch {
 		return {};
@@ -2709,6 +2718,8 @@ Bun.serve({
 					branch,
 					"--ladder",
 					ship.ladder,
+					...(ship.review ? ["--review", ship.review] : []),
+					...(ship.review_tests ? ["--review-tests", ship.review_tests] : []),
 				],
 				{
 					stdin: "ignore",

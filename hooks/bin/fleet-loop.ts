@@ -10,7 +10,10 @@
 //   1. abort leftover merge state
 //   2. merge every branch matching --glob that is ahead of --main, through
 //      the ladder child (--ladder template with {branch}; default: plain
-//      git merge --no-ff)
+//      git merge --no-ff), gated first by the optional fresh-context
+//      reviewer (--review {seed}: the seed carries ONLY the item objective
+//      + diff + fresh test output, never the worker's framing; a rejected
+//      review is a ladder strike)
 //   --dispatch-cmd <template> runs once per cycle after merges (policy lives there)
 //   3. retire merged branches' worktree + branch (pid-guarded, honest RETIRE-BLOCKED)
 //
@@ -24,11 +27,13 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
+import { resolve } from "node:path";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
 
@@ -43,6 +48,9 @@ if (
 		`usage: fleet-loop once|watch|lanes|dispatch|ship --repo <dir> [--glob lane/autow*] [--main main]\n` +
 			`          [--ladder <cmd template with {branch}>]  default: plain git merge --no-ff\n` +
 			`          [--ladder-timeout 10]                    minutes; watchdog-kills a hung ladder\n` +
+			`          [--review <cmd template with {seed}>]    fresh-context reviewer gate before each merge\n` +
+			`          [--review-tests <cmd with {branch}>]     fresh test run feeding the reviewer seed\n` +
+			`          [--review-timeout 5]                     minutes; watchdog-kills a hung reviewer\n` +
 			`          [--dispatch-cmd <template>]              optional policy script\n` +
 			`          [--agent claude|codex]                   dispatch backend (default claude)\n` +
 			`          ship --branch <branch>                   one branch through the ladder (board ship trigger)\n` +
@@ -62,6 +70,9 @@ if (!REPO) process.exit(1); // usage block above already explained
 const MAIN = val("--main", "main");
 const GLOB = val("--glob", "lane/autow*");
 const LADDER = val("--ladder");
+const REVIEW = val("--review");
+const REVIEW_TESTS = val("--review-tests");
+const REVIEW_TIMEOUT_MS = num("--review-timeout", 5) * 60_000;
 const AGENT = val("--agent", "claude");
 const LADDER_TIMEOUT_MS = num("--ladder-timeout", 10) * 60_000;
 const DISPATCH = val("--dispatch-cmd");
@@ -135,22 +146,26 @@ const runTemplate = (
 	template: string,
 	branch: string,
 	timeoutMs: number,
-): { code: number; tail: string } => {
-	const cmd = template.split("{branch}").join(branch);
+	seed?: string,
+): { code: number; tail: string; out: string } => {
+	const cmd = template
+		.split("{branch}")
+		.join(branch)
+		.split("{seed}")
+		.join(seed ?? "");
 	const p = Bun.spawnSync(["/bin/sh", "-c", cmd], {
 		cwd: REPO,
 		stdout: "pipe",
 		stderr: "pipe",
 		timeout: timeoutMs,
 	});
-	const tail =
-		`${p.stdout ? new TextDecoder().decode(p.stdout) : ""}${p.stderr ? new TextDecoder().decode(p.stderr) : ""}`
-			.trim()
-			.split("\n")
-			.filter(Boolean)
-			.slice(-3)
-			.join(" | ");
-	return { code: p.exitCode ?? 1, tail };
+	const out =
+		`${p.stdout ? new TextDecoder().decode(p.stdout) : ""}${p.stderr ? new TextDecoder().decode(p.stderr) : ""}`.trim();
+	return {
+		code: p.exitCode ?? 1,
+		out,
+		tail: out.split("\n").filter(Boolean).slice(-3).join(" | "),
+	};
 };
 
 const ahead = (b: string): number => {
@@ -319,8 +334,9 @@ function retireMerged(b: string): void {
 		);
 }
 
-// a failed ladder: abort the merge, log the tail, count the strike, park at 3
-function mergeFail(b: string, tail: string): void {
+// a failed ladder (or a rejected review — W81 counts it identically): abort
+// the merge, log the tail, count the strike, park at 3
+function mergeFail(b: string, tail: string, what = "ladder failed"): void {
 	// a failed ladder leaves MERGE_HEAD behind — abort it; NEVER reset --hard.
 	// A plain abort can itself fail on staged debris (run() ignores the exit
 	// code) — verify, and escalate straight to the surgical heal: cycle-start
@@ -331,7 +347,7 @@ function mergeFail(b: string, tail: string): void {
 		if (existsSync(`${REPO}/.git/MERGE_HEAD`)) healCrashedMerge();
 	}
 	log(
-		`FAIL ${b} — ladder failed, merge aborted, branch left for inspection${tail ? `: ${tail}` : ""}`,
+		`FAIL ${b} — ${what}, merge aborted, branch left for inspection${tail ? `: ${tail}` : ""}`,
 	);
 	const n = bumpFail(b);
 	if (n >= 3) {
@@ -343,6 +359,104 @@ function mergeFail(b: string, tail: string): void {
 		clearFail(b);
 	}
 }
+
+// W81 — the fresh-context reviewer seed. The reviewer is seeded ONLY with
+// the item objective (Work Graph title/description/scope), the branch diff,
+// and a fresh test run — deliberately NOT the lane brief, commit messages,
+// or any other worker framing: a reviewer that can be told what to think is
+// not a reviewer. Every input fails soft — a missing objective or a missing
+// test runner degrades the seed honestly, it never blocks the gate.
+const seedPath = (b: string): string =>
+	`${REPO}/.fleet/review-seed-${b.replace(/[^A-Za-z0-9._-]/g, "-")}.md`;
+
+const reviewObjective = (b: string): string => {
+	// branch → candidate work ids: suspenders/W81 → W81, lane/autow123 → W123
+	const seg = b.replace(/^.*\//, "");
+	const ids = [
+		seg,
+		/^autow/.test(seg) ? `W${seg.slice("autow".length)}` : "",
+	].filter(Boolean);
+	try {
+		const dir =
+			sh(["git", "-C", REPO, "rev-parse", "--git-common-dir"]) || ".git";
+		const project = realpathSync(resolve(REPO, dir));
+		const lookup = openGovernorDb().query(
+			"SELECT title, description, scope FROM work_items WHERE project = ? AND id = ?",
+		);
+		for (const id of ids) {
+			const hit = lookup.get(project, id) as {
+				title: string;
+				description: string | null;
+				scope: string | null;
+			} | null;
+			if (!hit) continue;
+			return [
+				`${id}: ${hit.title}`,
+				hit.scope ? `scope: ${hit.scope}` : "",
+				(hit.description ?? "").slice(0, 1200),
+			]
+				.filter(Boolean)
+				.join("\n");
+		}
+	} catch {}
+	return `(no work item found for branch ${b})`;
+};
+
+const reviewDiff = (b: string): string => {
+	const base = sh(["git", "merge-base", MAIN, b]);
+	if (!base) return `(no merge-base with ${MAIN} — nothing to review)`;
+	const d =
+		sh(["git", "diff", "--find-renames", `${base}..${b}`]) || "(empty diff)";
+	const lines = d.split("\n");
+	if (lines.length <= 2000) return d;
+	return `${lines.slice(0, 2000).join("\n")}\n[diff truncated: ${lines.length - 2000} of ${lines.length} lines omitted]`;
+};
+
+const reviewTests = (b: string): string => {
+	if (!REVIEW_TESTS)
+		return "No fresh test output was gathered (this repo configures no review-tests command).";
+	const r = runTemplate(REVIEW_TESTS, b, LADDER_TIMEOUT_MS);
+	const body =
+		r.out.length > 12_000
+			? `[...truncated...]\n${r.out.slice(-12_000)}`
+			: r.out;
+	return `fresh run exit code: ${r.code}\n${body || "(no output)"}`;
+};
+
+const writeReviewSeed = (b: string): string => {
+	mkdirSync(`${REPO}/.fleet`, { recursive: true });
+	const p = seedPath(b);
+	writeFileSync(
+		p,
+		[
+			`# Fresh-context merge review: ${b}`,
+			"",
+			`You are a headless reviewer gating a merge into ${MAIN}. Judge ONLY the`,
+			"sections below — NO commit messages, NO lane brief, NO other repo",
+			"context: the author's framing must not reach you. If what is here is",
+			"not enough to judge a hunk, that counts against the branch.",
+			"",
+			"End your output with a final line containing exactly `VERDICT: PASS` or",
+			"`VERDICT: FAIL — <one-line reason>`. Fail on broken behavior, missing",
+			"tests for new logic, unreviewable or suspicious hunks, or drift from the",
+			"objective. Style nits are not failures.",
+			"",
+			"## Item objective",
+			"",
+			reviewObjective(b),
+			"",
+			`## Branch diff (merge-base..${b})`,
+			"",
+			reviewDiff(b),
+			"",
+			"## Test output (fresh run by the loop)",
+			"",
+			reviewTests(b),
+			"",
+		].join("\n"),
+	);
+	return p;
+};
 
 // one branch through the ladder — the cycle's per-branch body, shared with
 // the board's one-click ship (`ship --branch <b>` runs it foreground).
@@ -360,6 +474,23 @@ function mergeOne(b: string): void {
 	// treated ahead>0 as ready and its retire swept the worktree out from
 	// under the agents)
 	if (laneIsAlive(b)) return;
+	// W81 fresh-context reviewer gate BEFORE the ladder: the seed is composed
+	// from the item objective + diff + fresh tests ONLY (never the worker's
+	// framing); a rejection is a ladder strike (mergeFail — same counter, same
+	// 3-strike park). No git state is touched here: no marker, no MERGE_HEAD,
+	// nothing to abort.
+	if (REVIEW) {
+		const rv = runTemplate(REVIEW, b, REVIEW_TIMEOUT_MS, writeReviewSeed(b));
+		// the verdict is the reviewer's FINAL line — scanning the whole output
+		// would let the seed's own instruction text (echoed, or quoted in a
+		// reviewer's commentary) forge a FAIL
+		const verdict = rv.out.split("\n").filter(Boolean).pop() ?? "";
+		if (rv.code !== 0 || /^VERDICT:\s*FAIL/.test(verdict)) {
+			mergeFail(b, rv.tail || "reviewer rejected the diff", "review rejected");
+			return;
+		}
+		log(`REVIEW-PASS ${b}`);
+	}
 	// liveness marker: a crash between --no-commit and commit leaves
 	// MERGE_HEAD + staged debris that plain merge --abort cannot clear (the
 	// 2026-09-28 gaps stall). The marker tells the next cycle whether a

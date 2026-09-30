@@ -25,6 +25,45 @@ bun fleet-loop.ts watch --repo <dir> --ladder '<cmd> {branch}' [--every 120] [--
 | Watchdog      | In `watch` mode every cycle runs as a killable `--once` child with a hard timer (`--cycle-timeout`, default 15 min). A hung cycle dies at the watchdog; the loop continues. Never spawnSync unbounded.                                                                                                              |
 | Merge state   | A cycle never starts with leftover `MERGE_HEAD` — it aborts. Failed ladders are aborted too. Never `reset --hard` a shared checkout.                                                                                                                                                                                |
 | Lane protocol | Every dispatched lane PLAN FIRST (inventory the impact surface, read qlty spec + target files), then SHATTER JUDGMENT: 2+ genuinely independent scopes → `work split <id> … --keep 1`, work only the kept child, end `SPLIT <id>`; the fleet refills the rest. Serial or small work proceeds to implement directly. |
+| Review        | Optional `--review '<cmd with {seed}>'` runs a fresh-context reviewer BEFORE each merge (W81). The loop composes the seed from the item objective, the branch diff, and a fresh `--review-tests` run — nothing else: commit messages and lane briefs never reach the reviewer. Nonzero exit or a final `VERDICT: FAIL` line is a strike (same counter and 3-strike park as the ladder). |
+
+
+## Review — the fresh-context gate before the ladder (W81)
+
+```bash
+bun fleet-loop.ts once --repo <dir> --ladder '<cmd> {branch}' \
+  --review 'claude -p "Read the review seed at {seed} and judge it. End with VERDICT: PASS or VERDICT: FAIL — <reason>."' \
+  --review-tests 'bun test'
+```
+
+Before every merge attempt the loop writes
+`.fleet/review-seed-<branch>.md` and substitutes its path for `{seed}`. The
+seed holds exactly three inputs and nothing else:
+
+1. **Item objective** — the Work Graph item's title/description/scope
+   (branch `suspenders/W81` → item `W81`; `lane/autow123` → `W123`). No
+   matching item → the seed says so, honestly.
+2. **Diff** — `git diff` merge-base..branch, truncated at 2000 lines with a
+   loud marker.
+3. **Test output** — `--review-tests '<cmd with {branch}>'` run fresh by the
+   loop in the repo checkout (the ladder's timeout applies); absent → the
+   seed says no tests were gathered.
+
+That is the whole point: a reviewer that can be told what to think by the
+author's framing is not a reviewer, so commit messages, lane briefs, and
+worker claims never reach it. The reviewer command is owner config (same
+trust class as the ladder). It rejects with a nonzero exit or a final
+`VERDICT: FAIL` line (final-line only — a FAIL quoted mid-output or echoed
+from the seed's own instructions must not forge a rejection), and a
+rejection is a ladder strike: `FAIL <branch> — review rejected …` in
+loop.log, counted in merge-fails.json, parked at 3 like any ladder failure.
+`--review-timeout` (default 5 min) watchdog-kills a hung reviewer; review
+and ladder share one watch-mode cycle, so raise `--cycle-timeout` when both
+are slow. The board's one-click ship picks the gate up from `ship.json`:
+
+```json
+{"ladder": "<cmd with {branch}>", "review": "<cmd with {seed}>", "review_tests": "<cmd with {branch}>"}
+```
 
 ## dispatch — one item → claimed, worktree, briefed headless lane
 
