@@ -130,3 +130,86 @@ from one section list — no drift by construction.
 pattern (~30% cheaper on repos with navigation to skip) but inherit its
 weakness too: on a small self-contained surface they are a pure tax (+27%
 duration), so gate injection on repo size/task breadth, not on packet source.**
+
+## Third arm — hub-distilled packets (W113, 2026-09-30)
+
+Same three repos, tasks/targets and harness (run2.ts, scrub, allowlists) as
+the study above; the injected arm's packet is now built from the hub's own
+distilled rows (POST :7795/search, domains gaps/hojtaler/tredebanken-v2 — the
+W108 sweep: gaps #158–226, hojtaler #171–201, tredebanken-v2 #202–228)
+instead of docs distillation. Packets ≤3KB (2673/2623/2661 B), the hub's
+precedence clause prepended; rows selected per task from a multi-query
+/search sweep (the API has no list-all route; aux/transcript rows excluded).
+run2.ts gained a third side, `hub`, writing to `<repo>-hub` cell dirs; W107's
+cell dirs are untouched. Blind baselines reused verbatim from W107. n=1 per
+cell. All three hub cells delivered real code — delivery evidence per cell
+checked as in W107 (git-diff placement + final-message report).
+
+## Results — three-way (9 cells; W107 cells reused for blind/docs arms)
+
+| Repo           | Arm      | Duration | Turns | In tok  | Out tok | Code ins | Delivered |
+| -------------- | -------- | -------- | ----- | ------- | ------- | -------- | --------- |
+| gaps           | blind    | 772.7s   | 105   | 119,821 | 43,651  | 112      | yes       |
+| gaps           | injected | 529.2s   | 88    | 76,988  | 30,170  | 28       | yes       |
+| gaps           | hub      | 542.6s   | 71    | 94,743  | 39,026  | 79       | yes       |
+| hojtaler       | blind    | 650.1s   | 64    | 62,954  | 35,546  | 117      | yes       |
+| hojtaler       | injected | 452.9s   | 58    | 45,162  | 23,118  | 131      | yes       |
+| hojtaler       | hub      | 543.0s   | 69    | 60,974  | 32,904  | 124      | yes       |
+| tredebanken-v2 | blind    | 211.8s   | 39    | 24,896  | 9,844   | 37       | yes       |
+| tredebanken-v2 | injected | 268.3s   | 39    | 29,539  | 13,056  | 37       | yes       |
+| tredebanken-v2 | hub      | 227.8s   | 50    | 30,288  | 9,521   | 30       | yes       |
+
+### Deltas — hub vs blind, and hub vs docs-injected (the headline)
+
+| Repo           | Hub vs blind: dur / turns / in / out | Hub vs docs: dur / turns / in / out |
+| -------------- | ------------------------------------ | ----------------------------------- |
+| gaps           | −29.8% / −32.4% / −20.9% / −10.6%    | +2.5% / −19.3% / +23.1% / +29.3%    |
+| hojtaler       | −16.5% / +7.8% / −3.1% / −7.4%       | +19.9% / +19.0% / +35.0% / +42.3%   |
+| tredebanken-v2 | +7.6% / +28.2% / +21.7% / −3.3%      | −15.1% / +28.2% / +2.5% / −27.1%    |
+
+### DOCS-vs-HUB verdict
+
+**Docs-derived packets beat hub-distilled packets on the two navigation-heavy
+repos.** On hojtaler the docs arm won every axis (hub +19.9% duration, +35.0%
+input tokens); on gaps docs was ~23% cheaper on input tokens while the hub arm
+saved more turns (71 vs 88) but spent them re-deriving what the docs packet
+simply names: file paths. The hub rows are architectural/operational —
+surfaces, elections, DSP chains, update workflows: true and useful for
+orientation, but carrying almost no file-level pointers, which is exactly what
+the first-hop navigation cost rewards. The W107 mechanism note predicted this
+("the pointers are the active ingredient"), and W108's distillation layer
+(residue + lessons + incidents) did not reproduce those pointers for these
+repos. On the small surface (tredebanken) both packet kinds tax vs blind (hub
++7.6% duration, docs +26.7%) — the hub merely drew the smaller tax.
+
+### Honesty (W113)
+
+1. **n=1 per cell, carried over.** Three new cells; every delta is one draw
+   with model/scheduler variance unquantified.
+2. **Packet build:** content is verbatim hub row text as served by /search
+   (topic + fact); selection is task-curated (7/5/7 rows; hojtaler k#194
+   EQ-architecture row dropped by the 3KB budget). The packets carry three
+   task-adjacent pointers (docs/specs/CLI.md via gaps k#170, the
+   `hojtaler-debug` command itself via k#201,
+   backend/tools/regenerate-schema-docs.sh via tredebanken k#215) but none of
+   the per-file code pointers ([verb-models.ts], [args.ts]) the docs packets
+   had.
+3. **Delivery shape:** the hub gaps arm invoked the precedence clause again —
+   `models --json` already existed as a wrapper object; it reshaped to the
+   bare array the task specified and updated the pins (79 ins). hojtaler hub
+   kept text mode byte-identical (one file, 124 ins); tredebanken hub 30 ins
+   in Program.cs. In-cell verification runs happened inside the cells; I
+   re-checked diff placement and final-report delivery evidence only, same
+   as W107.
+4. **Harness/metrics deltas:** run2.ts third side (`hub`) — the blind and
+   docs code paths are unchanged. The gaps-hub cell's `del`/`files` metrics
+   are scrub-polluted (harness counts scrub deletions in `del`; insertions
+   unaffected — same pollution existed in W107, which reported ins only).
+   Artifacts under `/tmp/ab-bench/<repo>-hub/` (brief.md, result.json,
+   sandbox repo); /tmp is volatile.
+
+**Verdict (completing the three-way): injection value is carried by file-level
+pointers, not by the distillation layer. When the hub's rows are
+architectural-only, a good README beats the hub; when rows embed file
+pointers, the hub should match docs — untested here because the W108 sweep
+rows for these repos don't.**
