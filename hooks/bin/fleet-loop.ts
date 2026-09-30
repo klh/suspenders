@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
+import { openGovernorDb } from "../lib/govdb.ts";
 
 const argv = process.argv.slice(2);
 const MODE = argv[0];
@@ -326,6 +327,15 @@ function mergeOne(b: string): void {
 	if (mv.code === 0) {
 		const after = sh(["git", "rev-parse", "--short", "HEAD"]);
 		log(`MERGED ${b} ${before}→${after}`);
+		// work.landed on the bus: waiting lanes use `coord wait --kinds
+		// work.landed --scope <item>` instead of /tmp poll scripts
+		try {
+			openGovernorDb()
+				.query(
+					"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'fleet-loop', 'work.landed', ?, ?, NULL)",
+				)
+				.run(Date.now(), b, JSON.stringify({ work: b, sha: after }));
+		} catch {}
 		clearFail(b);
 	} else {
 		mergeFail(b, mv.tail);
