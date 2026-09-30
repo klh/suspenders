@@ -9,6 +9,7 @@
 		"ci": "bun install && bun test test/"
 	},
 	"dependencies": {
+		"p-queue": "^9.3.3",
 		"shell-quote": "^1.8.2"
 	},
 	"engines": {

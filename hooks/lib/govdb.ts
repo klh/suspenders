@@ -194,9 +194,12 @@ export function tokenUsage(
 		if (!p.work) continue;
 		if (r.kind === "work.claimed") {
 			if (!wins.has(p.work)) wins.set(p.work, []);
-			wins.get(p.work)!.push({ start: r.ts, end: 0 });
-			if (p.by)
-				(sids.get(p.work) ?? sids.set(p.work, []).get(p.work)!).push(p.by);
+			wins.get(p.work)?.push({ start: r.ts, end: 0 });
+			if (p.by) {
+				const arr = sids.get(p.work) ?? [];
+				arr.push(p.by);
+				sids.set(p.work, arr);
+			}
 		} else {
 			const w = wins.get(p.work)?.find((x) => x.end === 0); // claims close in order (FIFO)
 			if (w) w.end = r.ts;
@@ -448,6 +451,128 @@ export function openGovernorDb(): Database {
 	);
 	db.run("CREATE INDEX IF NOT EXISTS deltas_ts ON deltas(ts, seq)"); // --since <event-id> resolves ts → seq
 	if (uv < 5) db.run("PRAGMA user_version = 5");
+	// v6 — the knowledge layer (W91): distilled fleet knowledge as first-class
+	// rows with the sortable axes (domain/area/origin_kind/origin_system/
+	// code_origin) the plan→query→investigate workflow needs; state gates
+	// promotion (worker writes candidates, human/merge promotes). DDL +
+	// facts backfill in ONE transaction — a crash rolls back, next open retries.
+	if (uv < 6) {
+		db.run("BEGIN IMMEDIATE");
+		try {
+			db.run(
+				"CREATE TABLE IF NOT EXISTS knowledge (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, topic TEXT NOT NULL, fact TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0.5, domain TEXT, area TEXT, origin_kind TEXT, origin_system TEXT, code_origin TEXT, origin_sid TEXT, contributors TEXT, duplicate_of INTEGER, supersedes_id INTEGER, source_ref TEXT, source_hash TEXT, source TEXT NOT NULL DEFAULT 'knowledge-worker', state TEXT NOT NULL DEFAULT 'candidate', superseded_by INTEGER, created_at INTEGER, updated_at INTEGER)",
+			);
+			// external-content FTS5 (W91 #7): the index holds ONLY the inverted
+			// index — topic+fact text is read from knowledge at query time, so
+			// text is stored exactly once. UNINDEXED filter columns fall through
+			// to the content table by name (hence origin_kind, not kind).
+			db.run(
+				"CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(topic, fact, domain UNINDEXED, area UNINDEXED, origin_kind UNINDEXED, origin_system UNINDEXED, state UNINDEXED, content='knowledge', content_rowid='id')",
+			);
+			db.run(
+				"CREATE TRIGGER IF NOT EXISTS knowledge_fts_ai AFTER INSERT ON knowledge BEGIN INSERT INTO knowledge_fts (rowid, topic, fact) VALUES (NEW.id, NEW.topic, NEW.fact); END",
+			);
+			db.run(
+				"CREATE TRIGGER IF NOT EXISTS knowledge_fts_ad AFTER DELETE ON knowledge BEGIN INSERT INTO knowledge_fts (knowledge_fts, rowid, topic, fact) VALUES ('delete', OLD.id, OLD.topic, OLD.fact); END",
+			);
+			db.run(
+				"CREATE TRIGGER IF NOT EXISTS knowledge_fts_au AFTER UPDATE ON knowledge BEGIN INSERT INTO knowledge_fts (knowledge_fts, rowid, topic, fact) VALUES ('delete', OLD.id, OLD.topic, OLD.fact); INSERT INTO knowledge_fts (rowid, topic, fact) VALUES (NEW.id, NEW.topic, NEW.fact); END",
+			);
+			db.run(
+				"CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(value, key UNINDEXED)",
+			);
+			db.run(
+				"CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN INSERT INTO facts_fts (rowid, value, key) VALUES (NEW.rowid, NEW.value, NEW.key); END",
+			);
+			db.run(
+				"CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN DELETE FROM facts_fts WHERE rowid = OLD.rowid; END",
+			);
+			db.run(
+				"CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN DELETE FROM facts_fts WHERE rowid = OLD.rowid; INSERT INTO facts_fts (rowid, value, key) VALUES (NEW.rowid, NEW.value, NEW.key); END",
+			);
+			db.run(
+				"CREATE TABLE IF NOT EXISTS knowledge_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, result_key TEXT, domain TEXT, area TEXT, code_origin TEXT, started_at INTEGER, origin_sid TEXT)",
+			);
+			db.run(
+				"INSERT INTO facts_fts (rowid, value, key) SELECT rowid, value, key FROM facts WHERE value IS NOT NULL",
+			);
+			db.run("PRAGMA user_version = 6");
+			db.run("COMMIT");
+		} catch (e) {
+			try {
+				db.run("ROLLBACK");
+			} catch {}
+			throw e instanceof Error
+				? new Error(
+						`govdb knowledge-layer migration (v6) failed, rolled back: ${e.message}`,
+						{ cause: e },
+					)
+				: e;
+		}
+	}
+	// W91 schema-delta convergence (every open, idempotent): DBs that already
+	// ran the first v6 draft pre-date the full knowledge shape — converge the
+	// columns + backfill the ms clocks at every open, never silently drift.
+	const knCols = (
+		db.query("PRAGMA table_info(knowledge)").all() as { name: string }[]
+	).map((c) => c.name);
+	if (knCols.length) {
+		const adds: [string, string][] = [
+			["created_at", "INTEGER"],
+			["updated_at", "INTEGER"],
+			["origin_sid", "TEXT"],
+			["contributors", "TEXT"],
+			["duplicate_of", "INTEGER"],
+			["supersedes_id", "INTEGER"],
+			["source_ref", "TEXT"],
+			["source_hash", "TEXT"],
+		];
+		for (const [col, ddl] of adds)
+			if (!knCols.includes(col))
+				db.run(`ALTER TABLE knowledge ADD COLUMN ${col} ${ddl}`);
+		db.run("UPDATE knowledge SET created_at = ts WHERE created_at IS NULL");
+		db.run(
+			"UPDATE knowledge SET updated_at = COALESCE(updated_at, created_at, ts) WHERE updated_at IS NULL",
+		);
+	}
+	// W91 #7: DBs that ran the earlier v6 draft hold a REGULAR fts5
+	// knowledge_fts (its own text copy). Converge to external-content — drop,
+	// recreate with content='knowledge', rebuild the index from knowledge rows,
+	// and refresh the sync triggers to the documented external-content form.
+	const ftsSql =
+		(
+			db
+				.query(
+					"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'knowledge_fts'",
+				)
+				.get() as { sql?: string } | null
+		)?.sql ?? "";
+	if (ftsSql && !ftsSql.includes("content='knowledge'")) {
+		db.run("DROP TRIGGER IF EXISTS knowledge_fts_ai");
+		db.run("DROP TRIGGER IF EXISTS knowledge_fts_ad");
+		db.run("DROP TRIGGER IF EXISTS knowledge_fts_au");
+		db.run("DROP TABLE knowledge_fts");
+		db.run(
+			"CREATE VIRTUAL TABLE knowledge_fts USING fts5(topic, fact, domain UNINDEXED, area UNINDEXED, origin_kind UNINDEXED, origin_system UNINDEXED, state UNINDEXED, content='knowledge', content_rowid='id')",
+		);
+		db.run(
+			"INSERT INTO knowledge_fts (rowid, topic, fact) SELECT id, topic, fact FROM knowledge",
+		);
+		db.run(
+			"CREATE TRIGGER knowledge_fts_ai AFTER INSERT ON knowledge BEGIN INSERT INTO knowledge_fts (rowid, topic, fact) VALUES (NEW.id, NEW.topic, NEW.fact); END",
+		);
+		db.run(
+			"CREATE TRIGGER knowledge_fts_ad AFTER DELETE ON knowledge BEGIN INSERT INTO knowledge_fts (knowledge_fts, rowid, topic, fact) VALUES ('delete', OLD.id, OLD.topic, OLD.fact); END",
+		);
+		db.run(
+			"CREATE TRIGGER knowledge_fts_au AFTER UPDATE ON knowledge BEGIN INSERT INTO knowledge_fts (knowledge_fts, rowid, topic, fact) VALUES ('delete', OLD.id, OLD.topic, OLD.fact); INSERT INTO knowledge_fts (rowid, topic, fact) VALUES (NEW.id, NEW.topic, NEW.fact); END",
+		);
+	}
+	const kqCols = (
+		db.query("PRAGMA table_info(knowledge_queue)").all() as { name: string }[]
+	).map((c) => c.name);
+	if (kqCols.length && !kqCols.includes("origin_sid"))
+		db.run("ALTER TABLE knowledge_queue ADD COLUMN origin_sid TEXT");
 	// one column table drives all 15 triggers so the images can never drift
 	// from the schemas they mirror. Locks are the highest-churn rows in the
 	// fleet (a renew per file edit), so lock rows are op-only (before/after

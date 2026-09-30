@@ -8,8 +8,8 @@
 // env:   SUSPENDERS_LLM_URL   (default http://127.0.0.1:8901/v1/chat/completions)
 //        SUSPENDERS_LLM_MODEL (default "local")
 //        SUSPENDERS_LLM_KEY   (optional bearer token)
-import { readFileSync } from "node:fs";
 import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
+import { resolveBelt } from "../lib/belt-locate.ts";
 import {
 	chatRemote,
 	endpointsWithRole,
@@ -223,24 +223,11 @@ async function tryBeltRoute(
 	sys: string,
 	question: string,
 ): Promise<{ text: string; model: string; host: string; ms: number } | null> {
-	const base = process.env.SUSPENDERS_BELT_URL ?? "http://127.0.0.1:7791";
-	const token =
-		process.env.SUSPENDERS_BELT_TOKEN ??
-		(() => {
-			try {
-				const keys = Object.keys(
-					JSON.parse(
-						readFileSync(
-							`${process.env.HOME}/.claude/local-llm/belt-tokens.json`,
-							"utf8",
-						),
-					),
-				);
-				return keys[0];
-			} catch {
-				return undefined;
-			}
-		})();
+	// W91 #9a: belt location resolves through the shared chain (env → config →
+	// belt.local → dev default) — never a hardcoded address
+	const loc = await resolveBelt();
+	if (!loc) return null;
+	const { url: base, token } = loc;
 	try {
 		const r = await fetch(`${base}/api/route`, {
 			method: "POST",
