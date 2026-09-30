@@ -35,6 +35,7 @@ import {
 	enqueueKnowledge,
 	type KnowledgeHit,
 } from "../lib/knowledge-ports.ts";
+import { trustOf } from "../lib/knowledge.ts";
 import { resolve } from "node:path";
 
 interface Ev {
@@ -67,7 +68,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 // --help anywhere wins before any parsing that could create state
 if (rest.includes("--help") || rest.includes("-h")) {
 	console.log(
-		"coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | knowledge | knowledge-enqueue | knowledge-promote | knowledge-retire | knowledge-note | knowledge-verify | lease-release | gc | fleet | metrics | diff",
+		"coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | knowledge | knowledge-enqueue | knowledge-promote | knowledge-retire | knowledge-note | knowledge-verify | knowledge-curate | lease-release|knowledge-verify | knowledge-curate | lease-release | gc | fleet | metrics | diff",
 	);
 	process.exit(0);
 }
@@ -245,7 +246,10 @@ if (cmd === "emit") {
 	// own rows; taking a foreign lease is monitor --fix / arbitration work.
 	const paths = rest.filter((r) => !r.startsWith("--"));
 	const as = arg("--as");
-	if (!paths.length || !as) die("usage: lease-release <path...> --as <sid>");
+	if (!paths.length || !as)
+		die(
+			"usage:knowledge-verify | knowledge-curate | lease-release <path...> --as <sid>",
+		);
 	const del = db.query("DELETE FROM locks WHERE path = ? AND sid = ?");
 	let n = 0;
 	for (const p of paths) {
@@ -255,7 +259,9 @@ if (cmd === "emit") {
 		} catch {}
 		n += del.run(P, as).changes;
 	}
-	console.log(`${green("✓")} lease-release: ${n} lock(s) released`);
+	console.log(
+		`${green("✓")}knowledge-verify | knowledge-curate | lease-release: ${n} lock(s) released`,
+	);
 } else if (cmd === "state") {
 	// between-rounds check for a lane: canonical state + inbox + current HEAD
 	const as = arg("--as") ?? die("usage: state --as <sid>");
@@ -1734,6 +1740,22 @@ if (cmd === "emit") {
 			}
 		}
 	}
+} else if (cmd === "knowledge-curate") {
+	// W103 substitution curation: flag rows restating what ONE repo file/doc
+	// already teaches — human review decides pointer-ize vs retire; flagged
+	// rows stay in place (state untouched, append-only contributor note).
+	const repoRoot = arg("--repo") ?? process.cwd();
+	const res = await makeStore().curate({
+		repoRoot,
+		by: arg("--as") ?? "coord-curate",
+	});
+	for (const f of res.flagged)
+		console.log(
+			`${amber("⚠")} k#${f.id} "${f.topic.slice(0, 48)}" — derivable from ${f.doc} (${f.coverage}% terms)`,
+		);
+	console.log(
+		`${green("✓")} curate: ${res.flagged.length}/${res.checked} rows flagged for review (left in place, state unchanged)`,
+	);
 } else if (cmd === "gc") {
 	// retention: events + closed sessions + their cursors age out; terminal
 	// work items are the ledger and are NEVER auto-deleted
@@ -1770,22 +1792,25 @@ if (cmd === "emit") {
 	);
 } else {
 	die(
-		"unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | knowledge | knowledge-enqueue | knowledge-promote | knowledge-retire | knowledge-note | knowledge-verify | lease-release | gc | fleet | metrics | diff",
+		"unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | knowledge | knowledge-enqueue | knowledge-promote | knowledge-retire | knowledge-note | knowledge-verify | knowledge-curate | lease-release|knowledge-verify | knowledge-curate | lease-release | gc | fleet | metrics | diff",
 	);
 }
 
 // W91 — one ranked knowledge hit, terse: source glyph, id, sortable axes,
-// snippet. dim/cyan injected so the renderer follows the file's paint rules.
+// snippet. W103: trust line added (state · age · source-hash check) —
+// permission-to-act rendered mechanically. dim/cyan injected so the renderer
+// follows the file's paint rules.
 function renderKnowledgeHit(
 	h: KnowledgeHit,
 	dim: (s: string) => string,
 	cyan: (s: string) => string,
 ): void {
-	if (h.kind === "knowledge")
+	if (h.kind === "knowledge") {
+		const trust = trustOf(h.source_ref, h.source_hash);
 		console.log(
-			`${cyan(`k#${h.id}`)} ${dim(String(h.state))} ${h.topic ?? ""} ${dim([h.domain, h.area, h.originKind, h.originSystem].filter(Boolean).join("/"))}\n  ${h.snippet}`,
+			`${cyan(`k#${h.id}`)} ${dim(`${h.state ?? "?"} · age ${h.ageDays ?? "?"}d · ${trust}`)} ${h.topic ?? ""} ${dim([h.domain, h.area, h.origin_kind, h.origin_system].filter(Boolean).join("/"))}\n  ${h.snippet}`,
 		);
-	else if (h.kind === "fact")
+	} else if (h.kind === "fact")
 		console.log(`${cyan(String(h.key))}\n  ${h.snippet}`);
 	else console.log(`${cyan(`kb#${h.id}`)} ${h.problem ?? ""}\n  ${h.snippet}`);
 }

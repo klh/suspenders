@@ -24,6 +24,10 @@ import {
 	findNearDuplicate,
 	knowledgeSearch,
 	type KnowledgeHit,
+	loadDocs,
+	loadRootDocs,
+	docForRef,
+	substitutionCheck,
 } from "./knowledge.ts";
 import { openGovernorDb } from "./govdb.ts";
 import { resolveBelt } from "./belt-locate.ts";
@@ -101,6 +105,18 @@ export interface KnowledgeStore {
 	): Promise<
 		{ id: number; topic: string; sourceRef: string; sourceHash: string }[]
 	>;
+	// W103 curation: flag rows failing the substitution test for HUMAN review.
+	// Rows stay in place, state untouched — a contributors note records the
+	// verdict (append-only, NO updated_at bump: flagging is not freshness).
+	curate(opts: { repoRoot: string; by?: string }): Promise<{
+		checked: number;
+		flagged: {
+			id: number;
+			topic: string;
+			doc: string;
+			coverage: number;
+		}[];
+	}>;
 }
 
 export interface DistillClient {
@@ -254,6 +270,109 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 		}[];
 	}
 
+	// W103: substitution curation — flag single-file-derivable rows for HUMAN
+	// review. Rows stay in place; the flag is a contributors note appended
+	// WITHOUT bumping updated_at (a flag is not a freshness signal).
+	async curate(opts: { repoRoot: string; by?: string }): Promise<{
+		checked: number;
+		flagged: { id: number; topic: string; doc: string; coverage: number }[];
+	}> {
+		const docs = [...loadDocs(opts.repoRoot), ...loadRootDocs(opts.repoRoot)];
+		const rows = this.db
+			.query(
+				"SELECT id, topic, fact, source_ref FROM knowledge WHERE state != 'retired'",
+			)
+			.all() as {
+			id: number;
+			topic: string;
+			fact: string;
+			source_ref: string | null;
+		}[];
+		const flagged: {
+			id: number;
+			topic: string;
+			doc: string;
+			coverage: number;
+		}[] = [];
+		return this.curateScan(opts, docs, rows, flagged);
+	}
+
+	private curateScan(
+		opts: { repoRoot: string; by?: string },
+		docs: SubstitutionDoc[],
+		rows: {
+			id: number;
+			topic: string;
+			fact: string;
+			source_ref: string | null;
+		}[],
+		flagged: { id: number; topic: string; doc: string; coverage: number }[],
+	): {
+		checked: number;
+		flagged: { id: number; topic: string; doc: string; coverage: number }[];
+	} {
+		for (const r of rows) {
+			const own = docForRef(opts.repoRoot, r.source_ref);
+			const corpus = own ? [...docs, own] : docs;
+			const v = substitutionCheck(r.fact, corpus);
+			if (!v.covered) continue;
+			flagged.push({
+				id: r.id,
+				topic: r.topic,
+				doc: v.doc ?? "?",
+				coverage: Math.round(v.coverage * 100),
+			});
+		}
+		this.curateRecord(opts, rows, flagged);
+		return { checked: rows.length, flagged };
+	}
+
+	// contributors append WITHOUT updated_at bump (unlike note())
+	private appendNote(id: number, sid: string, what: string): void {
+		const row = this.db
+			.query("SELECT contributors FROM knowledge WHERE id = ?")
+			.get(id) as { contributors: string | null } | undefined;
+		if (!row) return;
+		let list: unknown[] = [];
+		try {
+			list = row.contributors ? JSON.parse(row.contributors) : [];
+		} catch {}
+		list.push({ sid, ts: Date.now(), what });
+		this.db
+			.query("UPDATE knowledge SET contributors = ? WHERE id = ?")
+			.run(JSON.stringify(list), id);
+	}
+
+	// flag notes + one plane event (curateScan part 2; `by` names the curator)
+	private curateRecord(
+		opts: { repoRoot: string; by?: string },
+		rows: unknown[],
+		flagged: { id: number; topic: string; doc: string; coverage: number }[],
+	): void {
+		const by = opts.by ?? "curate";
+		for (const f of flagged) {
+			this.appendNote(
+				f.id,
+				by,
+				`curate-flag: single-file-derivable from ${f.doc} (${f.coverage}% term coverage) — pointer-ize or retire (W103)`,
+			);
+		}
+		this.db
+			.query(
+				"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'knowledge.curate', 'knowledge', ?, NULL)",
+			)
+			.run(
+				Date.now(),
+				"knowledge-worker",
+				JSON.stringify({
+					repo: opts.repoRoot,
+					by,
+					checked: rows.length,
+					flagged: flagged.map((f) => f.id),
+				}),
+			);
+	}
+
 	async upsert(row: KnowledgeUpsert): Promise<number> {
 		const now = Date.now();
 		const ins = this.db
@@ -349,6 +468,7 @@ export interface DistillItem {
 	originKind: string | null;
 	originSystem: string | null;
 	supersedesId: number | null;
+	sourceRef: string | null;
 }
 
 // tolerate fences/prose around the JSON array; validate + clamp each item
@@ -395,6 +515,9 @@ function asItem(x: unknown): DistillItem | null {
 			typeof o.supersedes_id === "number" && Number.isInteger(o.supersedes_id)
 				? o.supersedes_id
 				: null,
+		// W103 substitution contract: the model may emit a POINTER ref for
+		// doc-covered facts; the worker only honors it when the file resolves
+		sourceRef: s(o.source_ref),
 	};
 }
 
@@ -412,7 +535,7 @@ export function systemPrompt(): string {
 
 // missing prompt file → minimal inline fallback, never a dead worker
 const FALLBACK_PROMPT =
-	"You are an impartial indexer for a fleet knowledge store. You do not evaluate truth, quality, or usefulness — you describe, condense, link, and timestamp. Return ONLY a JSON array. Each element: {topic, fact, confidence 0..1, domain, area, origin_kind (lesson|incident|decision|study|fact), origin_system, supersedes_id (only when the source text EXPLICITLY declares it replaces/corrects a row, else null)}. Never copy credentials into facts — redact as [REDACTED] or reject. Corrections create a new row via supersedes_id; history is append-only.";
+	"You are an impartial indexer for a fleet knowledge store. You do not evaluate truth, quality, or usefulness — you describe, condense, link, and timestamp. Return ONLY a JSON array. Each element: {topic, fact, confidence 0..1, domain, area, origin_kind (lesson|incident|decision|study|fact), origin_system, supersedes_id (only when the source text EXPLICITLY declares it replaces/corrects a row, else null), source_ref (only for pointer rows: repo-relative doc path when the fact extends one doc instead of restating it, else null)}. Never copy credentials into facts — redact as [REDACTED] or reject. Substitution contract: never restate what one file/doc already teaches — pointer-ize (source_ref + non-obvious residue) or reject. Corrections create a new row via supersedes_id; history is append-only.";
 
 async function defaultModel(url: string, key?: string): Promise<string> {
 	try {

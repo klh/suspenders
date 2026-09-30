@@ -1,12 +1,21 @@
 import { makeStore, enqueueKnowledge } from "../lib/knowledge-ports.ts";
+import {
+	proseCards,
+	withTrust,
+	KNOWLEDGE_PRECEDENCE,
+} from "../lib/knowledge.ts";
 // knowledge-api.ts — W91 #9b: the knowledge port's HTTP face. The SAME store
 // handlers, second transport: a consumer on another machine calls
 // http://<knowledge-api>/search instead of importing the lib. Thin by design
 // — zero logic that is not already in the KnowledgeStore port; resolveBelt-
 // style resolution applies (env → config → .local name → dev default).
+// W103: /search returns prose CARDS + a precedence preamble (model face)
+// beside the JSON hits (programmatic face, now with per-hit trust markers);
+// POST /curate flags single-file-derivable rows for human review.
 //   run: bun hooks/bin/knowledge-api.ts [--port 7795]
 //   POST /search   {query, limit?, domain?, area?, origin_kind?, origin_system?}
 //   POST /enqueue  {source, payload, domain?, area?, code_origin?, origin_sid?}
+//   POST /curate   {repo?, by?} — substitution-curation flags, rows stay
 //   POST /promote  {id}
 //   POST /retire   {id, superseded_by?}
 //   POST /note     {id, sid, what}
@@ -24,6 +33,8 @@ const num = (v: unknown): number | null =>
 	typeof v === "number" && Number.isFinite(v) ? v : null;
 const str = (v: unknown): string | null =>
 	typeof v === "string" && v.trim() ? v.trim() : null;
+// resolution root for source_ref hashing (trust markers) + /curate doc scans
+const API_ROOT = process.env.KNOWLEDGE_REPO_ROOT ?? process.cwd();
 
 Bun.serve({
 	port,
@@ -37,17 +48,32 @@ Bun.serve({
 				? ((await req.json().catch(() => ({}))) as Record<string, unknown>)
 				: {};
 		try {
-			if (req.method === "POST" && path === "/search")
-				return json({
-					hits: await store.search({
-						query: str(body.query) ?? "",
-						limit: num(body.limit) ?? undefined,
-						domain: str(body.domain),
-						area: str(body.area),
-						originKind: str(body.origin_kind),
-						originSystem: str(body.origin_system),
-					}),
+			if (req.method === "POST" && path === "/search") {
+				const query = str(body.query) ?? "";
+				const hits = await store.search({
+					query,
+					limit: num(body.limit) ?? undefined,
+					domain: str(body.domain),
+					area: str(body.area),
+					originKind: str(body.origin_kind),
+					originSystem: str(body.origin_system),
 				});
+				const root = str(body.repo) ?? API_ROOT;
+				return json({
+					query,
+					preamble: KNOWLEDGE_PRECEDENCE,
+					cards: proseCards(query, hits, root),
+					hits: withTrust(hits, root),
+				});
+			}
+			if (req.method === "POST" && path === "/curate") {
+				return json(
+					await store.curate({
+						repoRoot: str(body.repo) ?? API_ROOT,
+						by: str(body.by) ?? "api-curate",
+					}),
+				);
+			}
 			if (req.method === "POST" && path === "/enqueue")
 				return json({
 					queued: await enqueueKnowledge({
@@ -94,6 +120,7 @@ Bun.serve({
 				routes: [
 					"/search",
 					"/enqueue",
+					"/curate",
 					"/promote",
 					"/retire",
 					"/note",

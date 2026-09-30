@@ -1,8 +1,13 @@
 // hooks/lib/knowledge.ts — shared knowledge-layer helpers (W91): the ranked
 // FTS5 search behind `coord knowledge` and the read_knowledge MCP tool, plus
 // the ingest worker's near-duplicate gate. One search implementation, three
-// consumers (coord.ts, knowledge-worker.ts, knowledge-mcp.ts).
+// consumers (coord.ts, knowledge-worker.ts, knowledge-mcp.ts). W103 adds the
+// dosu-mechanics layer: substitution contract (single-file test + residue),
+// trust-as-permission-to-act (mechanical hash check), and prose-card output.
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 
 export interface KnowledgeFilters {
 	domain?: string | null;
@@ -41,6 +46,11 @@ export interface KnowledgeHit {
 	duplicate_of?: number | null;
 	superseded_by?: number | null;
 	supersedes_id?: number | null;
+	// W103: raw k.* columns flow through search verbatim (snake_case) — the
+	// mechanical trust check hashes source_ref against source_hash
+	source_ref?: string | null;
+	source_hash?: string | null;
+	trust?: TrustState;
 }
 
 // FTS5 MATCH term list: quoted, OR-joined — bm25 ranks the union, so a
@@ -258,4 +268,256 @@ export function redactSecrets(text: string): {
 		if (p.kind === "private key block") rejected = true;
 	}
 	return { text: out, rejected, hits };
+}
+
+// ═══ W103 — dosu mechanics: substitution, trust, prose cards ═══
+
+// trust-as-permission-to-act: hits with verified provenance may be acted on
+// directly; DRIFT or unverified hits must be re-checked. Mechanical: hash the
+// source_ref file now and compare with source_hash taken at index time.
+// Resolution: ref as-is (repo-relative), then its first whitespace token.
+// Unreadable → "unverified" (honest: nothing to check from this root).
+export type TrustState = "verified" | "drift" | "unverified";
+
+export function trustOf(
+	ref: string | null | undefined,
+	hash: string | null | undefined,
+	root: string = process.cwd(),
+): TrustState {
+	if (!ref || !hash) return "unverified";
+	for (const cand of [ref, ref.split(/\s+/)[0]]) {
+		try {
+			const cur = createHash("sha256")
+				.update(readFileSync(join(root, cand), "utf8"))
+				.digest("hex");
+			return cur === hash ? "verified" : "drift";
+		} catch {} // next candidate / fall through to unverified
+	}
+	return "unverified";
+}
+
+// add a `trust` field to every knowledge-kind hit (JSON face)
+export function withTrust<T extends KnowledgeHit>(
+	hits: T[],
+	root?: string,
+): T[] {
+	return hits.map((h) =>
+		h.kind === "knowledge"
+			? { ...h, trust: trustOf(h.source_ref, h.source_hash, root) }
+			: h,
+	);
+}
+
+// the precedence clause (W103 owner addendum): knowledge is context, never a
+// constraint on the objective — injected facts must not cause premature task
+// refusal. Rendered in EVERY prose-card output (MCP + API), quoted verbatim
+// in the standing rule file.
+export const KNOWLEDGE_PRECEDENCE =
+	"Precedence: the brief's objective always wins. Knowledge describes the world as it was — when a knowledge fact conflicts with the brief, the brief prevails: note the conflict in one line and adapt (if the brief asks for a thing that doesn't exist, building it IS the task). Knowledge is context, never a constraint on the objective.";
+
+const ageOf = (ts: number): number =>
+	Math.max(0, Math.round((Date.now() - ts) / 86_400_000));
+
+// fact / consult_kb cards (aux kinds of the merged search)
+function renderAuxCard(lines: string[], h: KnowledgeHit): void {
+	if (h.kind === "fact")
+		lines.push(
+			`fact ${h.key ?? "?"} [age ${ageOf(h.ts)}d · hash unverified]`,
+			`  ${h.snippet}`,
+		);
+	else
+		lines.push(
+			`kb#${h.id} · ${(h.problem ?? "").slice(0, 120)} [age ${ageOf(h.ts)}d · hash unverified]`,
+			`  ${h.solution ?? h.snippet}`,
+		);
+}
+
+// prose cards — one card per hit: topic + fact + provenance + trust markers.
+// The MCP face and the API's `cards` field render through here; raw hits
+// JSON stays on the API's `hits` field for programmatic consumers.
+export function proseCards(
+	query: string,
+	hits: KnowledgeHit[],
+	root: string = process.cwd(),
+): string {
+	if (!hits.length) return `no fleet knowledge for: ${query}`;
+	const lines: string[] = [
+		`fleet knowledge — ${hits.length} hit${hits.length === 1 ? "" : "s"} for: ${query}`,
+		KNOWLEDGE_PRECEDENCE,
+	];
+	for (const h of hits) {
+		if (h.kind === "knowledge") {
+			const trust = trustOf(h.source_ref, h.source_hash, root);
+			lines.push(
+				`k#${h.id} · ${h.topic ?? "(untitled)"} [${h.state ?? "?"} · age ${h.ageDays ?? "?"}d · hash ${trust}]`,
+				`  ${h.fact ?? h.snippet}`,
+				`  source: ${h.source_ref ?? h.code_origin ?? "none"}${h.domain ? ` · domain ${h.domain}` : ""}${h.area ? ` · area ${h.area}` : ""}`,
+			);
+		} else {
+			renderAuxCard(lines, h);
+		}
+		lines.push(""); // blank line between cards
+	}
+	return lines.join("\n").trimEnd();
+}
+
+// ─── substitution contract: the mechanical single-file test ───
+// dosu rule 2 parallel: never store what the repo already teaches. A fact is
+// "covered" when ONE file/doc contains ≥ COVERED_MIN of its distinctive
+// terms; the residue = the fact's sentences whose OWN coverage vs that file
+// is low. Mechanical approximation — flags are for human review; ingest-time
+// conversion keeps the residue as a pointer row.
+export interface SubstitutionDoc {
+	path: string;
+	text: string;
+}
+
+// closed-class words any fact and any doc share — excluded so coverage
+// measures content overlap only
+const STOP = new Set(
+	"the and for with that this from are was were not but all any can has had its one two per via when then than into only also may will must should would could have been each which their what how why get use used using same even never every always note see like just more less most over under after before does done keep keeps kept row rows".split(
+		" ",
+	),
+);
+
+export function distinctTerms(text: string): Set<string> {
+	return new Set(
+		text
+			.toLowerCase()
+			.split(/[^a-z0-9_.-]+/)
+			// sentence punctuation would glue to tokens ("teaches." ≠ "teaches")
+			.map((t) => t.replace(/^[.-]+|[.-]+$/g, ""))
+			.filter((t) => t.length > 2 && !STOP.has(t)),
+	);
+}
+
+function coverageOf(terms: Set<string>, hay: Set<string>): number {
+	if (!terms.size) return 0;
+	let hit = 0;
+	for (const t of terms) if (hay.has(t)) hit++;
+	return hit / terms.size;
+}
+
+export const COVERED_MIN = 0.75; // ≥ share of fact terms in one file → covered
+const SENTENCE_KEEP_MAX = 0.55; // sentence survives when its own coverage < this
+
+export interface SubstitutionVerdict {
+	covered: boolean;
+	doc: string | null; // repo-relative path of the covering file
+	docText: string | null; // its content (pointer rows hash this)
+	coverage: number; // 0..1 share of the fact's terms the doc contains
+	residue: string; // non-covered sentences ("" = fully derivable)
+}
+
+export function substitutionCheck(
+	fact: string,
+	docs: SubstitutionDoc[],
+	coveredMin = COVERED_MIN,
+): SubstitutionVerdict {
+	const verdict: SubstitutionVerdict = {
+		covered: false,
+		doc: null,
+		docText: null,
+		coverage: 0,
+		residue: "",
+	};
+	const terms = distinctTerms(fact);
+	if (docs.length < 1 || terms.size < 4) return verdict; // thin fact, no signal
+	return scanDocs(verdict, terms, fact, docs, coveredMin);
+}
+
+// doc scan + sentence-level residue extraction (substitutionCheck part 2)
+function scanDocs(
+	v: SubstitutionVerdict,
+	terms: Set<string>,
+	fact: string,
+	docs: SubstitutionDoc[],
+	coveredMin: number,
+): SubstitutionVerdict {
+	let bestDoc: { doc: string; text: string; cov: number } | null = null;
+	for (const d of docs) {
+		const hay = distinctTerms(d.text);
+		if (!hay.size) continue;
+		const cov = coverageOf(terms, hay);
+		if (!bestDoc || cov > bestDoc.cov)
+			bestDoc = { doc: d.path, text: d.text, cov };
+	}
+	if (!bestDoc || bestDoc.cov < coveredMin) return v;
+	const docTerms = distinctTerms(bestDoc.text);
+	const residue = fact
+		.split(/(?<=[.;!?])\s+/)
+		.map((s) => s.trim())
+		.filter(
+			(s) => s && coverageOf(distinctTerms(s), docTerms) < SENTENCE_KEEP_MAX,
+		)
+		.join(" ");
+	return {
+		covered: true,
+		doc: bestDoc.doc,
+		docText: bestDoc.text,
+		coverage: bestDoc.cov,
+		residue,
+	};
+}
+
+export const MAX_DOCS = 300; // corpus cap — a huge repo cannot stall ingest
+export const MAX_DOC_BYTES = 262_144;
+
+// docs corpus for the substitution test: docs/ (recursive .md/.markdown) plus
+// root-level README/AGENTS/CLAUDE. Paths relative to root, posix separators.
+export function loadDocs(root: string): SubstitutionDoc[] {
+	const out: SubstitutionDoc[] = [];
+	const walk = (dir: string): void => {
+		if (out.length >= MAX_DOCS) return;
+		let entries: import("node:fs").Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return; // unreadable/absent dir — skip honestly
+		}
+		for (const e of entries) {
+			if (out.length >= MAX_DOCS) return;
+			const full = join(dir, e.name);
+			if (e.isDirectory()) {
+				walk(full);
+				continue;
+			}
+			if (!/\.(md|markdown)$/.test(e.name)) continue;
+			try {
+				if (statSync(full).size > MAX_DOC_BYTES) continue;
+				out.push({
+					path: relative(root, full).split(sep).join("/"),
+					text: readFileSync(full, "utf8"),
+				});
+			} catch {} // unreadable file — skip honestly
+		}
+	};
+	walk(join(root, "docs"));
+	return out;
+}
+
+// root-level README/AGENTS/CLAUDE also teach the repo — joined after docs/
+export function loadRootDocs(root: string): SubstitutionDoc[] {
+	const out: SubstitutionDoc[] = [];
+	for (const name of ["README.md", "AGENTS.md", "CLAUDE.md"]) {
+		try {
+			out.push({ path: name, text: readFileSync(join(root, name), "utf8") });
+		} catch {} // absent root doc — fine
+	}
+	return out;
+}
+
+// the row's own source file joins the corpus (a fact can derive from its
+// source_ref file, not only from docs/) — ref may carry a symbol suffix
+export function docForRef(
+	root: string,
+	ref: string | null | undefined,
+): SubstitutionDoc | null {
+	if (!ref) return null;
+	for (const cand of [ref, ref.split(/\s+/)[0]]) {
+		try {
+			return { path: ref, text: readFileSync(join(root, cand), "utf8") };
+		} catch {} // next candidate
+	}
+	return null;
 }

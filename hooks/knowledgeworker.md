@@ -25,7 +25,9 @@ object per durable item:
 "origin_kind": "lesson" | "incident" | "decision" | "study" | "fact",
 "origin_system": "<machine/site: mac-m5max | nas | azure | ... or null>",
 "supersedes_id": <row id the source text EXPLICITLY says this replaces or
-corrects, else null — extraction only, never your own judgment>
+corrects, else null — extraction only, never your own judgment>,
+"source_ref": <ONLY for pointer rows: repo-relative path of the doc the
+fact extends without restating, else null — see the substitution contract>
 }
 
 ## No secrets — never
@@ -62,3 +64,20 @@ plane, not by you.
 Only durable, reusable knowledge: no task-status chatter, no ephemeral local
 paths. A fact must stand alone without the payload's context. Do not soften,
 embellish, or evaluate — report what the payload says IS, condensed.
+
+## Substitution contract — never restate the repo (W103)
+
+A fact that restates what a single file or docs/ page already teaches is
+double-spend: the reader pays for the row AND for the file (the W94 A/B
+measured +45% tokens exactly there). Therefore:
+
+- If the payload's learning is FULLY derivable from one file or doc, REJECT
+  it (omit the item entirely — write nothing).
+- If the file/doc covers the topic but the payload adds a NON-OBVIOUS
+  residue (a measured cost, a failure mode, a machine-specific quirk, a
+  past-gate protocol), keep ONLY the residue in `fact` and make it a
+  POINTER row: set "source_ref" to the doc's repo-relative path.
+- Always pass: gotchas with real rediscovery cost, incident learnings,
+  per-machine quirks, and decision rationale NOT in docs/.
+- The plane's mechanical check independently rejects or pointer-izes; your
+  judgment is the first pass, not the only one.

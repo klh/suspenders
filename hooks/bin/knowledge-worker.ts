@@ -9,10 +9,15 @@
 // touches governor.db. Policy layers live HERE (the loop), not in the store:
 // mechanical secrets pass (redactSecrets) before any insert, near-duplicate
 // gate via store.dedupeCheck (older fact kept, skip noted in the ledger).
+// W103 adds the substitution contract's mechanical layer: doc-covered facts
+// become POINTER rows (source_ref → the doc, fact → the non-obvious residue)
+// or are rejected — never restatements of what one file already teaches.
 // env:   INGEST_LLM_URL / INGEST_LLM_KEY / INGEST_LLM_MODEL — explicit
 //        OpenAI-compatible distill endpoint (enterprise points at their own);
 //        omit and the BeltDistillClient resolves belt via resolveBelt().
 //        KNOWLEDGE_STORE_URL — reserved for a remote store adapter.
+//        KNOWLEDGE_DOCS_ROOT — repo root for the substitution test; unset →
+//        the mechanical check is OFF (prompt layer still applies).
 // usage: bun hooks/bin/knowledge-worker.ts          (daemon: 5s poll loop)
 //        bun hooks/bin/knowledge-worker.ts --once   (drain queued, exit)
 import PQueue from "p-queue";
@@ -20,12 +25,29 @@ import {
 	makeDistillClient,
 	makeStore,
 	type KnowledgeStore,
+	type DistillItem,
 } from "../lib/knowledge-ports.ts";
-import { redactSecrets } from "../lib/knowledge.ts";
+import {
+	docForRef,
+	loadDocs,
+	loadRootDocs,
+	redactSecrets,
+	substitutionCheck,
+} from "../lib/knowledge.ts";
+import { createHash } from "node:crypto";
 
 const MAX_ATTEMPTS = 3;
 const store: KnowledgeStore = makeStore();
 const distill = makeDistillClient();
+
+// W103: docs root for the substitution test. Unset → the check is OFF (logged
+// once); the prompt layer (knowledgeworker.md) still applies. A pointer row's
+// source_hash is the DOC's hash so knowledge-verify drift-checks the doc.
+const DOCS_ROOT = process.env.KNOWLEDGE_DOCS_ROOT ?? null;
+if (!DOCS_ROOT)
+	console.error(
+		"knowledge-worker: KNOWLEDGE_DOCS_ROOT unset — substitution check OFF (prompt layer still applies)",
+	);
 let draining = true;
 const stop = (): void => {
 	draining = false;
@@ -34,7 +56,7 @@ const stop = (): void => {
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 
-// one job: claim → distill → secrets pass → dedupe gate → candidate rows
+// one job: claim → distill → secrets pass → dedupe gate → substitution → rows
 async function processRow(rowId: number): Promise<void> {
 	const job = await store.claim(rowId);
 	if (!job) return; // claimed or purged meanwhile
@@ -47,6 +69,7 @@ async function processRow(rowId: number): Promise<void> {
 		});
 		const written: number[] = [];
 		const skipped: string[] = [];
+		let converted = 0;
 		for (const it of items) {
 			// mechanical secrets pass BEFORE anything: redact in place; a
 			// private-key block rejects the candidate (LLM layer is not trusted)
@@ -68,17 +91,29 @@ async function processRow(rowId: number): Promise<void> {
 				);
 				continue;
 			}
+			// W103 substitution contract: covered+residue → POINTER row
+			// (ref → the doc, fact → residue, hash → the doc); covered without
+			// residue → reject with the doc named in the ledger.
+			const sub = substitutionGate(job.codeOrigin, job.sourceHash, {
+				...it,
+				fact: fac.text,
+			});
+			if (sub.skip) {
+				skipped.push(sub.skip);
+				continue;
+			}
+			if (sub.converted) converted++;
 			written.push(
 				await store.upsert({
 					topic: top.text,
-					fact: fac.text,
+					fact: sub.fact,
 					confidence: it.confidence,
 					domain: job.domain ?? it.domain,
 					area: job.area ?? it.area,
 					originKind: it.originKind,
 					originSystem: it.originSystem,
-					sourceRef: job.codeOrigin,
-					sourceHash: job.sourceHash,
+					sourceRef: sub.sourceRef,
+					sourceHash: sub.sourceHash,
 					originSid: job.originSid,
 					supersedesId: it.supersedesId,
 				}),
@@ -91,7 +126,7 @@ async function processRow(rowId: number): Promise<void> {
 			job.originSid,
 		);
 		console.log(
-			`knowledge-ingest: #${job.id} "${job.source.slice(0, 40)}" → ${written.length} written, ${skipped.length} skipped`,
+			`knowledge-ingest: #${job.id} "${job.source.slice(0, 40)}" → ${written.length} written, ${skipped.length} skipped${converted ? `, ${converted} converted to pointer rows` : ""}`,
 		);
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
@@ -99,6 +134,69 @@ async function processRow(rowId: number): Promise<void> {
 		await store.fail(job.id, msg, job.attempts >= MAX_ATTEMPTS);
 	}
 }
+
+// substitution gate (mechanical layer): corpus = docs under DOCS_ROOT + root
+// README/AGENTS/CLAUDE + the job's code_origin file. Covered with residue →
+// pointer row; covered without → reject; a model-declared source_ref is
+// honored only when the file resolves (and is hashed) under DOCS_ROOT.
+interface SubOut {
+	fact: string;
+	sourceRef: string | null;
+	sourceHash: string;
+	converted?: boolean;
+	skip?: string;
+}
+
+function substitutionGate(
+	codeOrigin: string | null,
+	fallbackHash: string,
+	it: DistillItem,
+): SubOut {
+	if (!DOCS_ROOT)
+		return { fact: it.fact, sourceRef: codeOrigin, sourceHash: fallbackHash };
+	return gateScan(codeOrigin, fallbackHash, it);
+}
+
+// corpus + verdict → SubOut (gate part 2)
+function gateScan(
+	codeOrigin: string | null,
+	fallbackHash: string,
+	it: DistillItem,
+): SubOut {
+	const root = DOCS_ROOT ?? ".";
+	const docs = [...loadDocs(root), ...loadRootDocs(root)];
+	const own = docForRef(root, codeOrigin);
+	const v = substitutionCheck(it.fact, own ? [...docs, own] : docs);
+	if (!v.covered) {
+		// not doc-covered: honor a model-declared pointer ref when resolvable
+		if (it.sourceRef) {
+			const d = docForRef(root, it.sourceRef);
+			if (d)
+				return {
+					fact: it.fact,
+					sourceRef: it.sourceRef,
+					sourceHash: sha256Hex(d.text),
+				};
+		}
+		return { fact: it.fact, sourceRef: codeOrigin, sourceHash: fallbackHash };
+	}
+	if (!v.residue)
+		return {
+			fact: it.fact,
+			sourceRef: codeOrigin,
+			sourceHash: fallbackHash,
+			skip: `"${it.topic}" rejected: fully derivable from ${v.doc} (substitution contract)`,
+		};
+	return {
+		fact: v.residue,
+		sourceRef: v.doc,
+		sourceHash: sha256Hex(v.docText ?? ""),
+		converted: true,
+	};
+}
+
+const sha256Hex = (text: string): string =>
+	createHash("sha256").update(text).digest("hex");
 
 // oldest first (ts, id); p-queue serializes distill calls
 async function tick(): Promise<void> {

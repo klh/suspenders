@@ -4,7 +4,13 @@
 // server answers read_knowledge. Isolated temp HOME + repo; the distill LLM
 // is a local Bun.serve stub, so no real model is needed.
 import { describe, test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, realpathSync } from "node:fs";
+import {
+	mkdtempSync,
+	rmSync,
+	mkdirSync,
+	realpathSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
@@ -80,26 +86,37 @@ function q<T>(sql: string): T[] {
 // bootstrap: the first CLI open runs migrations (v6 included)
 run(["kb", "stats"]);
 
+// W103 fixture: the doc the substitution fixtures derive from — the covered
+// sentences share its terms, the residues carry unique tokens (marker-w103a)
+const DOC_REL = "docs/pointer-source.md";
+mkdirSync(join(REPO, "docs"), { recursive: true });
+const DOC_TEXT =
+	"Fleet knowledge rows must never restate what a single file already teaches. The substitution contract converts doc-covered facts to pointer rows and keeps the non-obvious residue only.";
+writeFileSync(join(REPO, DOC_REL), DOC_TEXT);
+
 // the distill LLM stub: /v1/models names the model; /v1/chat/completions
-// returns a canned distillation so no real model is needed
+// returns a canned distillation so no real model is needed. W103: the stub
+// reads the payload and returns substitution-themed items for the W103 runs.
 const stub = Bun.serve({
 	port: 0,
-	fetch(req) {
+	async fetch(req) {
 		const u = new URL(req.url);
 		if (u.pathname === "/v1/models")
 			return Response.json({ data: [{ id: "stub-distiller" }] });
-		if (u.pathname === "/v1/chat/completions")
+		if (u.pathname === "/v1/chat/completions") {
+			const body = (await req.json().catch(() => null)) as {
+				messages?: { content?: string }[];
+			} | null;
+			const text = body?.messages?.map((m) => m.content ?? "").join(" ") ?? "";
+			const items = text.includes("w103-substitution")
+				? w103Items()
+				: text.includes("w103-curate-bait")
+					? baitItem()
+					: distillArr(u.searchParams.get("echo") ?? "");
 			return Response.json({
-				choices: [
-					{
-						message: {
-							content: JSON.stringify(
-								distillArr(u.searchParams.get("echo") ?? ""),
-							),
-						},
-					},
-				],
+				choices: [{ message: { content: JSON.stringify(items) } }],
 			});
+		}
 		return new Response("not found", { status: 404 });
 	},
 });
@@ -132,6 +149,53 @@ function distillArr(echo: string): unknown[] {
 	];
 }
 
+// W103 substitution-themed distillations (payload discriminator: w103-substitution)
+function w103Items(): unknown[] {
+	return [
+		{
+			// covered sentence + novel residue → POINTER row conversion
+			topic: "docs covered pointer",
+			fact: "The substitution contract converts doc-covered facts to pointer rows and keeps the non-obvious residue only. Quirk: marker-w103a.",
+			confidence: 0.9,
+			domain: "suspenders",
+			area: "gates",
+			origin_kind: "lesson",
+			origin_system: null,
+		},
+		rejectItem(),
+	];
+}
+
+// fully doc-covered item with NO residue → the contract REJECTS it at ingest
+function rejectItem(): unknown {
+	return {
+		topic: "fully derivable bait",
+		fact: "The substitution contract converts doc-covered facts to pointer rows never restatements.",
+		confidence: 0.9,
+		domain: "suspenders",
+		area: "gates",
+		origin_kind: "lesson",
+		origin_system: null,
+	};
+}
+
+// curate-bait item (payload discriminator: w103-curate-bait) — lands when the
+// worker runs WITHOUT KNOWLEDGE_DOCS_ROOT, mirroring the pre-contract seeder
+// rows the curation verb must flag
+function baitItem(): unknown[] {
+	return [
+		{
+			topic: "curate bait row",
+			fact: "Fleet knowledge rows must never restate what a single file already teaches. bait residue zq7k",
+			confidence: 0.9,
+			domain: "suspenders",
+			area: "gates",
+			origin_kind: "lesson",
+			origin_system: null,
+		},
+	];
+}
+
 afterAll(() => {
 	stub.stop(true);
 	rmSync(HOME, { recursive: true, force: true });
@@ -159,7 +223,8 @@ describe("knowledge ingest pipeline", () => {
 		expect(e.code).toBe(0);
 		expect(e.out).toContain("queued #1");
 		const w = await runWorker(INGEST_ENV);
-		expect(w.err).toBe("");
+		// W103: stderr carries only the docs-root advisory when unset
+		expect(w.err).toContain("substitution check OFF");
 		expect(w.out).toContain("2 written, 0 skipped");
 		const rows = q<{
 			id: number;
@@ -303,10 +368,15 @@ describe("knowledge MCP server", () => {
 		const tools = byId.get(2) as { tools?: { name: string }[] };
 		expect(tools.tools?.[0]?.name).toBe("read_knowledge");
 		const call = byId.get(3) as { content?: { text: string }[] };
-		const payload = JSON.parse(call.content?.[0]?.text ?? "{}") as {
-			hits: { kind: string }[];
-		};
-		expect(payload.hits.some((h) => h.kind === "knowledge")).toBe(true);
+		const text = call.content?.[0]?.text ?? "";
+		// W103: prose cards, not a JSON.stringify blob — header + precedence
+		// preamble + per-hit trust line (state · age · hash), card ids k#
+		expect(text).toContain("fleet knowledge —");
+		expect(text).toContain("Precedence:");
+		expect(text).toContain("k#1");
+		expect(text).toContain("age ");
+		expect(text).toContain("hash ");
+		expect(() => JSON.parse(text)).toThrow();
 		proc.kill();
 	});
 });
@@ -335,3 +405,143 @@ async function readStdioLines(
 	}
 	return lines;
 }
+
+// ─── W103 dosu deltas: substitution contract, trust, prose cards, curate ───
+
+// small local helper so the fixture hash matches the worker's
+import { createHash } from "node:crypto";
+const sha256Hex = (text: string): string =>
+	createHash("sha256").update(text).digest("hex");
+
+describe("W103 substitution contract", () => {
+	test("doc-covered fact converts to a pointer row; fully-derivable rejects", async () => {
+		const e = run([
+			"knowledge-enqueue",
+			"--source",
+			"w103 substitution",
+			"--payload",
+			"w103-substitution: pointer conversion probe",
+		]);
+		expect(e.code).toBe(0);
+		// worker WITH the docs root — the mechanical contract is active
+		const w = await runWorker({ ...INGEST_ENV, KNOWLEDGE_DOCS_ROOT: REPO });
+		expect(w.err).toBe("");
+		expect(w.out).toContain("1 written, 1 skipped");
+		expect(w.out).toContain("converted to pointer rows");
+		// the residue IS the fact; the ref points at the DOC; hash = doc hash
+		const row = q<{
+			fact: string;
+			source_ref: string | null;
+			source_hash: string | null;
+		}>(
+			"SELECT fact, source_ref, source_hash FROM knowledge WHERE topic = 'docs covered pointer'",
+		)[0];
+		expect(row.fact).toBe("Quirk: marker-w103a.");
+		expect(row.source_ref).toBe(DOC_REL);
+		expect(row.source_hash).toBe(sha256Hex(DOC_TEXT));
+		// the fully-derivable item is rejected with the doc named in the ledger
+		const skip = JSON.parse(
+			q<{ result_key: string }>(
+				"SELECT result_key FROM knowledge_queue ORDER BY id DESC LIMIT 1",
+			)[0].result_key,
+		) as { skipped: string[] };
+		expect(skip.skipped[0]).toContain("fully derivable from");
+	});
+});
+
+describe("W103 curation", () => {
+	test("knowledge-curate flags a pre-contract row, leaves it in place", async () => {
+		// seed a pre-contract row: worker WITHOUT KNOWLEDGE_DOCS_ROOT, mirroring
+		// the W93 seeder — the fact lands verbatim, unobserved by the contract
+		const e = run([
+			"knowledge-enqueue",
+			"--source",
+			"w103 curate bait",
+			"--payload",
+			"w103-curate-bait: seeder-era restatement",
+		]);
+		expect(e.code).toBe(0);
+		const w = await runWorker(INGEST_ENV); // no docs root → contract off
+		expect(w.out).toContain("1 written, 0 skipped");
+		const bait = q<{ id: number; state: string }>(
+			"SELECT id, state FROM knowledge WHERE topic = 'curate bait row'",
+		)[0];
+		expect(bait.state).toBe("candidate");
+		// curation: the bait row is flagged for HUMAN review — not deleted
+		const c = run(["knowledge-curate", "--repo", REPO, "--as", "w103test"]);
+		expect(c.code).toBe(0);
+		expect(c.out).toContain("curate bait row");
+		expect(c.out).toContain("rows flagged for review");
+		const flaggedRow = q<{ state: string; contributors: string }>(
+			"SELECT state, contributors FROM knowledge WHERE topic = 'curate bait row'",
+		)[0];
+		expect(flaggedRow.state).toBe("candidate"); // left in place
+		expect(flaggedRow.contributors).toContain("curate-flag"); // note appended
+	});
+});
+
+describe("W103 knowledge-api faces", () => {
+	const api = join(import.meta.dir, "..", "hooks", "bin", "knowledge-api.ts");
+	const PORT = 47957; // test-only; collision unlikely and non-fatal
+
+	test("POST /search renders cards + trust markers; POST /curate flags", async () => {
+		const proc = Bun.spawn(["bun", api], {
+			env: {
+				...env,
+				KNOWLEDGE_API_PORT: String(PORT),
+				KNOWLEDGE_REPO_ROOT: REPO,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		try {
+			// readiness poll
+			let up = false;
+			for (let i = 0; i < 40 && !up; i++) {
+				await new Promise((r) => setTimeout(r, 250));
+				up = await fetch(`http://127.0.0.1:${PORT}/`)
+					.then((r) => r.ok)
+					.catch(() => false);
+			}
+			expect(up).toBe(true);
+			const s = (await fetch(`http://127.0.0.1:${PORT}/search`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: "marker-w103a" }),
+			}).then((r) => r.json())) as {
+				preamble: string;
+				cards: string;
+				hits: {
+					kind: string;
+					state?: string;
+					ageDays?: number;
+					trust?: string;
+				}[];
+			};
+			// model face: prose cards led by the precedence preamble
+			expect(s.preamble.startsWith("Precedence:")).toBe(true);
+			expect(s.cards).toContain("fleet knowledge —");
+			expect(s.cards).toContain("k#");
+			expect(s.cards).toContain("age ");
+			expect(s.cards).toContain("hash verified"); // pointer row → doc hash matches
+			// programmatic face: hits carry state, age, and the trust marker
+			const k = s.hits.find((h) => h.kind === "knowledge");
+			expect(k?.state).toBe("candidate");
+			expect(typeof k?.ageDays).toBe("number");
+			expect(k?.trust).toBe("verified");
+			// curation route: same store port, HTTP face
+			const c = (await fetch(`http://127.0.0.1:${PORT}/curate`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ repo: REPO, by: "api-test" }),
+			}).then((r) => r.json())) as {
+				checked: number;
+				flagged: { id: number; topic: string }[];
+			};
+			expect(c.checked).toBeGreaterThanOrEqual(3);
+			expect(c.flagged.some((f) => f.topic === "curate bait row")).toBe(true);
+		} finally {
+			proc.kill();
+		}
+	});
+});
