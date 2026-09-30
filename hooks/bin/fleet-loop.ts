@@ -24,11 +24,13 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
+import { resolve } from "node:path";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
 
@@ -36,16 +38,17 @@ const argv = process.argv.slice(2);
 const MODE = argv[0];
 if (
 	!MODE ||
-	!["once", "watch", "lanes", "dispatch", "ship"].includes(MODE) ||
+	!["once", "watch", "lanes", "dispatch", "ship", "batch"].includes(MODE) ||
 	!argv.includes("--repo")
 ) {
 	console.error(
-		`usage: fleet-loop once|watch|lanes|dispatch|ship --repo <dir> [--glob lane/autow*] [--main main]\n` +
+		`usage: fleet-loop once|watch|lanes|dispatch|ship|batch --repo <dir> [--glob lane/autow*] [--main main]\n` +
 			`          [--ladder <cmd template with {branch}>]  default: plain git merge --no-ff\n` +
 			`          [--ladder-timeout 10]                    minutes; watchdog-kills a hung ladder\n` +
 			`          [--dispatch-cmd <template>]              optional policy script\n` +
 			`          [--agent claude|codex]                   dispatch backend (default claude)\n` +
 			`          ship --branch <branch>                   one branch through the ladder (board ship trigger)\n` +
+			`          batch [--tier mechanical] [--max 4]                  drain READY items of a tier\n` +
 			`          [--every 120] [--cycle-timeout 15] [--log <file>]   (watch mode)\n`,
 	);
 	process.exit(MODE ? 1 : 0);
@@ -91,6 +94,39 @@ const run = (cmd: string[]): number =>
 	Bun.spawnSync(cmd, { cwd: REPO, stdout: "ignore", stderr: "ignore" })
 		.exitCode ?? 1;
 
+// ---- W83 role-tier model routing ------------------------------------------
+// work_items.tier ("mechanical" | "flagship", NULL = flagship). Mechanical
+// lanes (sweep/harvest/mechanical transforms) run the cheap/fast model;
+// coordinator/planner/reviewer stay flagship. The model per tier comes from
+// the repo's GITIGNORED .fleet/tiers.json — per-machine on purpose: model
+// vocabularies differ across machines and routers. Absent file or tier →
+// null → no override, the lane keeps the agent's own configured model
+// (never a W57-class unrecognized_model hang from an invented name).
+function itemTier(item: string): string | null {
+	try {
+		const common = sh(["git", "-C", REPO, "rev-parse", "--git-common-dir"]);
+		const proj = common ? realpathSync(resolve(REPO, common)) : `${REPO}/.git`;
+		const r = openGovernorDb()
+			.query("SELECT tier FROM work_items WHERE project = ? AND id = ?")
+			.get(proj, item) as { tier: string | null } | null;
+		return r?.tier ?? null;
+	} catch {
+		return null; // routing metadata is never dispatch-critical
+	}
+}
+
+function tierModel(tier: string | null): string | null {
+	if (!tier) return null;
+	try {
+		const cfg = JSON.parse(
+			readFileSync(`${REPO}/.fleet/tiers.json`, "utf8"),
+		) as Record<string, { model?: string }>;
+		return cfg[tier]?.model ?? null;
+	} catch {
+		return null;
+	}
+}
+
 type Lane = {
 	sid: string;
 	item: string;
@@ -98,6 +134,8 @@ type Lane = {
 	branch: string;
 	worktree: string;
 	agent?: string;
+	tier?: string | null;
+	model?: string | null;
 };
 
 function readJsonSync<T>(p: string): T | null {
@@ -600,13 +638,18 @@ if (MODE === "dispatch") {
 		"show",
 		item,
 	]);
+	// W83: resolve the lane's model tier before anything else — the brief,
+	// the agent args, and the lanes.json entry all carry it
+	const tier = itemTier(item);
+	const model = tierModel(tier);
 	const brief = [
 		`You are lane "${sid}", Work Graph item ${item}, repo ${REPO}.`,
 		``,
 		`MISSION (from work show):`,
 		show.out,
 		``,
-		`PROTOCOL: BEFORE any edit, read AGENTS.md in the repo root and follow it (plan-first, shatter judgment, gates, done protocol, final-line vocabulary).`,
+		`TIER: ${tier ?? "flagship (default)"}${model ? ` — model ${model}` : " — agent default model"}.`,
+		``,
 		`Inbox: before planning and again before finishing, check coord inbox — coordinator and board messages arrive there: bun ~/.claude/hooks/suspenders/bin/coord.ts inbox --as ${sid}.`,
 		`Work in the EXISTING worktree ${wt} (branch ${branch}).`,
 		`Finish: bun ~/.claude/hooks/suspenders/bin/work.ts done ${item} --sha <branch-head>.`,
@@ -736,6 +779,9 @@ if (MODE === "dispatch") {
 					"--permission-mode",
 					"acceptEdits",
 				];
+	// W83 tier routing: a configured model overrides the agent's default —
+	// claude takes --model, codex -m; absent tiers.json leaves both alone
+	if (model) agentArgs.push(AGENT === "codex" ? "-m" : "--model", model);
 	// both agents spawn through sh -c exec: the intermediary survives parent
 	// exit (codex dies under direct detached Bun spawn — the dns-sd lesson
 	// again) and < /dev/null gives codex the stdin EOF it blocks on. The lane
@@ -758,14 +804,67 @@ if (MODE === "dispatch") {
 		branch,
 		worktree: wt,
 		agent: AGENT,
+		tier,
+		model,
 		host: hostname(),
 		launchedAt: Date.now(),
 	};
 	const all = lanes().filter((l) => l.sid !== sid);
 	all.push(entry);
 	writeFileSync(`${REPO}/.fleet/lanes.json`, JSON.stringify(all, null, 2));
-	log(`DISPATCHED ${item} → ${sid} (pid ${proc.pid}, ${branch})`);
+	log(
+		`DISPATCHED ${item} → ${sid} (pid ${proc.pid}, ${branch}${tier ? `, tier ${tier}` : ""}${model ? `, model ${model}` : ""})`,
+	);
 	console.log(`dispatched ${item} → ${sid} (pid ${proc.pid})`);
+	process.exit(0);
+}
+
+// batch (W83): drain the non-urgent queue — every READY item of a tier
+// (default mechanical) dispatched through the standard dispatch child, capped,
+// sequential, synchronous (each child finishes its claim before the next
+// spawns — deterministic, natural spacing). Batching = one command fills the
+// fleet with the pending mechanical work instead of waking a lane per human
+// click; the claim race and the live-lane guard stay in dispatch (a vanished
+// or re-claimed item just fails that child, the batch moves on). take is the
+// dep-gate arbiter.
+if (MODE === "batch") {
+	const tier = val("--tier", "mechanical");
+	const max = num("--max", 4);
+	const common = sh(["git", "-C", REPO, "rev-parse", "--git-common-dir"]);
+	const proj = common ? realpathSync(resolve(REPO, common)) : `${REPO}/.git`;
+	const rows = openGovernorDb()
+		.query(
+			"SELECT id, title FROM work_items w WHERE project = ? AND state = 'READY' AND ((? = 'mechanical' AND tier = 'mechanical') OR (? = 'flagship' AND (tier IS NULL OR tier = 'flagship'))) AND NOT EXISTS (SELECT 1 FROM work_deps d JOIN work_items dw ON dw.project = d.project AND dw.id = d.depends_on WHERE d.project = w.project AND d.work_id = w.id AND dw.state != 'DONE') ORDER BY priority DESC, id LIMIT ?",
+		)
+		.all(proj, tier, tier, max) as { id: string; title: string }[];
+	if (rows.length === 0) {
+		log(`BATCH tier ${tier}: nothing READY`);
+		console.log(`batch: no READY ${tier} items`);
+		process.exit(0);
+	}
+	log(
+		`BATCH tier ${tier}: ${rows.length} item(s) — ${rows.map((r) => r.id).join(" ")}`,
+	);
+	for (const r of rows) {
+		// synchronous child: its work take settles before the next spawns —
+		// no claim races inside a batch, and a failed child just logs
+		const child = Bun.spawnSync(
+			[
+				process.execPath,
+				import.meta.path,
+				"dispatch",
+				"--repo",
+				REPO,
+				"--item",
+				r.id,
+				"--agent",
+				AGENT,
+			],
+			{ cwd: REPO, stdout: "ignore", stderr: "ignore", stdin: "ignore" },
+		);
+		log(`BATCH dispatched ${r.id} (exit ${child.exitCode})`);
+		console.log(`batch: dispatched ${r.id} — ${r.title.slice(0, 60)}`);
+	}
 	process.exit(0);
 }
 

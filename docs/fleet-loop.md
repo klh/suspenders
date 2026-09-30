@@ -111,6 +111,46 @@ Backend selection applies to `dispatch`. A policy script supplied through
 `--dispatch-cmd` must pass `--agent codex` on its own dispatch calls if it
 wants Codex lanes; the loop does not inject that flag into the script.
 
+### Role-tier model routing (W83)
+
+Work items carry a tier — `work add --tier mechanical|flagship` (unset =
+flagship). Mechanical lanes (sweep/harvest/mechanical transforms) run the
+cheap/fast model; coordinator/planner/reviewer work stays flagship.
+
+The model per tier resolves at dispatch from the repo's **gitignored**
+`.fleet/tiers.json` — per-machine on purpose, since model vocabularies
+differ across machines and routers:
+
+```json
+{ "mechanical": { "model": "glm-5.3-flash" } }
+```
+
+- A configured tier model overrides the agent's default: `--model` for
+  claude, `-m` for codex. No file / no entry → the agent's own model, never
+  an invented name (the W57 unrecognized_model class stays impossible).
+- The brief's `TIER:` line tells the lane its role; `lanes.json` and the
+  `DISPATCHED` log line carry tier + model.
+- The board's `llm:*` starts map tier → belt route role: mechanical prefers
+  `fast`, flagship prefers `complex` (fallbacks per registry). `/api/data`
+  and the cards surface tier; list rows badge mechanical as `⟨mech⟩`.
+
+### Batch — drain the non-urgent queue (W83)
+
+```bash
+# dispatch every READY mechanical item (default cap 4, deps-gated via take)
+bun fleet-loop.ts batch --repo <dir>
+
+# other populations
+bun fleet-loop.ts batch --repo <repo> --tier flagship --max 8
+```
+
+One command fills the fleet with the pending mechanical work instead of
+waking a lane per human click. Children are sequential and synchronous —
+each child's claim settles before the next spawns — so the claim race and
+live-lane guard stay in dispatch; a vanished or re-claimed item just fails
+that child while the batch moves on. Wire it as a repo's `--dispatch-cmd`
+policy to batch on a cadence.
+
 ## Operations: dispatch through lane completion
 
 Run coordinator commands from the parent checkout. Before dispatch, check

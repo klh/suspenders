@@ -421,6 +421,12 @@ export function openGovernorDb(): Database {
 	// take keeps the first dispatch's stamp across resume re-takes.
 	if (!wiCols.includes("origin"))
 		db.run("ALTER TABLE work_items ADD COLUMN origin TEXT");
+	// tier (W83, role-tier model routing): "mechanical" | "flagship", NULL =
+	// flagship. Mechanical lanes (sweep/harvest/mechanical transforms) run the
+	// cheap/fast tier — dispatch resolves the model from the repo's
+	// .fleet/tiers.json and the board maps tier → belt route role.
+	if (!wiCols.includes("tier"))
+		db.run("ALTER TABLE work_items ADD COLUMN tier TEXT");
 	if (uv < 2) db.run("PRAGMA user_version = 2");
 	// v4 — consult knowledge base: (problem → solution) pairs harvested from
 	// answered consults; new consults resolve against it before routing to a

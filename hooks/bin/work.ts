@@ -93,14 +93,18 @@ const ITEM_FLAGS = [
 	"--on",
 	"--as",
 	"--requires",
+	"--tier",
 ];
+// role-tier vocabulary (W83): mechanical lanes run the cheap/fast model tier,
+// flagship (and unset) run the flagship — dispatch and the board read this
+const TIERS = new Set(["mechanical", "flagship"]);
 const CAPS = new Set(CAPABILITIES);
 const SCHEMA: Record<string, Spec> = {
 	add: {
 		flags: ITEM_FLAGS,
 		minPos: 1,
 		reqFlags: [],
-		usage: `usage: add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid]`,
+		usage: `usage: add <title> [--scope s] [--parent <id>] [--priority n] [--desc "..."] [--by sid] [--tier mechanical|flagship]`,
 	},
 	list: { flags: [], minPos: 0, reqFlags: [], usage: "", lax: true },
 	ready: { flags: [], minPos: 0, reqFlags: [], usage: "", lax: true },
@@ -344,7 +348,7 @@ function mirrorDb(): Database | null {
 	if (!m) return null;
 	const d = new Database(":memory:");
 	d.run(
-		"CREATE TABLE work_items (project TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT, state TEXT NOT NULL DEFAULT 'READY', priority INTEGER NOT NULL DEFAULT 0, owner_sid TEXT, created_by TEXT, scope TEXT, why_parallel TEXT, result_sha TEXT, required INTEGER NOT NULL DEFAULT 1, requires TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (project, id))",
+		"CREATE TABLE work_items (project TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT, state TEXT NOT NULL DEFAULT 'READY', priority INTEGER NOT NULL DEFAULT 0, owner_sid TEXT, created_by TEXT, scope TEXT, why_parallel TEXT, result_sha TEXT, required INTEGER NOT NULL DEFAULT 1, requires TEXT, tier TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (project, id))",
 	);
 	d.run(
 		"CREATE TABLE work_deps (project TEXT NOT NULL, work_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (project, work_id, depends_on))",
@@ -370,6 +374,7 @@ function mirrorDb(): Database | null {
 		"result_sha",
 		"required",
 		"requires",
+		"tier",
 		"created_at",
 		"updated_at",
 	];
@@ -641,10 +646,11 @@ function insertItem(
 	by: string,
 	why: string | null,
 	requires: string | null = null,
+	tier: string | null = null,
 ): void {
 	db()
 		.query(
-			"INSERT INTO work_items (id, parent_id, title, state, priority, created_by, scope, why_parallel, project, required, requires, created_at, updated_at) VALUES (?, ?, ?, 'READY', ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+			"INSERT INTO work_items (id, parent_id, title, state, priority, created_by, scope, why_parallel, project, required, requires, tier, created_at, updated_at) VALUES (?, ?, ?, 'READY', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
 		)
 		.run(
 			id,
@@ -656,6 +662,7 @@ function insertItem(
 			why,
 			PROJECT,
 			requires,
+			tier,
 			Date.now(),
 			Date.now(),
 		);
@@ -689,7 +696,8 @@ function renderRow(r: Item): string {
 	const [g, col] = GLYPH[r.state as string] ?? ["?", dim];
 	const owner = r.owner_sid ? dim(String(r.owner_sid).slice(0, 6)) : "";
 	const req = r.requires ? dim(` ⟨needs ${r.requires}⟩`) : "";
-	return `  ${col(g)} ${cyan(String(r.id).padEnd(7))}${String(r.title).slice(0, 56)}${owner ? `  ${owner}` : ""}${req}`;
+	const tierBadge = r.tier === "mechanical" ? dim(" ⟨mech⟩") : "";
+	return `  ${col(g)} ${cyan(String(r.id).padEnd(7))}${String(r.title).slice(0, 56)}${owner ? `  ${owner}` : ""}${req}${tierBadge}`;
 }
 
 function liveTranscript(sid: string): string | null {
@@ -788,6 +796,9 @@ if (cmd === "add") {
 				`unknown capability: ${bad.join(",")} — vocabulary: ${[...CAPS].join(",")}`,
 			);
 	}
+	const tier = flag("--tier");
+	if (tier && !TIERS.has(tier))
+		die(`unknown tier: ${tier} — vocabulary: ${[...TIERS].join("|")}`);
 	const id = parent ? nextChildId(parent) : nextRootId();
 	if (parent) get(parent);
 	insertItem(
@@ -804,6 +815,7 @@ if (cmd === "add") {
 					.map((c) => c.trim())
 					.join(",")
 			: null,
+		tier ?? null,
 	);
 	emit("work.added", id, { scope: scope ?? "" });
 	console.log(
@@ -867,6 +879,7 @@ if (cmd === "add") {
 		"result_sha",
 		"why_parallel",
 		"requires",
+		"tier",
 		"description",
 	] as const) {
 		if (it[k]) console.log(`  ${dim(`${k}:`)} ${it[k]}`);

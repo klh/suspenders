@@ -57,6 +57,7 @@ interface WorkItemRow {
 	updated_at: number;
 	requires: string | null;
 	origin: string | null;
+	tier: string | null;
 }
 
 const db = openGovernorDb();
@@ -1103,7 +1104,7 @@ function board(): Record<string, unknown>[] {
 	return projects.map(({ project }) => {
 		const items = db
 			.query(
-				"SELECT id, state, owner_sid, origin, title, priority, result_sha, requires, updated_at FROM work_items WHERE project = ? ORDER BY priority DESC, id",
+				"SELECT id, state, owner_sid, origin, title, priority, result_sha, requires, tier, updated_at FROM work_items WHERE project = ? ORDER BY priority DESC, id",
 			)
 			.all(project) as WorkItemRow[];
 		const doneIds = new Set(
@@ -2472,7 +2473,7 @@ Bun.serve({
 			}
 			const w = db
 				.query(
-					"SELECT state, owner_sid, project, title, description FROM work_items WHERE project = ? AND id = ?",
+					"SELECT state, owner_sid, project, title, description, tier FROM work_items WHERE project = ? AND id = ?",
 				)
 				.get(project, id) as {
 				state: string;
@@ -2480,6 +2481,7 @@ Bun.serve({
 				project: string;
 				title: string;
 				description: string | null;
+				tier: string | null;
 			} | null;
 			if (!w)
 				return json(
@@ -2528,9 +2530,16 @@ Bun.serve({
 						},
 						409,
 					);
-				const role = ep.roles?.includes("general")
-					? "general"
-					: (ep.roles?.[0] ?? "");
+				// W83 tier → belt role: mechanical items take the cheap/fast tier
+				// (fast, then general), flagship takes the heavyweight (complex,
+				// then reasoning, then general) — belt's registry decides the target
+				const role =
+					(w.tier === "mechanical"
+						? ["fast", "general"]
+						: ["complex", "reasoning", "general"]
+					).find((r) => ep.roles?.includes(r)) ??
+					ep.roles?.[0] ??
+					"";
 				if (!role)
 					return json(
 						{ ok: false, error: `${agent} serves no route role` },
