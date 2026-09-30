@@ -108,6 +108,21 @@ export function filesCheck(hook: HookInput): FilesExit {
 		}
 	}
 
+	// ---- W92 govdb-import rule: the DB file is store-owner-only ----
+	// colocation-free control plane: consumers import makeStore() from
+	// store-ports.ts (embedded SQLite when no server, HTTP when resolveStore
+	// finds one) — never the DB directly. The literal patterns below are
+	// matched in CODE only; prose about the rule words itself around them.
+	if (isCode && F.includes("/hooks/") && existsSync(F)) {
+		const violation = govdbImportViolation(F, readFileSync(F, "utf8"));
+		if (violation) {
+			refreshLeaseHash(F);
+			const err = `W92 govdb-import rule: ${F} ${violation.msg}\nConsumers use makeStore() from lib/store-ports.ts (HTTP when a store server runs, embedded SQLite otherwise). Store owners are listed in govdbImportViolation().\n`;
+			if (violation.soft) return { kind: "context", msg: err };
+			return { kind: "block", err };
+		}
+	}
+
 	// ---- settings.json guard (the ONE exception to qlty-only — qlty has no
 	// JSON plugin, and a broken settings.json silently disables all settings;
 	// user-approved 2026-09-15). jq, ~3ms; basename match covers project copies.
@@ -131,6 +146,55 @@ export function filesCheck(hook: HookInput): FilesExit {
 	const streak = editStreak(hook, F);
 	if (streak) return streak;
 	return { kind: "ok" };
+}
+
+/** W92: who may open governor.db directly. Store owners: the schema module
+ * itself, the embedded store adapter, the HTTP face, and the W91 knowledge
+ * adapter (its declared only-place). GRANDFATHERED: consumers that still
+ * open the DB today — each migrates to the store port in its own child
+ * item; the rule bans NEW direct imports the moment a file is written. */
+const STORE_OWNERS = [
+	"/lib/govdb.ts",
+	"/lib/store-ports.ts",
+	"/bin/store-api.ts",
+	"/lib/knowledge-ports.ts",
+];
+const GRANDFATHERED = [
+	"/bin/coord.ts",
+	"/bin/work.ts",
+	"/bin/fleet-board.ts",
+	"/bin/fleet-loop.ts",
+	"/bin/monitor.ts",
+	"/bin/harvest.ts",
+	"/bin/claim.ts",
+	"/bin/worktree.ts",
+	"/gates/files.ts",
+	"/gates/bash.ts",
+	"/gates/governor.ts",
+];
+
+/** Null = fine; otherwise the verdict. Matches CODE only — prose about the
+ * rule words itself around the literal patterns. Owners pass silently,
+ * grandfathered consumers pass with a soft note (migrate, don't extend),
+ * ANY other hooks/ module with a direct DB import hard-blocks: that is a
+ * NEW direct import, exactly what W92 bans. */
+export function govdbImportViolation(
+	F: string,
+	content: string,
+): { msg: string; soft: boolean } | null {
+	if (F.includes("/test/") || F.includes("/spikes/")) return null;
+	const path = `/${F.split("/hooks/").pop() ?? ""}`; // repo + installed prefix share the hooks/ layout
+	const usesDb =
+		/import\s*\{[^}]*openGovernorDb[^}]*\}\s*from/.test(content) ||
+		/\bopenGovernorDb\s*\(/.test(content);
+	if (!usesDb) return null;
+	if (STORE_OWNERS.some((s) => path.endsWith(s))) return null;
+	if (GRANDFATHERED.some((s) => path.endsWith(s)))
+		return {
+			msg: "still imports the DB directly (grandfathered — migrate to the store port; do not ADD call sites)",
+			soft: true,
+		};
+	return { msg: "imports the DB directly — store owners only", soft: false };
 }
 
 /** `qlty fmt` in place. Returns a note when the file changed, null otherwise.

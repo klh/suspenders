@@ -8,7 +8,8 @@
 // env:   SUSPENDERS_LLM_URL   (default http://127.0.0.1:8901/v1/chat/completions)
 //        SUSPENDERS_LLM_MODEL (default "local")
 //        SUSPENDERS_LLM_KEY   (optional bearer token)
-import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
+import { isDecisionKind } from "../lib/govdb.ts";
+import { makeStore } from "../lib/store-ports.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
 import {
 	chatRemote,
@@ -55,20 +56,8 @@ async function defaultModel(url: string, key?: string): Promise<string> {
 	}
 }
 
-const db = openGovernorDb();
-const ev = db
-	.query(
-		"SELECT id, ts, source, kind, scope, payload, target FROM events WHERE id = ?",
-	)
-	.get(id) as {
-	id: number;
-	ts: number;
-	source: string;
-	kind: string;
-	scope: string | null;
-	payload: string | null;
-	target: string | null;
-} | null;
+const store = await makeStore();
+const ev = await store.event(id);
 if (!ev || !isDecisionKind(ev.kind)) {
 	console.error(
 		`event #${id} is ${ev ? ev.kind : "missing"} — advise wants a NEED% fork`,
@@ -78,7 +67,7 @@ if (!ev || !isDecisionKind(ev.kind)) {
 
 // already advised? (idempotent — board retries shouldn't re-bill the LLM)
 const fk = `advice.${id}`;
-if (db.query("SELECT 1 AS x FROM facts WHERE key = ?").get(fk)) {
+if (await store.fact(fk)) {
 	console.log(`#${id} already advised (${fk})`);
 	process.exit(0);
 }
@@ -92,28 +81,13 @@ try {
 }
 
 // context: who is asking (claims/intent), their recent bus traffic, fleet shape
-const claims = db
-	.query(
-		"SELECT scope, intent FROM claims WHERE sid = ? ORDER BY ts DESC LIMIT 5",
-	)
-	.all(ev.source) as { scope: string; intent: string | null }[];
-const recent = db
-	.query(
-		"SELECT kind, scope, payload FROM events WHERE source = ? ORDER BY id DESC LIMIT 8",
-	)
-	.all(ev.source) as {
-	kind: string;
-	scope: string | null;
-	payload: string | null;
-}[];
-const shape = db
-	.query(
-		"SELECT state, COUNT(*) AS n FROM work_items WHERE state IN ('READY','CLAIMED','RUNNING','BLOCKED','DONE') GROUP BY state",
-	)
-	.all() as { state: string; n: number }[];
-const zombies = db
-	.query("SELECT key, value FROM facts WHERE key LIKE 'zombie.%'")
-	.all() as { key: string; value: string }[];
+const claims = await store.claimsBySid(ev.source);
+const recent = await store.events({ source: ev.source, limit: 8 });
+const shape = await store.workShape();
+const zombies = (await store.factList("zombie.")).map((z) => ({
+	key: z.key,
+	value: z.value ?? "",
+}));
 
 const ctx = [
 	`asker: ${ev.source}${claims.length ? ` (claims: ${claims.map((c) => `${c.scope}${c.intent ? ` — ${c.intent}` : ""}`).join("; ")})` : ""}`,
@@ -143,7 +117,10 @@ let text = "";
 /** Parse the RECOMMENDATION/RATIONALE/RISK shape, persist the advice fact,
  *  and emit the ADVICE event — shared by the local and remote-fallback
  *  paths (W90). */
-function storeAdvice(text: string, meta: { model: string; host: string }) {
+async function storeAdvice(
+	text: string,
+	meta: { model: string; host: string },
+) {
 	const grab = (m: string) =>
 		text
 			.split(new RegExp(`^${m}:`, "m"))[1]
@@ -160,18 +137,15 @@ function storeAdvice(text: string, meta: { model: string; host: string }) {
 		model: meta.model,
 		ts: now,
 	});
-	db.query(
-		"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'advise', 1, ?)",
-	).run(fk, advice, Date.now());
-	db.query("DELETE FROM facts WHERE key = ?").run(`${fk}.error`);
-	db.query(
-		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'ADVICE', ?, ?, ?)",
-	).run(
-		Date.now(),
-		ev.scope,
-		JSON.stringify({ for: id, rec: rec.slice(0, 160) }),
-		ev.source, // back to the asker: their fork has advice waiting
-	);
+	await store.factSet(fk, advice, "advise");
+	await store.factDelete(`${fk}.error`);
+	await store.emitEvent({
+		source: "advise",
+		kind: "ADVICE",
+		scope: ev.scope,
+		payload: JSON.stringify({ for: id, rec: rec.slice(0, 160) }),
+		target: ev.source, // back to the asker: their fork has advice waiting
+	});
 	console.log(`advised #${id}: ${rec.slice(0, 100)}`);
 }
 
@@ -196,11 +170,10 @@ async function tryRemoteAdvise(
 		{ maxTokens: 500, timeoutMs: 300_000 },
 	);
 	const host = `${machine.name}:${endpoint.port}`;
-	db.query(
-		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)",
-	).run(
-		Date.now(),
-		JSON.stringify({
+	await store.emitEvent({
+		source: "advise",
+		kind: "llm.call",
+		payload: JSON.stringify({
 			for: id,
 			model: out.model,
 			host,
@@ -209,8 +182,8 @@ async function tryRemoteAdvise(
 			tt: 0,
 			ms: out.ms,
 		}),
-	);
-	storeAdvice(out.text, { model: out.model, host });
+	});
+	await storeAdvice(out.text, { model: out.model, host });
 	console.error(`advise #${id}: local LLM down — answered by remote ${host}`);
 	process.exit(0);
 }
@@ -272,11 +245,10 @@ async function tryBeltRoute(
 // local SUSPENDERS_LLM_URL and the remote registry stay as fallbacks
 const belt = await tryBeltRoute(sys, question);
 if (belt) {
-	db.query(
-		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)",
-	).run(
-		Date.now(),
-		JSON.stringify({
+	await store.emitEvent({
+		source: "advise",
+		kind: "llm.call",
+		payload: JSON.stringify({
 			for: id,
 			model: belt.model,
 			host: belt.host,
@@ -285,8 +257,8 @@ if (belt) {
 			tt: 0,
 			ms: belt.ms,
 		}),
-	);
-	storeAdvice(belt.text, { model: belt.model, host: belt.host });
+	});
+	await storeAdvice(belt.text, { model: belt.model, host: belt.host });
 	process.exit(0);
 }
 
@@ -324,11 +296,10 @@ try {
 	// against optional llm.budget.<model> facts. Usage may be absent (some
 	// local servers omit it) — record zeros rather than skipping, so the
 	// routing log still shows the call. On failure: still logged, with error.
-	db.query(
-		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)",
-	).run(
-		Date.now(),
-		JSON.stringify({
+	await store.emitEvent({
+		source: "advise",
+		kind: "llm.call",
+		payload: JSON.stringify({
 			for: id,
 			model: MODEL,
 			host: LLM_HOST,
@@ -339,15 +310,14 @@ try {
 				(j.usage?.prompt_tokens ?? 0) + (j.usage?.completion_tokens ?? 0),
 			ms: Date.now() - t0,
 		}),
-	);
+	});
 } catch (e) {
 	const msg = e instanceof Error ? e.message : String(e);
 	// telemetry even on failure — the routing log shows failed calls too (W28)
-	db.query(
-		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, 'advise', 'llm.call', NULL, ?, NULL)",
-	).run(
-		Date.now(),
-		JSON.stringify({
+	await store.emitEvent({
+		source: "advise",
+		kind: "llm.call",
+		payload: JSON.stringify({
 			for: id,
 			model: MODEL,
 			host: LLM_HOST,
@@ -357,7 +327,7 @@ try {
 			ms: Date.now() - t0,
 			error: msg.slice(0, 200),
 		}),
-	);
+	});
 	// connection refused / timeout = no advice LLM reachable (machine without
 	// the local fleet, belt down): a graceful skip, not a failure. The fork
 	// stays open for the human; a cloud SUSPENDERS_LLM_URL unchanged —
@@ -371,9 +341,11 @@ try {
 			await tryRemoteAdvise(machine, endpoint);
 		}
 	}
-	db.query(
-		"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'advise', 1, ?)",
-	).run(`${fk}.error`, unavailable ? `unavailable: ${msg}` : msg, Date.now());
+	await store.factSet(
+		`${fk}.error`,
+		unavailable ? `unavailable: ${msg}` : msg,
+		"advise",
+	);
 	console.error(
 		unavailable
 			? `advise #${id}: no advice LLM at ${LLM_HOST} (${msg.slice(0, 120)}) — advice unavailable, fork stays open`
@@ -382,4 +354,4 @@ try {
 	process.exit(unavailable ? 0 : 2);
 }
 
-storeAdvice(text, { model: MODEL, host: LLM_HOST });
+await storeAdvice(text, { model: MODEL, host: LLM_HOST });
