@@ -11,6 +11,8 @@
 //   2. merge every branch matching --glob that is ahead of --main, through
 //      the ladder child (--ladder template with {branch}; default: plain
 //      git merge --no-ff)
+//   2b. DONE sweep (W84): DONE branches flow to the ladder every cycle,
+//      keyed on the Work Graph — single-concern, sha-verified, no batching
 //   --dispatch-cmd <template> runs once per cycle after merges (policy lives there)
 //   3. retire merged branches' worktree + branch (pid-guarded, honest RETIRE-BLOCKED)
 //
@@ -30,7 +32,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
-import { openGovernorDb } from "../lib/govdb.ts";
+import { openGovernorDb, projectIdentity } from "../lib/govdb.ts";
 
 const argv = process.argv.slice(2);
 const MODE = argv[0];
@@ -433,6 +435,43 @@ function mergeRunnerAlive(): number | null {
 	}
 }
 
+/** Dispatcher policy (W84): DONE branches flow to the ladder every cycle —
+ * the sweep is keyed on the Work Graph, not just the static glob. An item
+ * flows through its own suspenders/<id> branch only when its recorded
+ * result_sha sits on that branch; a foreign sha is HELD, never flowed blind. */
+function doneSweep(): void {
+	let rows: { id: string; result_sha: string }[] = [];
+	try {
+		rows = openGovernorDb()
+			.query(
+				"SELECT id, result_sha FROM work_items WHERE project = ? AND state = 'DONE' AND result_sha IS NOT NULL",
+			)
+			.all(projectIdentity(REPO)) as typeof rows;
+	} catch (e) {
+		const why = e instanceof Error ? e.message : String(e);
+		log(`DONE-SWEEP skip — work graph unreadable: ${why}`);
+		return;
+	}
+	for (const r of rows) {
+		const b = `suspenders/${r.id}`;
+		// historical DONE items retire post-merge — a missing branch is a no-op
+		if (!sh(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${b}`]))
+			continue;
+		// HOLD fires only on unmerged content we refuse to flow — a not-ahead
+		// branch stays silent and falls through to the retire half
+		if (
+			ahead(b) > 0 &&
+			run(["git", "merge-base", "--is-ancestor", r.result_sha, b]) !== 0
+		) {
+			log(
+				`HOLD ${b} — result sha ${r.result_sha} not on the item branch; not flowed`,
+			);
+			continue;
+		}
+		mergeOne(b); // ahead>0: through the ladder; ahead=0: retire lifecycle
+	}
+}
+
 async function cycle(): Promise<void> {
 	// 1. never enter a cycle with leftover merge state. MERGE_HEAD is either
 	// a LIVE merge (another runner mid-flight — hands off) or crashed-run
@@ -455,6 +494,10 @@ async function cycle(): Promise<void> {
 		.split("\n")
 		.filter(Boolean);
 	for (const b of branches) mergeOne(b);
+
+	// 2b. dispatcher policy (W84): DONE branches flow every cycle, keyed on
+	// the Work Graph — no end-of-cycle batching behind the static glob
+	doneSweep();
 
 	// 3. refill the fleet — policy lives in the repo's dispatch script
 	if (DISPATCH) runTemplate(DISPATCH, "", LADDER_TIMEOUT_MS);
@@ -609,6 +652,7 @@ if (MODE === "dispatch") {
 		`PROTOCOL: BEFORE any edit, read AGENTS.md in the repo root and follow it (plan-first, shatter judgment, gates, done protocol, final-line vocabulary).`,
 		`Inbox: before planning and again before finishing, check coord inbox — coordinator and board messages arrive there: bun ~/.claude/hooks/suspenders/bin/coord.ts inbox --as ${sid}.`,
 		`Work in the EXISTING worktree ${wt} (branch ${branch}).`,
+		`Single-concern branches: your branch carries exactly this item's work — unrelated fixes get their own item + branch, so the DONE sweep can trust and flow the branch (W84).`,
 		`Finish: bun ~/.claude/hooks/suspenders/bin/work.ts done ${item} --sha <branch-head>.`,
 		`Final line: DONE <sha> | SPLIT ${item} | BLOCKED (after 3 honest attempts, tree restored).`,
 	].join("\n");

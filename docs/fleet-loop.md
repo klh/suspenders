@@ -6,7 +6,13 @@ kinds of automation on a cadence:
 
 1. **merge** — every branch matching `--glob` that is ahead of `--main` goes
    through the repo's ladder (a child script you supply), then merges.
-2. **dispatch** — optional. A second child script you supply refills the lane
+2. **DONE sweep** — every DONE Work Graph item with a `result_sha` flows
+   through its own `suspenders/<id>` branch every cycle: the loop reads the
+   Work Graph (governor.db), not just a static glob, so a finished item's
+   branch reaches the ladder on the next cycle — no end-of-cycle batching.
+   Single-concern guard: a branch flows only when the recorded `result_sha`
+   sits on it; a foreign sha is HELD (honest log line, branch untouched).
+3. **dispatch** — optional. A second child script you supply refills the lane
    pool. Policy lives in the repo, not here.
 
 ```bash
@@ -25,6 +31,7 @@ bun fleet-loop.ts watch --repo <dir> --ladder '<cmd> {branch}' [--every 120] [--
 | Watchdog      | In `watch` mode every cycle runs as a killable `--once` child with a hard timer (`--cycle-timeout`, default 15 min). A hung cycle dies at the watchdog; the loop continues. Never spawnSync unbounded.                                                                                                              |
 | Merge state   | A cycle never starts with leftover `MERGE_HEAD` — it aborts. Failed ladders are aborted too. Never `reset --hard` a shared checkout.                                                                                                                                                                                |
 | Lane protocol | Every dispatched lane PLAN FIRST (inventory the impact surface, read qlty spec + target files), then SHATTER JUDGMENT: 2+ genuinely independent scopes → `work split <id> … --keep 1`, work only the kept child, end `SPLIT <id>`; the fleet refills the rest. Serial or small work proceeds to implement directly. |
+| Single-concern | A dispatched lane's branch carries exactly its item's work — unrelated fixes get their own item + branch (the dispatch brief says so). The DONE sweep flows a branch only when the item's recorded `result_sha` sits on it (W84). |
 
 ## dispatch — one item → claimed, worktree, briefed headless lane
 

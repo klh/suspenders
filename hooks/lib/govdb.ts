@@ -19,19 +19,24 @@ const REG = `${process.env.HOME}/.cache/claude-governor`;
 
 // one project identity for the whole control plane: realpath of the repo's
 // COMMON git dir — every worktree of one repo shares one Work Graph, and
-// work.ts / coord.ts bootstrap / a future consult layer can never disagree
-export function projectIdentity(): string {
+// work.ts / coord.ts bootstrap / a future consult layer can never disagree.
+// Optional cwd (W84): tools that operate on a --repo without chdir-ing into
+// it (fleet-loop) resolve the same identity from the repo path.
+export function projectIdentity(cwd: string = process.cwd()): string {
 	try {
 		const r = Bun.spawnSync(
-			["git", "-C", process.cwd(), "rev-parse", "--git-common-dir"],
-			{ stdout: "pipe", stderr: "pipe" },
+			["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+			{
+				stdout: "pipe",
+				stderr: "pipe",
+			},
 		);
 		if (r.exitCode === 0) {
 			const dir = new TextDecoder().decode(r.stdout).trim();
-			if (dir) return realpathSync(resolve(process.cwd(), dir));
+			if (dir) return realpathSync(resolve(cwd, dir));
 		}
 	} catch {}
-	return realpathSync(process.cwd());
+	return realpathSync(cwd);
 }
 
 // capability vocabulary for capability-aware dispatch (schema v2):
