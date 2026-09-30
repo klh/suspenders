@@ -164,10 +164,12 @@ Do not remove a live lane's workspace to force retirement.
 
 ## Migrating a project onto it
 
-A project (gaps is the first) replaces its bespoke daemon with a ~5-line
-plist template (`hooks/launchd/com.suspenders.fleet-loop.plist`): point
-`--repo` at the checkout and `--ladder` at the project's own ladder script.
-The ladder stays project-local on purpose — qlty config, test runners, and
+A project (gaps is the first) replaces its bespoke daemon with a manifest
+entry in `hooks/lib/services.ts` (rendered by `hooks/bin/service-gen.ts`):
+point `--repo` at the checkout and `--ladder` at the project's own ladder
+script (`service-gen install --ladder '<cmd with {branch}>'` overrides the
+default). The ladder stays project-local on purpose — qlty config, test
+runners, and
 union rules are quality POLICY, not shell. What the fleet owns is the
 watchdog, the cadence, the strike/park discipline, and the retire lifecycle.
 

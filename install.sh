@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # suspenders installer — copies the harness into ~/.claude/hooks/suspenders and
 # optionally: --wire merges the hook registrations into ~/.claude/settings.json
-# (per-event concat, never clobbers), --with-launchd installs the macOS agents.
+# (per-event concat, never clobbers), --with-services installs the fleet
+# services for this platform (launchd on macOS, systemd user-units on Linux).
 # Idempotent: re-running just refreshes the files.
-#   ./install.sh [--wire] [--with-launchd]
+#   ./install.sh [--wire] [--with-services]
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +14,7 @@ command -v bun >/dev/null || { echo "suspenders needs bun — https://bun.sh fir
 
 echo "→ installing to $PREFIX"
 mkdir -p "$PREFIX"
-for item in bin lib gates launchd gate.ts session-start.ts session-end.ts knowledgeworker.md; do
+for item in bin lib gates gate.ts session-start.ts session-end.ts knowledgeworker.md; do
   cp -R "$REPO_DIR/hooks/$item" "$PREFIX/"
 done
 cp "$REPO_DIR/package.json" "$REPO_DIR/bun.lock" "$PREFIX/"
@@ -43,20 +44,13 @@ if [[ "${1:-}" == "--wire" || "${2:-}" == "--wire" ]]; then
   '
 fi
 
-# --with-launchd: template-substitute and load the macOS agents
-if [[ "${1:-}" == "--with-launchd" || "${2:-}" == "--with-launchd" ]]; then
-  if [[ "$(uname)" != "Darwin" ]]; then
-    echo "→ --with-launchd skipped (not macOS)"
-  else
+# --with-services (alias: --with-launchd): render the ONE service manifest
+# for this platform and load it — launchd agents on macOS, systemd user-units
+# on Linux. Replaces the per-repo __HOME__ plist templates + sed substitution.
+if [[ "${1:-}" == "--with-services" || "${2:-}" == "--with-services" || "${1:-}" == "--with-launchd" || "${2:-}" == "--with-launchd" ]]; then
+  if [[ "$(uname)" == "Darwin" ]]; then
     BUN_BIN="$(command -v bun)"
-    for f in "$REPO_DIR"/hooks/launchd/*.plist; do
-      name="$(basename "$f")"
-      out="$HOME/Library/LaunchAgents/$name"
-      sed -e "s|__BUN__|$BUN_BIN|" -e "s|__HOME__|$HOME|" -e "s|__PREFIX__|$PREFIX|" -e "s|__REPO__|$REPO_DIR|" "$f" >"$out"
-      launchctl bootout "gui/$(id -u)/${name%.plist}" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$out"
-      echo "→ loaded $name"
-    done
+    bun "$PREFIX/bin/service-gen.ts" install --target launchd --prefix "$PREFIX" --repo "$REPO_DIR" --bun "$BUN_BIN"
     # supersede the pre-namespacing agent labels so old and new never run side
     # by side (same jobs, stale script paths, double keepwarm/monitor pings)
     for legacy in com.klh.llm-keepwarm com.klh.fleet-monitor; do
@@ -66,6 +60,8 @@ if [[ "${1:-}" == "--with-launchd" || "${2:-}" == "--with-launchd" ]]; then
         echo "→ superseded legacy agent $legacy"
       fi
     done
+  else
+    bun "$PREFIX/bin/service-gen.ts" install --target systemd --prefix "$PREFIX" --repo "$REPO_DIR"
   fi
 fi
 
