@@ -3,9 +3,16 @@
 // through the configured ladder (template {branch} substitution), lands as a
 // MERGED line in loop.log, and the merged branch + worktree retire; a
 // not-ahead branch is a no-op, a failed ladder aborts the merge and leaves
-// the branch (strike counted), and leftover MERGE_HEAD is aborted first.
+// the branch (strike counted), a live daemon merge vetoes ship outright
+// (W101) and crashed debris is healed, not blindly aborted.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -79,6 +86,25 @@ const log = (repo: string): string => {
 		return "";
 	}
 };
+
+// W101: a live merge-active marker — pid alive + exact ps cmdline + fresh
+// ts, the same shape mergeOne writes; the sleeper stands in for the runner
+function liveMarker(repo: string): ReturnType<typeof Bun.spawn> {
+	mkdirSync(join(repo, ".fleet"), { recursive: true });
+	const dummy = Bun.spawn(["sleep", "30"]);
+	writeFileSync(
+		join(repo, ".fleet", "merge-active"),
+		JSON.stringify({
+			pid: dummy.pid,
+			cmd: Bun.spawnSync(["ps", "-o", "command=", "-p", String(dummy.pid)])
+				.stdout.toString()
+				.trim(),
+			branch: "suspenders/SHIP1",
+			ts: Date.now(),
+		}),
+	);
+	return dummy;
+}
 
 describe("fleet-loop ship mode (W64)", () => {
 	test("merges one branch through the ladder, retires branch + worktree", async () => {
@@ -159,17 +185,61 @@ describe("fleet-loop ship mode (W64)", () => {
 		rmSync(repo, { recursive: true, force: true });
 	});
 
-	test("leftover MERGE_HEAD is aborted before the merge", async () => {
+	test("leftover MERGE_HEAD debris (dead runner) is healed before the merge", async () => {
 		const repo = await scratchRepo();
 		// stage a conflicted merge to leave MERGE_HEAD behind
 		await Bun.write(Bun.file(join(repo, "f.txt")), "conflict\n");
 		g(repo, ["add", "-A"]);
 		expect(g(repo, ["commit", "-m", "diverge"]).exitCode).toBe(0);
 		expect(g(repo, ["merge", "suspenders/SHIP1"], repo).exitCode).not.toBe(0);
+		// a DEAD runner's marker: no veto — the surgical heal runs instead
+		mkdirSync(join(repo, ".fleet"), { recursive: true });
+		writeFileSync(
+			join(repo, ".fleet", "merge-active"),
+			JSON.stringify({ pid: 999999999, ts: Date.now() }),
+		);
 		const r = ship(repo, ["--branch", "suspenders/SHIP1"]);
 		expect(r.code).toBe(0);
-		// ship aborted the leftover state, then handled the branch honestly
-		expect(log(repo)).toContain("ABORT leftover MERGE_HEAD");
+		expect(log(repo)).toContain("SELF-HEAL");
 		rmSync(repo, { recursive: true, force: true });
+	});
+
+	test("live merge marker vetoes ship — MERGE_HEAD untouched, no strike (W101)", async () => {
+		const repo = await scratchRepo();
+		await Bun.write(Bun.file(join(repo, "f.txt")), "conflict\n");
+		g(repo, ["add", "-A"]);
+		expect(g(repo, ["commit", "-m", "diverge"]).exitCode).toBe(0);
+		expect(g(repo, ["merge", "suspenders/SHIP1"], repo).exitCode).not.toBe(0);
+		const dummy = liveMarker(repo);
+		const r = ship(repo, ["--branch", "suspenders/SHIP1"]);
+		expect(r.code).toBe(1);
+		expect(log(repo)).toContain("SHIP-VETO suspenders/SHIP1");
+		// hands-off: the in-flight merge state survives, no strike was counted
+		expect(existsSync(join(repo, ".git", "MERGE_HEAD"))).toBe(true);
+		expect(existsSync(join(repo, ".fleet", "merge-fails.json"))).toBe(false);
+		rmSync(repo, { recursive: true, force: true });
+		dummy.kill();
+	});
+
+	test("cycle skips the merge while a runner is mid-flight (W101)", async () => {
+		const repo = await scratchRepo();
+		// live marker, NO MERGE_HEAD — the pre-merge ladder window
+		const dummy = liveMarker(repo);
+		const p = Bun.spawnSync(
+			["bun", LOOP, "once", "--repo", repo, "--glob", "suspenders/*"],
+			{ cwd: repo, env, stdout: "pipe", stderr: "pipe" },
+		);
+		expect(p.exitCode).toBe(0);
+		expect(log(repo)).toContain("MERGE-BUSY suspenders/SHIP1");
+		// untouched: no merge commit, branch alive, no strike
+		expect(
+			g(repo, ["branch", "--list", "suspenders/SHIP1"]).stdout.toString(),
+		).not.toBe("");
+		expect(
+			g(repo, ["rev-list", "--count", "main"]).stdout.toString().trim(),
+		).toBe("1");
+		expect(existsSync(join(repo, ".fleet", "merge-fails.json"))).toBe(false);
+		rmSync(repo, { recursive: true, force: true });
+		dummy.kill();
 	});
 });

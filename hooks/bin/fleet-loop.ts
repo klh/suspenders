@@ -360,6 +360,15 @@ function mergeOne(b: string): void {
 	// treated ahead>0 as ready and its retire swept the worktree out from
 	// under the agents)
 	if (laneIsAlive(b)) return;
+	// W101: a live .fleet/merge-active marker means another runner is
+	// mid-ladder (the marker is written BEFORE the merge starts, so it can
+	// be live with no MERGE_HEAD yet) — never start a second ladder over
+	// it; the next cycle or ship run retries once the runner finishes
+	const liveRunner = mergeRunnerAlive();
+	if (liveRunner) {
+		log(`MERGE-BUSY ${b} — runner pid ${liveRunner} mid-flight, skipped`);
+		return;
+	}
 	// liveness marker: a crash between --no-commit and commit leaves
 	// MERGE_HEAD + staged debris that plain merge --abort cannot clear (the
 	// 2026-09-28 gaps stall). The marker tells the next cycle whether a
@@ -771,20 +780,31 @@ if (MODE === "dispatch") {
 
 // ship: one branch through the ladder NOW — the board's one-click ship
 // trigger (W64, fleet-board /api/ship). A foreground single-shot of the
-// cycle's merge step: same MERGE_HEAD abort, ladder timeout, FAIL tail,
-// strike/park discipline, retire lifecycle. The branch need not match
-// --glob (explicit intent); the BOARD resolves the ladder from the repo's
-// .fleet/ship.json and passes it here — the loop shell stays policy-free.
+// cycle's merge step: same merge-liveness veto + crashed-merge heal, ladder
+// timeout, FAIL tail, strike/park discipline, retire lifecycle. The branch
+// need not match --glob (explicit intent); the BOARD resolves the ladder
+// from the repo's .fleet/ship.json and passes it here — the loop shell
+// stays policy-free.
 if (MODE === "ship") {
 	const b = val("--branch");
 	if (!b) {
 		console.error("ship requires --branch <branch>");
 		process.exit(1);
 	}
+	// W101 ship-vs-daemon race: same merge-liveness discipline as cycle
+	// step 1 — a live daemon ladder is hands-off (a blind abort here killed
+	// the daemon's in-flight merge, FAIL-struck the innocent branch, and
+	// clobbered the shared .fleet/merge-active marker); crashed debris gets
+	// the surgical heal
+	const live = mergeRunnerAlive();
+	if (live) {
+		log(`SHIP-VETO ${b} — merge runner pid ${live} mid-flight, ship refused`);
+		console.error(`ship refused: merge runner pid ${live} mid-flight`);
+		process.exit(1);
+	}
 	// never enter with leftover merge state (same as cycle step 1)
 	if (existsSync(`${REPO}/.git/MERGE_HEAD`)) {
-		run(["git", "merge", "--abort"]);
-		log("ABORT leftover MERGE_HEAD");
+		healCrashedMerge();
 	}
 	mergeOne(b);
 	process.exit(0);

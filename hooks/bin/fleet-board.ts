@@ -291,7 +291,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/comment   route a review line-comment to a work item's owning lane (coord NOTE; id, file, line, note required — note capped at 2000)
 - POST /api/message   message a work item's owning lane as the coordinator (coord NOTE; id, note required — note capped at 2000)
 - POST /api/start     start a lane on a READY work item (fleet-loop dispatch; project, id required — 409 when claimed, not a READY item, demo, or agent missing; agent=llm:machine:model routes through belt's remotes router instead: claim as the board lane, remotes.ts route the title+description, llm.result on the item thread, claim released)
-- POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, or while a lane lives)
+- POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness + merge-ladder guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, while a lane lives, or while a daemon merge ladder is mid-flight)
 - POST /api/orchestrate            LLM proposes a plan item + parallel children from a goal (project, goal required; read-only — nothing registers, 502 when no parseable plan comes back)
 - POST /api/orchestrate/register   register a proposed plan as a plan-gated work split through the work CLI (project, title, children required; children 2..8; the plan item is the split parent — the AGENTS.md add-plan-then-split flow)
 
@@ -2799,6 +2799,35 @@ Bun.serve({
 					},
 					409,
 				);
+			// W101 merge-ladder guard: a live .fleet/merge-active marker means
+			// a daemon merge is mid-flight — one-click ship spawned fleet-loop
+			// ship, whose blind MERGE_HEAD abort killed the ladder and
+			// FAIL-struck the innocent branch. Mirror of fleet-loop's
+			// mergeRunnerAlive (same 30-min freshness + ps cmdline identity);
+			// the scripts can't share the helper without running the loop's
+			// mode dispatch, so this stays a commented twin.
+			try {
+				const j = JSON.parse(
+					readFileSync(`${repo}/.fleet/merge-active`, "utf8"),
+				) as { pid: number; cmd?: string; ts: number };
+				if (Date.now() - j.ts < 30 * 60_000 && j.cmd) {
+					process.kill(j.pid, 0);
+					const cmd = Bun.spawnSync(
+						["ps", "-o", "command=", "-p", String(j.pid)],
+						{ stdout: "pipe", stderr: "pipe" },
+					)
+						.stdout.toString()
+						.trim();
+					if (cmd === j.cmd)
+						return json(
+							{
+								ok: false,
+								error: `merge ladder in flight (pid ${j.pid}) — ship refused`,
+							},
+							409,
+						);
+				}
+			} catch {}
 			// the ladder is owner config in the repo — REQUIRED (a silent plain
 			// merge would bypass the repo's quality policy)
 			const ship = readShipJson(repo);

@@ -1561,6 +1561,34 @@ describe("W64 ship trigger", () => {
 		expect(r.json.error).toContain("still live");
 	});
 
+	test("merge-ladder guard: a live .fleet/merge-active marker vetoes the ship (W101)", async () => {
+		shipFixture("WMRG");
+		shipJson(GREPO, 'git merge --no-ff {branch} -m "shipped {branch}"');
+		// marker pid = this test process; the board re-runs ps itself and
+		// compares cmdline identity, exactly as fleet-loop's mergeRunnerAlive
+		mkdirSync(join(GREPO, ".fleet"), { recursive: true });
+		writeFileSync(
+			join(GREPO, ".fleet", "merge-active"),
+			JSON.stringify({
+				pid: process.pid,
+				cmd: Bun.spawnSync(
+					["ps", "-o", "command=", "-p", String(process.pid)],
+					{ stdout: "pipe", stderr: "pipe" },
+				)
+					.stdout.toString()
+					.trim(),
+				branch: "suspenders/WMRG",
+				ts: Date.now(),
+			}),
+		);
+		const r = await post("/api/ship", { project: GREPO, id: "WMRG" });
+		expect(r.status).toBe(409);
+		expect(r.json.error).toContain("merge ladder in flight");
+		// the marker names THIS process (still alive) — remove it or the next
+		// ship test's detached child reads a live runner and vetoes too
+		rmSync(join(GREPO, ".fleet", "merge-active"));
+	});
+
 	test("end-to-end: ok + detached child merges through the ladder and retires the branch", async () => {
 		shipFixture("WSHIP1");
 		shipJson(GREPO, 'git merge --no-ff {branch} -m "shipped {branch}"');
