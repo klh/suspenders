@@ -16,6 +16,7 @@ import { readHook, allow } from "./lib/hookio.ts";
 import { bashGate } from "./gates/bash.ts";
 import { filesGate } from "./gates/files.ts";
 import { governorGate } from "./gates/governor.ts";
+import { readGate } from "./gates/read.ts";
 import { stopGate } from "./gates/stop.ts";
 import { preFilesChain } from "./gates/chain.ts";
 
@@ -32,6 +33,10 @@ switch (event) {
 	// biome-ignore lint/suspicious/noFallthroughSwitchClause: filesGate is `: never` — the call ends the case
 	case "post-files":
 		filesGate(hook);
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: allow() is `: never` — the case always exits
+	case "pre-read":
+		readGate(hook); // W110: void — fat-read deny / re-read nudge, else falls through
+		allow();
 	// biome-ignore lint/suspicious/noFallthroughSwitchClause: governorGate is `: never` — the call ends the case
 	case "governor":
 		governorGate(hook); // standalone registration (MultiEdit matcher) — no longer chains

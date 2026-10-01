@@ -12,6 +12,7 @@
 // W14: the gate body lives in filesCheck() — exit-free — so stop.ts re-verifies
 // changed files IN-PROCESS instead of spawning `bun gate.ts post-files` per file.
 import { allow, context, feedback, type HookInput } from "../lib/hookio.ts";
+import { bumpPathCount } from "../lib/gatestate.ts";
 import { have, lines, run } from "../lib/run.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
 import { basename, dirname } from "node:path";
@@ -181,16 +182,8 @@ function qltyGate(F: string): string | null {
 function editStreak(hook: HookInput, F: string): FilesExit | null {
 	const sid = hook.session_id;
 	if (!sid) return null;
-	const statePath = `${(process.env.TMPDIR ?? "/tmp").replace(/\/$/, "")}/claude-edits-${sid}.json`;
-	let counts: Record<string, number> = {};
-	try {
-		counts = JSON.parse(readFileSync(statePath, "utf8"));
-	} catch {}
-	counts[F] = (counts[F] ?? 0) + 1;
-	try {
-		writeFileSync(statePath, JSON.stringify(counts));
-	} catch {}
-	if (counts[F] % 3 !== 0) return null;
+	const n = bumpPathCount("edits", sid, F);
+	if (n % 3 !== 0) return null;
 	const label = F.slice(F.lastIndexOf("/") + 1);
 	// 2026-09-28, owner: the verify-every-3rd-edit nag was ignored all day
 	// while interleaved edits + autofixes corrupted files twice — the gate
@@ -206,13 +199,13 @@ function editStreak(hook: HookInput, F: string): FilesExit | null {
 		if (build.exitCode !== 0) {
 			return {
 				kind: "block",
-				err: `Edit #${counts[F]} to ${label}: the gate built it and it FAILS — fix before editing further.\n${err.slice(0, 2000)}\n`,
+				err: `Edit #${n} to ${label}: the gate built it and it FAILS — fix before editing further.\n${err.slice(0, 2000)}\n`,
 			};
 		}
 	}
 	return {
 		kind: "context",
-		msg: `Edit #${counts[F]} to ${label} — build verified clean by the gate.`,
+		msg: `Edit #${n} to ${label} — build verified clean by the gate.`,
 	};
 }
 
