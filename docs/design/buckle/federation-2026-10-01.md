@@ -43,6 +43,20 @@ The store (:7794) and board (:7799) stay up on any machine, isolated.
 - Zero-LLM local routing (<1ms, W140) keeps the hub out of the hot path —
   latency stays spoke-local by construction.
 
+## Identity plane separation (owner directive, 2026-10-01)
+
+Users, teams, api_keys, auth_events and team ceilings move OUT of
+governor.db into their own **identity.db** (same store-port pattern:
+`openIdentity()`, served beside `/rpc` on :7794). Rationale: different
+lifecycle (work graph is per-project churn; identity is fleet-global,
+long-lived, security-sensitive), independent backup/retention/audit, and
+it makes the federation split physical: **identity.db is hub-plane data;
+governor.db is spoke-plane.** Spokes keep validating tokens offline
+(W149/W141 verifier seams) — the DB split does not put the hub in the
+request path. `budget_state` (runtime counters) stays with the ledger;
+team ceilings (policy) go with identity. Migration = v9-era move of the
+five tables + lib re-binding; sequenced behind the in-flight lanes.
+
 ## Sequencing
 
 Phase 1 (post-W144 cut-over): hub policy distribution + spoke pull.
