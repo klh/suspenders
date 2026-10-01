@@ -938,6 +938,19 @@ export function openGovernorDb(): Database {
 	}
 	// v10 (W166) — knowledge.db split; see migrateKnowledgeSplit above.
 	if (uv < 10) migrateKnowledgeSplit(db);
+	// v11 (W170) — federation work-delta landing zone (HUB-side only): spoke
+	// up-feed batches land here (UNIQUE(spoke, seq_spoke) makes redelivery —
+	// at-least-once by design — a no-op), the global lane view reads it.
+	// Spokes never write this table; their own graphs keep deltas as-is.
+	if (uv < 11) {
+		db.run(
+			"CREATE TABLE IF NOT EXISTS fed_work_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, spoke TEXT NOT NULL, seq_spoke INTEGER NOT NULL, ts INTEGER NOT NULL, tbl TEXT NOT NULL, op TEXT NOT NULL, pk TEXT NOT NULL, before TEXT, after TEXT, UNIQUE(spoke, seq_spoke))",
+		);
+		db.run(
+			"CREATE INDEX IF NOT EXISTS fed_work_log_ts ON fed_work_log(ts, seq)",
+		);
+		db.run("PRAGMA user_version = 11");
+	}
 	migrateJSON(db);
 	return db;
 }

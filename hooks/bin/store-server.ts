@@ -22,6 +22,14 @@ import {
 } from "../lib/govdb.ts";
 import { handleAuthRoutes } from "../lib/auth-server.ts";
 import { servicemon } from "../lib/servicemon.ts";
+// W170 — federation phase 2 hub surfaces (work-delta receiver + lane view)
+import {
+	buildLaneView,
+	DeltaBatchError,
+	landWorkDeltas,
+	renderLaneViewHtml,
+} from "../lib/federation-hub.ts";
+import { readCapped } from "../lib/federation.ts";
 
 const PORT =
 	Number(process.argv[process.argv.indexOf("--port") + 1] ?? "") ||
@@ -66,6 +74,91 @@ const exec = (
 	};
 };
 
+// W170 — problem+json responses on the federation surfaces (RFC 9457 shape,
+// stable code, no internals on 500). Shared by both fed routes.
+function problemRes(
+	status: number,
+	title: string,
+	detail: string,
+	code: string,
+): Response {
+	return new Response(
+		JSON.stringify({
+			type: "about:blank",
+			title,
+			status,
+			detail,
+			code,
+		}),
+		{ status, headers: { "content-type": "application/problem+json" } },
+	);
+}
+
+// W170 — POST /federation/work-delta: land one pushed batch (bounded,
+// idempotent) and ack through_seq. problem+json errors; 500s never leak
+// internals (http-citizenship).
+async function handleWorkDelta(req: Request): Promise<Response> {
+	let body: unknown;
+	try {
+		body = await readCapped(req);
+	} catch {
+		return problemRes(
+			400,
+			"malformed or oversized batch body",
+			"body must be JSON under the 64 KiB cap",
+			"store.batch_invalid",
+		);
+	}
+	return serial(() => {
+		try {
+			const r = landWorkDeltas(db as GovernorStore, body);
+			return Response.json(
+				{ applied: r.applied, skipped: r.skipped, through_seq: r.throughSeq },
+				{ headers: { "cache-control": "no-store" } },
+			);
+		} catch (e) {
+			const bad = e instanceof DeltaBatchError;
+			return problemRes(
+				bad ? 400 : 500,
+				bad ? "invalid batch" : "landing failed",
+				bad ? e.message : "landing failed",
+				bad ? "store.batch_invalid" : "store.landing_failed",
+			);
+		}
+	});
+}
+
+// W170 — GET /federation/lane-view: the cross-user/team work-log + lane
+// view over fed_work_log. JSON (default) or ?format=html; strong ETag +
+// If-None-Match → 304 per http-citizenship; no-store (credentialed plane).
+async function handleLaneView(req: Request, url: URL): Promise<Response> {
+	if (req.method !== "GET")
+		return new Response(null, {
+			status: 405,
+			headers: { allow: "GET, OPTIONS" },
+		});
+	const view = await serial(() => buildLaneView(db as GovernorStore, {}));
+	const html = url.searchParams.get("format") === "html";
+	const body = html ? renderLaneViewHtml(view) : JSON.stringify(view);
+	const etag = `"${Bun.CryptoHasher("sha1").update(body).digest("hex")}"`;
+	const inm = req.headers.get("if-none-match");
+	if (inm !== null && inm === etag)
+		return new Response(null, {
+			status: 304,
+			headers: { etag, "cache-control": "no-store" },
+		});
+	return new Response(body, {
+		status: 200,
+		headers: {
+			etag,
+			"cache-control": "no-store",
+			...(html
+				? { "content-type": "text/html; charset=utf-8" }
+				: { "content-type": "application/json" }),
+		},
+	});
+}
+
 const base = {
 	hostname: "127.0.0.1",
 	port: PORT,
@@ -89,6 +182,50 @@ const base = {
 					store: db as unknown as GovernorStore,
 				}),
 			);
+		// W170 — federation phase 2 hub surfaces. Same trust seam as /rpc:
+		// loopback bind + optional shared token — the spoke presents the
+		// enrollment credential (x-governor-token OR Bearer); it never
+		// verifies anyone (capability-split law). problem+json errors per
+		// http-citizenship.
+		if (url.pathname.startsWith("/federation/")) {
+			if (req.method === "OPTIONS")
+				return new Response(null, {
+					status: 204,
+					headers: { allow: "GET, POST, OPTIONS" },
+				});
+			const fedAuthOk =
+				TOKEN.length === 0 ||
+				req.headers.get("x-governor-token") === TOKEN ||
+				(req.headers.get("authorization") ?? "") === `Bearer ${TOKEN}`;
+			if (!fedAuthOk)
+				return new Response(
+					JSON.stringify({
+						type: "about:blank",
+						title: "missing or invalid credentials",
+						status: 401,
+						detail:
+							"present the shared spoke credential via x-governor-token or Authorization: Bearer",
+						code: "store.auth_missing",
+					}),
+					{
+						status: 401,
+						headers: {
+							"content-type": "application/problem+json",
+							"www-authenticate": 'Bearer realm="store-server"',
+						},
+					},
+				);
+			if (url.pathname === "/federation/work-delta")
+				return handleWorkDelta(req);
+			if (url.pathname === "/federation/lane-view")
+				return handleLaneView(req, url);
+			return problemRes(
+				404,
+				"unknown federation surface",
+				`${url.pathname} is not a federation surface`,
+				"store.fed_not_found",
+			);
+		}
 		if (req.method !== "POST" || url.pathname !== "/rpc")
 			return new Response("not found", { status: 404 });
 		if (TOKEN && req.headers.get("x-governor-token") !== TOKEN)

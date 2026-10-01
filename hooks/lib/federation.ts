@@ -53,12 +53,40 @@ export function lastKnownPath(env: FederationEnv = {}): string {
 	return join(federationHome(env), "federation-last-known.json");
 }
 
+// W170 work-delta up-feed wire contract (shared spoke/hub): the graph
+// metadata tables the feed carries — work events (work_items, sessions,
+// claims) plus route_audit. Everything else stays spoke-local by law:
+// facts/locks (machine-private), aid/token usage (phase 3 aggregate
+// self-report, default OFF), api_keys/teams/auth_events/budget_state
+// (identity = hub-plane, never spoke-ward), knowledge (the W159 settle
+// path owns hub-ward transfer).
+export const WORK_DELTA_TABLES = [
+	"work_items",
+	"sessions",
+	"claims",
+	"route_audit",
+] as const;
+
+export type WorkDeltaTable = (typeof WORK_DELTA_TABLES)[number];
+
+/** One row image off the spoke's deltas log, sent verbatim hub-ward. */
+export interface WorkDeltaRow {
+	seq: number;
+	ts: number;
+	tbl: string;
+	op: string;
+	pk: string;
+	before: string | null;
+	after: string | null;
+}
+
 const BODY_CAP = 64 * 1024;
 
 class BodyTooBig extends Error {}
 
-/** streams-over-buffers: capped stream read — never res.text()/res.json(). */
-async function readCapped(
+/** streams-over-buffers: capped stream read — never res.text()/res.json().
+ *  Shared by the pull client (this file) and the W170 up-feed pair. */
+export async function readCapped(
 	res: Response,
 	cap = BODY_CAP,
 ): Promise<Record<string, unknown>> {
