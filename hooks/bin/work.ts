@@ -1035,6 +1035,8 @@ if (cmd === "add") {
 		);
 		if (w.exitCode === 3)
 			console.log(`${amber("●")} worktree kept (dirty) — ${wtDir}`);
+		else if (w.exitCode === 4)
+			console.log(`${amber("●")} worktree kept (live lane inside) — ${wtDir}`);
 	}
 } else if (cmd === "fail") {
 	const id = pos[0];

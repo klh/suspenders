@@ -31,6 +31,7 @@ import {
 import { hostname } from "node:os";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
+import { worktreeLive } from "../lib/worktree-live.ts";
 
 const argv = process.argv.slice(2);
 const MODE = argv[0];
@@ -187,37 +188,6 @@ function wtPathFromGit(b: string): string | null {
 		}
 	}
 	return null;
-}
-
-/** live claude/codex process with cwd inside the worktree — contract-free
- * liveness, independent of lanes.json registration state and DISPATCHED log
- * formats (gaps 2026-09-30: their dispatch-next registers lanes.json async
- * 22-55s after spawn and no longer writes DISPATCHED lines, so both
- * registration-derived guards race the dispatcher). */
-function worktreeLive(wt: string): boolean {
-	try {
-		const pids = runCap(["ps", "-axo", "pid=,comm="])
-			.out.split("\n")
-			.filter((l) => /claude|codex/.test(l))
-			.map((l) => Number.parseInt(l.trim(), 10));
-		if (pids.length === 0) return false;
-		const listing = runCap([
-			"lsof",
-			"-a",
-			"-p",
-			pids.join(","),
-			"-d",
-			"cwd",
-			"-Fpcn",
-		]).out;
-		let pid = 0;
-		for (const line of listing.split("\n")) {
-			if (line.startsWith("p")) pid = Number.parseInt(line.slice(1), 10) || pid;
-			else if (line.startsWith("n") && line.slice(1).startsWith(wt))
-				return true;
-		}
-	} catch {}
-	return false;
 }
 
 /** liveness = tracked pid alive OR any live claude/codex process with cwd in

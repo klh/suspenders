@@ -3,11 +3,13 @@
 // an isolated tree each: `.worktrees/<id>` on branch `suspenders/<id>`, with
 // gitignored build dirs symlinked in. Claim scope still governs edits (the
 // worktree lives inside the project); `work done` retires a clean worktree and
-// refuses to destroy a dirty one (work is never silently discarded — the
-// branch survives either way for the integration spine).
+// refuses to destroy a dirty one or one with a live lane inside (work is never
+// silently discarded — the branch survives either way for the integration
+// spine).
 //
 //   bun worktree.ts create <id>               # item must be CLAIMED/RUNNING
-//   bun worktree.ts retire <id> [--force]     # clean → remove; dirty → keep (exit 3)
+//   bun worktree.ts retire <id> [--force]     # clean+idle → remove; dirty → keep (exit 3);
+//                                             # clean but live lane inside → keep (exit 4)
 //   bun worktree.ts path <id>                 # print the worktree path
 //
 // The path is DERIVED (no schema change): .worktrees/<id> existing = the item
@@ -17,6 +19,7 @@ import { existsSync, readFileSync, appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { openGovernorDb } from "../lib/govdb.ts";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
+import { worktreeLive } from "../lib/worktree-live.ts";
 
 const [cmd, id, ...flags] = process.argv.slice(2);
 const FORCE = flags.includes("--force");
@@ -121,6 +124,18 @@ if (cmd === "retire") {
 			`${wtDir} is dirty — keeping it (work is never silently discarded; --force to override)`,
 		);
 		process.exit(3);
+	}
+	// W123 liveness guard: a CLEAN tree can still have a live lane inside —
+	// yanking its cwd kills the lane mid-teardown (same failure fleet-loop's
+	// ladder hit: gaps 2026-09-30). Any live claude/codex with cwd in the
+	// worktree keeps it; the branch survives and a later retire (or the
+	// merge ladder, post-merge) picks it up. --force overrides, like dirty.
+	if (!dirty && !FORCE && worktreeLive(wtDir)) {
+		emit("work.tree", id, { kept: "live-lane", path: wtDir, branch });
+		console.error(
+			`${wtDir} has a live lane inside — keeping it (liveness guard; --force to override)`,
+		);
+		process.exit(4);
 	}
 	const r = git(["worktree", "remove", ...(dirty ? ["--force"] : []), wtDir]);
 	if (r.code !== 0) die(`git worktree remove failed: ${r.out}`);
