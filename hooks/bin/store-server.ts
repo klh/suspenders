@@ -16,6 +16,7 @@
 //        (port: --port > GOVERNOR_STORE_PORT > 7794; 7791 belt, 7795
 //        knowledge-api, 7799 board — 7794 was free)
 import { openGovernorDb, type GovernorStore } from "../lib/govdb.ts";
+import { handleAuthRoutes } from "../lib/auth-server.ts";
 import { servicemon } from "../lib/servicemon.ts";
 
 const PORT =
@@ -74,6 +75,16 @@ const base = {
 					db.query("PRAGMA user_version").get() as { user_version: number }
 				).user_version,
 			});
+		// W149 — the identity surface rides this server (it owns governor.db):
+		// /auth/token, /auth/refresh, /auth/revoke, /auth/whoami. Serialized on
+		// the same connection chain as /rpc so issuance transactions never
+		// interleave with CLI statements.
+		if (url.pathname.startsWith("/auth/"))
+			return serial(() =>
+				handleAuthRoutes(req, url, {
+					store: db as unknown as GovernorStore,
+				}),
+			);
 		if (req.method !== "POST" || url.pathname !== "/rpc")
 			return new Response("not found", { status: 404 });
 		if (TOKEN && req.headers.get("x-governor-token") !== TOKEN)
