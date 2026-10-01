@@ -8,7 +8,7 @@ native** — two-dialect transport today, adapters as config for the long tail,
 
 | #   | child                                 | depends   | content                                                                                                                                                                    |
 | --- | ------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | W133 thin slice (IN FLIGHT)           | —         | two-dialect handlers, SSE tee + usage, ladder walk, ledger (:4101 shadow)                                                                                                  |
+| 1   | W133 thin slice (DONE)                | —         | two-dialect handlers, SSE tee + usage, ladder walk, ledger (:4101 shadow)                                                                                                  |
 | 2   | W139 adapters tier-1 + error taxonomy | W133      | ChatAdapter interface, openai-compat/anthropic/local, 7-class RouterError, tool_calls↔tool_use transform (W134 §5)                                                         |
 | 3   | W140 routing laws                     | W133      | x-belt-hint parser (W96 port), candidate table (bg-refreshed), must→503, flashx structurally absent, route_audit rows (W136)                                               |
 | 4   | W132 govdb router tables              | —         | keys/teams/budgets/usage + deltas triggers (suspenders side)                                                                                                               |
@@ -16,6 +16,11 @@ native** — two-dialect transport today, adapters as config for the long tail,
 | 6   | W142 knowledge aids                   | W133+W132 | metering FIRST, then preseed, cache-align; compress default-off (W137)                                                                                                     |
 | 7   | W143 speed pass + bench               | W139+W140 | pooling, O(1) budgets + async flush, warm-rate gate, 8-scenario bench incl. LiteLLM baseline (W135)                                                                        |
 | 8   | W144 shadow → cut                     | all       | :4101 shadow week vs :4100 (scenario-8 compare), acceptance = W89.1 claude -p e2e + p50<5ms/p95<15ms + byte-identity, then label swap; LiteLLM stays installed as fallback |
+
+Status at registration close (2026-10-01, W138): W133 thin slice **DONE** ·
+W132 govdb router tables **DONE** (govdb v8, e7be0fc) · W139 adapters + W140
+routing laws **CLAIMED**, in flight · W141 governance + W142 knowledge aids
+**READY**, deps met · W143 bench + W144 cut-over **QUEUED** behind W139/W140.
 
 ## Standing laws baked into every child
 
