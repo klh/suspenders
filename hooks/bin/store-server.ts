@@ -71,7 +71,16 @@ const base = {
 	port: PORT,
 	async fetch(req) {
 		const url = new URL(req.url);
-		if (url.pathname === "/health")
+		if (url.pathname === "/health") {
+			// W155 http-citizenship: OPTIONS → 204 + Allow; wrong method → 405.
+			const allow = "GET, HEAD, OPTIONS";
+			if (req.method === "OPTIONS")
+				return new Response(null, { status: 204, headers: { allow } });
+			if (req.method !== "GET" && req.method !== "HEAD")
+				return new Response("method not allowed", {
+					status: 405,
+					headers: { allow },
+				});
 			return Response.json({
 				ok: true,
 				store: "governor",
@@ -79,6 +88,7 @@ const base = {
 					db.query("PRAGMA user_version").get() as { user_version: number }
 				).user_version,
 			});
+		}
 		// W149 — the identity surface rides this server (it owns governor.db):
 		// /auth/token, /auth/refresh, /auth/revoke, /auth/whoami. Serialized on
 		// the same connection chain as /rpc so issuance transactions never
@@ -89,8 +99,17 @@ const base = {
 					store: db as unknown as GovernorStore,
 				}),
 			);
-		if (req.method !== "POST" || url.pathname !== "/rpc")
-			return new Response("not found", { status: 404 });
+		if (url.pathname === "/rpc") {
+			// W155 http-citizenship: known path, wrong method → 405 + Allow.
+			const allow = "POST, OPTIONS";
+			if (req.method === "OPTIONS")
+				return new Response(null, { status: 204, headers: { allow } });
+			if (req.method !== "POST")
+				return new Response("method not allowed", {
+					status: 405,
+					headers: { allow },
+				});
+		} else return new Response("not found", { status: 404 });
 		if (TOKEN && req.headers.get("x-governor-token") !== TOKEN)
 			return new Response("forbidden", { status: 403 });
 		const body = (await req.json()) as {

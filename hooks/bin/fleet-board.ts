@@ -9,14 +9,12 @@
 // its claims, inbox, lane state, and the event tail.
 
 import { db, PORT, BIND } from "../board/context.ts";
-import { json } from "../board/helpers.ts";
+import { withEtag } from "../board/helpers.ts";
+import { methodGuard } from "../board/guard.ts";
 import { projectList } from "../board/lanes.ts";
-import { board, claims, inbox } from "../board/data.ts";
-import { orchestrate } from "../board/orch.ts";
 import { tokenUsage } from "../lib/govdb.ts";
 import { scrub, servicemon } from "../lib/servicemon.ts";
 import { readBoardSettings } from "../lib/board-config.ts";
-import { hostname } from "node:os";
 import { handleData } from "../board/routes-data.ts";
 import { handleUsage } from "../board/routes-usage.ts";
 import { handleDrawer } from "../board/routes-drawer.ts";
@@ -65,9 +63,14 @@ const base = {
 	hostname: BIND,
 	async fetch(req) {
 		const url = new URL(req.url);
+		// W155 http-citizenship: OPTIONS/405 method discipline before the
+		// chain; ETag/304 on the JSON feeds the chain returns (see
+		// docs/design/http-citizenship.md; both are unit-tested)
+		const g = methodGuard(req, url);
+		if (g) return g;
 		// W157: the original 30-route if-chain, order preserved, split into
 		// per-area handlers — first match wins exactly as before
-		for (const h of [
+		for (const base of [
 			handleData,
 			handleUsage,
 			handleDrawer,
@@ -76,8 +79,8 @@ const base = {
 			handleConsole,
 			handleMeta,
 		]) {
-			const r = await h(req, url);
-			if (r) return r;
+			const r = await base(req, url);
+			if (r) return withEtag(req, r);
 		}
 		return new Response("not found", { status: 404 });
 	},

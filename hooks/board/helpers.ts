@@ -1,15 +1,39 @@
-// hooks/board/helpers.ts — http response helpers: json(), writeGuard(), readJson() (W157 board split).
+// hooks/board/helpers.ts — http response helpers: json(), writeGuard(), readJson(), withEtag() (W157 board split, W155 citizenship).
 // Pieces moved verbatim from bin/fleet-board.ts; exports widened so
 // sibling modules and the route modules import them.
 
 import { BIND } from "./context.ts";
-import { sessions, board, payload } from "./data.ts";
+import { etagOf, matchesEtag } from "../lib/servicemon.ts";
 
 export function json(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data), {
 		status,
 		headers: { "content-type": "application/json" },
 	});
+}
+
+// W155 http-citizenship: strong content-hash ETag on GET-able JSON feeds;
+// If-None-Match hit → 304 with the ETag echo. Board feeds are bounded
+// size-capped payloads (each Response is built from a string at json()),
+// so the read here honors the streams law's bounded-buffer allowance.
+export async function withEtag(
+	req: Request,
+	resp: Response,
+): Promise<Response> {
+	if (
+		req.method !== "GET" ||
+		resp.status !== 200 ||
+		!(resp.headers.get("content-type") ?? "").startsWith("application/json")
+	)
+		return resp;
+	const body = await resp.text();
+	const etag = etagOf(body);
+	const headers = new Headers(resp.headers);
+	headers.set("etag", etag);
+	headers.set("cache-control", "private, max-age=0, must-revalidate");
+	if (matchesEtag(req.headers.get("if-none-match"), etag))
+		return new Response(null, { status: 304, headers });
+	return new Response(body, { status: resp.status, headers });
 }
 
 // write endpoints are for the human at this board. Two paths:

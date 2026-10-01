@@ -1,21 +1,6 @@
 // hooks/board/routes-meta.ts — meta: /llms.txt (LLMS_TXT), / (the SPA page), 404 tail (W157 route module).
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
-import { CLI, db } from "./context.ts";
-import { json } from "./helpers.ts";
-import {
-	tasks,
-	activity,
-	sessions,
-	board,
-	claims,
-	events,
-	inbox,
-	llm,
-} from "./data.ts";
-import { orchestrate } from "./orch.ts";
-import { servicemon } from "../lib/servicemon.ts";
-import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "../bin/fleet-board-html.ts";
 
 export const LLMS_TXT = `# suspenders
@@ -69,6 +54,17 @@ belt's code specialist). If the endpoint is unreachable, advice is marked
 unavailable and the fork stays open for the human; orchestrate answers 502
 and nothing registers. Nothing else on the board depends on it.
 
+## Protocol conventions
+
+All suspenders HTTP surfaces (board, store, buckle, belt) code to the fleet
+http-citizenship standard (docs/design/http-citizenship.md in the suspenders
+repo): correct status codes (405 + Allow on known paths, 409 conflicts,
+429 + Retry-After), RFC 9457 application/problem+json error bodies carrying
+the stable 'code' extension, ETag/304 conditional GETs on board feeds and
+/status snapshots, OPTIONS → 204 + Allow, and rate-limit trios (RateLimit-*
+and x-ratelimit-*) on authenticated APIs. /auth/* answers Cache-Control:
+no-store. Error bodies never leak internals.
+
 ## Companion repos
 
 - suspenders (this repo): https://github.com/klh/suspenders
@@ -78,7 +74,7 @@ and nothing registers. Nothing else on the board depends on it.
 a Threads thing — http://www.threads.dk`;
 
 export async function handleMeta(
-	req: Request,
+	_req: Request,
 	url: URL,
 ): Promise<Response | null> {
 	if (url.pathname === "/llms.txt")
@@ -98,5 +94,4 @@ export async function handleMeta(
 			},
 		});
 	return new Response("not found", { status: 404 });
-	return null;
 }

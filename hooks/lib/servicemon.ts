@@ -92,6 +92,21 @@ const parseRefreshS = (): number => {
 const esc = (v: string): string =>
 	v.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n");
 
+// W155 http-citizenship: strong content-hash ETag helpers, shared by every
+// surface that serves GET-able snapshots (/status, board JSON feeds).
+export const etagOf = (body: string): string =>
+	`"${new Bun.CryptoHasher("sha1").update(body).digest("hex")}"`;
+
+// If-None-Match: `*`, one tag, or a comma list (RFC 9110 §13.1.2); weak
+// comparison — a W/ prefix still matches the strong tag we serve.
+export const matchesEtag = (inm: string | null, etag: string): boolean =>
+	inm !== null &&
+	(inm.trim() === "*" ||
+		inm
+			.split(",")
+			.map((t) => t.trim().replace(/^W\//, ""))
+			.includes(etag));
+
 const labelKey = (labels?: Labels): string =>
 	labels
 		? Object.keys(labels)
@@ -274,19 +289,24 @@ export function servicemon(opts: ServicemonOptions): Servicemon {
 		};
 	};
 
-	const statusResponse = (): Response => {
+	// W155 http-citizenship: ETag on the snapshot; If-None-Match hit → 304
+	// with the ETag echo (docs/design/http-citizenship.md).
+	const statusResponse = (req: Request): Response => {
 		if (
 			refreshS <= 0 ||
 			!statusCache ||
 			Date.now() - statusCache.at >= refreshS * 1000
 		)
 			statusCache = { at: Date.now(), body: JSON.stringify(snapshot()) };
-		return new Response(statusCache.body, {
-			headers: {
-				"content-type": "application/json; charset=utf-8",
-				"cache-control": "no-store",
-			},
-		});
+		const etag = etagOf(statusCache.body);
+		const headers: Record<string, string> = {
+			"content-type": "application/json; charset=utf-8",
+			"cache-control": "no-store",
+			etag,
+		};
+		if (matchesEtag(req.headers.get("if-none-match"), etag))
+			return new Response(null, { status: 304, headers });
+		return new Response(statusCache.body, { headers });
 	};
 
 	const metricsResponse = (): Response =>
@@ -306,12 +326,29 @@ export function servicemon(opts: ServicemonOptions): Servicemon {
 		let resp: Response;
 		let threw = false;
 		if (path === "/status" || path === "/metrics") {
-			if (path === "/metrics" && opts.onMetrics) {
-				try {
-					opts.onMetrics();
-				} catch {}
+			// W155 http-citizenship: OPTIONS → 204 + Allow; known path with a
+			// wrong method → 405 + Allow; HEAD answers the GET headers, no body.
+			const allow = "GET, HEAD, OPTIONS";
+			if (req.method === "OPTIONS")
+				resp = new Response(null, { status: 204, headers: { allow } });
+			else if (req.method !== "GET" && req.method !== "HEAD")
+				resp = new Response("method not allowed", {
+					status: 405,
+					headers: { allow },
+				});
+			else {
+				if (path === "/metrics" && opts.onMetrics) {
+					try {
+						opts.onMetrics();
+					} catch {}
+				}
+				resp = path === "/status" ? statusResponse(req) : metricsResponse();
+				if (req.method === "HEAD")
+					resp = new Response(null, {
+						status: resp.status,
+						headers: resp.headers,
+					});
 			}
-			resp = path === "/status" ? statusResponse() : metricsResponse();
 		} else {
 			try {
 				resp = await inner(req);
