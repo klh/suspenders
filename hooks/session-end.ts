@@ -17,7 +17,7 @@ if (input.session_id) {
 		.query("UPDATE sessions SET state = 'CLOSED', hb = ? WHERE sid = ?")
 		.run(Date.now(), input.session_id);
 	try {
-		const r = settleSession(input.session_id);
+		const r = await settleSession(input.session_id);
 		if (r.queueMarked > 0 || r.rowsBackfilled > 0)
 			console.error(
 				`[settle] ${r.sid.slice(0, 8)} domain=${r.domain} queue=${r.queueMarked} rows=${r.rowsBackfilled}`,

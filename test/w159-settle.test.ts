@@ -12,7 +12,7 @@ import type { Database } from "bun:sqlite";
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-w159-"));
 process.env.HOME = HOME;
 // query bust: this file's own govdb instance, bound to the temp HOME
-const { openGovernorDb } = await import(
+const { openGovernorDb, openKnowledgeDb } = await import(
 	`../hooks/lib/govdb.ts?w159=${encodeURIComponent(HOME)}`
 );
 const { settleSessionWith, sessionDomain, recordSessionDomain } = await import(
@@ -29,7 +29,7 @@ function freshDb(): Database {
 }
 
 function queueRow(sid: string, hubEligible: 0 | 1 | null = null): number {
-	const db = openGovernorDb();
+	const db = openKnowledgeDb();
 	const r = db
 		.query(
 			"INSERT INTO knowledge_queue (ts, source, payload, state, attempts, origin_sid, hub_eligible) VALUES (?, 'test', 'payload text', 'queued', 0, ?, ?)",
@@ -39,14 +39,14 @@ function queueRow(sid: string, hubEligible: 0 | 1 | null = null): number {
 }
 
 function knowledgeRow(sid: string): void {
-	const db = openGovernorDb();
+	const db = openKnowledgeDb();
 	db.query(
 		"INSERT INTO knowledge (ts, topic, fact, confidence, state, origin_sid) VALUES (?, 't', 'f', 0.5, 'candidate', ?)",
 	).run(Date.now(), sid);
 }
 
 function flags(table: "knowledge_queue" | "knowledge", sid: string): number[] {
-	const db = openGovernorDb();
+	const db = openKnowledgeDb();
 	return (
 		db
 			.query(
@@ -102,13 +102,13 @@ test("recordSessionDomain: sticky most-restrictive; hub+private=private", () => 
 	expect(recordSessionDomain(db, "ghost", "hub").recorded).toBe(false);
 });
 
-test("hub session settles hub-eligible; private settles local-only", () => {
+test("hub session settles hub-eligible; private settles local-only", async () => {
 	const db = freshDb();
 	seedSession("s-hub2", "hub");
 	queueRow("s-hub2");
 	queueRow("s-hub2");
 	knowledgeRow("s-hub2");
-	const r = settleSessionWith(db, "s-hub2");
+	const r = await settleSessionWith(db, "s-hub2");
 	expect(r.domain).toBe("hub");
 	expect(r.queueMarked).toBe(2);
 	expect(r.rowsBackfilled).toBe(1);
@@ -118,47 +118,47 @@ test("hub session settles hub-eligible; private settles local-only", () => {
 	seedSession("s-p2");
 	queueRow("s-p2");
 	knowledgeRow("s-p2");
-	const rp = settleSessionWith(db, "s-p2");
+	const rp = await settleSessionWith(db, "s-p2");
 	expect(rp.domain).toBe("private");
 	expect(rp.queueMarked).toBe(1);
 	expect(flags("knowledge_queue", "s-p2")).toEqual([0]);
 	expect(flags("knowledge", "s-p2")).toEqual([0]);
 });
 
-test("mixed session (hub then private) takes most-restrictive: private", () => {
+test("mixed session (hub then private) takes most-restrictive: private", async () => {
 	const db = freshDb();
 	seedSession("s-mixed");
 	recordSessionDomain(db, "s-mixed", "hub");
 	recordSessionDomain(db, "s-mixed", "private");
 	queueRow("s-mixed");
 	knowledgeRow("s-mixed");
-	const r = settleSessionWith(db, "s-mixed");
+	const r = await settleSessionWith(db, "s-mixed");
 	expect(r.domain).toBe("private");
 	expect(flags("knowledge_queue", "s-mixed")).toEqual([0]);
 	expect(flags("knowledge", "s-mixed")).toEqual([0]);
 });
 
-test("settle is idempotent and never re-flips settled rows", () => {
+test("settle is idempotent and never re-flips settled rows", async () => {
 	const db = freshDb();
 	seedSession("s-idem", "hub");
 	queueRow("s-idem");
 	knowledgeRow("s-idem");
-	expect(settleSessionWith(db, "s-idem").queueMarked).toBe(1);
+	expect((await settleSessionWith(db, "s-idem")).queueMarked).toBe(1);
 	// even if the session domain changes later, settled rows keep their flag
 	db.query("UPDATE sessions SET data_domain = 'private' WHERE sid = ?").run(
 		"s-idem",
 	);
-	const r2 = settleSessionWith(db, "s-idem");
+	const r2 = await settleSessionWith(db, "s-idem");
 	expect(r2.queueMarked).toBe(0);
 	expect(r2.rowsBackfilled).toBe(0);
 	expect(flags("knowledge_queue", "s-idem")).toEqual([1]);
 });
 
-test("emits a knowledge.settled event for observability", () => {
+test("emits a knowledge.settled event for observability", async () => {
 	const db = freshDb();
 	seedSession("s-evt", "hub");
 	queueRow("s-evt");
-	settleSessionWith(db, "s-evt");
+	await settleSessionWith(db, "s-evt");
 	const evt = db
 		.query(
 			"SELECT payload FROM events WHERE kind = 'knowledge.settled' ORDER BY id DESC LIMIT 1",
@@ -176,11 +176,12 @@ test("emits a knowledge.settled event for observability", () => {
 });
 
 test("distill-time inheritance: claim surfaces hub_eligible, upsert stamps it", async () => {
-	const db = freshDb();
+	freshDb();
+	const kb = openKnowledgeDb();
 	const { SqliteKnowledgeStore } = await import(
 		`../hooks/lib/knowledge-ports.ts?w159=${encodeURIComponent(HOME)}`
 	);
-	const store = new SqliteKnowledgeStore(db);
+	const store = new SqliteKnowledgeStore(kb);
 	const settled = queueRow("s-inh", 1);
 	const unsettled = queueRow("s-inh", null);
 	const jobSettled = await store.claim(settled);
@@ -199,7 +200,7 @@ test("distill-time inheritance: claim surfaces hub_eligible, upsert stamps it", 
 		hubEligible: jobSettled?.hubEligible ?? null,
 		supersedesId: null,
 	});
-	const row = db
+	const row = kb
 		.query("SELECT hub_eligible FROM knowledge WHERE id = ?")
 		.get(id) as { hub_eligible: number | null };
 	expect(row.hub_eligible).toBe(1);

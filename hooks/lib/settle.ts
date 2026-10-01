@@ -13,7 +13,11 @@
 // session's knowledge_queue + knowledge rows (NULL = unsettled); actual
 // hub-ward transfer rides the existing feed filtering hub only.
 import type { Database } from "bun:sqlite";
-import { openGovernorDb } from "./govdb.ts";
+import { openGovernorDb, openKnowledgeDb } from "./govdb.ts";
+import {
+	SqliteKnowledgeStore,
+	type KnowledgeStore,
+} from "./knowledge-ports.ts";
 import { restrictiveDomain, type DataDomain } from "./provenance.ts";
 
 export interface SettleResult {
@@ -62,37 +66,25 @@ export function recordSessionDomain(
 
 /** The settle core, db-injected for tests. Idempotent: already-settled rows
  *  (hub_eligible IS NOT NULL) are never re-flipped by a later pass. */
-export function settleSessionWith(
+export async function settleSessionWith(
 	db: Database,
 	sid: string,
-	opts: { emit?: boolean } = {},
-): SettleResult {
+	opts: { store?: KnowledgeStore; emit?: boolean } = {},
+): Promise<SettleResult> {
 	const domain = sessionDomain(db, sid);
 	const flag = domain === "hub" ? 1 : 0;
-	// count first, then stamp: bun:sqlite `changes` is inflated on
-	// trigger-covered tables (deltas/FTS writes count too), so the honest
-	// number comes from a COUNT of exactly the rows the UPDATE targets.
-	const qN = db
-		.query(
-			"SELECT COUNT(*) AS n FROM knowledge_queue WHERE origin_sid = ? AND hub_eligible IS NULL",
-		)
-		.get(sid) as { n: number };
-	const kN = db
-		.query(
-			"SELECT COUNT(*) AS n FROM knowledge WHERE origin_sid = ? AND hub_eligible IS NULL",
-		)
-		.get(sid) as { n: number };
-	db.query(
-		"UPDATE knowledge_queue SET hub_eligible = ? WHERE origin_sid = ? AND hub_eligible IS NULL",
-	).run(flag, sid);
-	db.query(
-		"UPDATE knowledge SET hub_eligible = ? WHERE origin_sid = ? AND hub_eligible IS NULL",
-	).run(flag, sid);
+	// W167: the stamps ride the W91 knowledge STORE PORT — the seam runs on
+	// knowledge.db (W166 split), never the governor handle. Its counts are
+	// pre-SELECTs: bun:sqlite `changes` is inflated on trigger-covered
+	// tables (deltas/FTS writes count too), so COUNT first, then stamp.
+	const { queueMarked, rowsBackfilled } = await (
+		opts.store ?? new SqliteKnowledgeStore(openKnowledgeDb(), db)
+	).settleHubEligible(sid, flag);
 	const result: SettleResult = {
 		sid,
 		domain,
-		queueMarked: qN.n,
-		rowsBackfilled: kN.n,
+		queueMarked,
+		rowsBackfilled,
 	};
 	if (opts.emit !== false) {
 		db.query(
@@ -103,11 +95,15 @@ export function settleSessionWith(
 }
 
 /** One settle pass for a session — the session-end phase. */
-export function settleSession(sid: string): SettleResult {
-	const db = openGovernorDb();
+export async function settleSession(sid: string): Promise<SettleResult> {
+	const gov = openGovernorDb();
+	const kb = openKnowledgeDb();
 	try {
-		return settleSessionWith(db, sid);
+		return await settleSessionWith(gov, sid, {
+			store: new SqliteKnowledgeStore(kb, gov),
+		});
 	} finally {
-		db.close();
+		kb.close();
+		gov.close();
 	}
 }
