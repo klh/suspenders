@@ -26,6 +26,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
+import { laneEnv, spawnClaude } from "./lib/lane.ts";
 
 const argv = process.argv.slice(2);
 const val = (flag: string): string | undefined => {
@@ -163,9 +164,12 @@ export const composeBrief = (o: {
 	branch: string;
 	worktree: string;
 	capsule: Record<string, string> | null;
+	repo?: string;
+	aids?: string[];
+	extra?: string[];
 }): string => {
 	const parts = [
-		`You are lane "${o.sid}", Work Graph item ${o.item}, repo ${REPO}. English only.`,
+		`You are lane "${o.sid}", Work Graph item ${o.item}, repo ${o.repo ?? REPO}. English only.`,
 		``,
 		`MISSION (from work show):`,
 		o.showOut.replace(ANSI, "").trim(),
@@ -187,6 +191,16 @@ export const composeBrief = (o: {
 		``,
 		`Final: DONE <sha> | SPLIT ${o.item} | BLOCKED (after 3 honest attempts, tree restored).`,
 	];
+	// W146 interfaces: down = knowledge interfaces + aids placeholder for the
+	// child lane; extra = supervisor context lines appended verbatim.
+	if (o.aids?.length) {
+		parts.push(
+			``,
+			`AIDS (knowledge interfaces):`,
+			...o.aids.map((a) => `  - ${a}`),
+		);
+	}
+	if (o.extra?.length) parts.push(``, ...o.extra);
 	if (o.capsule) {
 		parts.push(
 			``,
@@ -197,7 +211,7 @@ export const composeBrief = (o: {
 	return parts.join("\n");
 };
 
-const sidOf = (item: string): string =>
+export const sidOf = (item: string): string =>
 	`autow${item.replace(/^W/, "").replace(/\./g, "")}`;
 
 /** one item → claim, worktree, brief, daemonized lane. Returns the summary
@@ -279,19 +293,8 @@ const dispatchItem = (
 	const briefFile = `${FLEET}/brief-${sid}.md`;
 	mkdirSync(FLEET, { recursive: true });
 	writeFileSync(briefFile, brief);
-	// env: belt routing rides into the lane (the launchd plist carries
-	// ANTHROPIC_BASE_URL/AUTH_TOKEN); model overrides must NOT — a GLM-routed
-	// shell hung a lane at model init (W57), so the whole family is scrubbed.
-	const env: Record<string, string> = { ...process.env };
-	delete env.ANTHROPIC_MODEL;
-	delete env.ANTHROPIC_SMALL_FAST_MODEL;
-	delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-	delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-	delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-	if (NO_BELT) {
-		delete env.ANTHROPIC_BASE_URL;
-		delete env.ANTHROPIC_AUTH_TOKEN;
-	}
+	// env + spawn recipe shared with supervise.ts via scripts/lib/lane.ts
+	const env = laneEnv({ ...process.env }, NO_BELT);
 	env.SUSPENDERS_SID = sid;
 	const bin = Bun.which("claude");
 	if (!bin) {
@@ -299,18 +302,14 @@ const dispatchItem = (
 		return null;
 	}
 	const prompt = `Read ${briefFile} and execute it fully.`;
-	const sq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
 	const laneLog = `${FLEET}/lane-${sid}.log`;
-	// sh -c exec + stdin detach: the intermediary survives parent exit (the
-	// dns-sd lesson); the log file is the board's live-tail surface.
-	const proc = Bun.spawn(
-		[
-			"/bin/sh",
-			"-c",
-			`exec ${sq(bin)} -p ${sq(prompt)} --allowedTools 'Bash(git:*) Bash(bun:*) Bash(qlty:*) Bash(rg:*) Bash(eza:*) Bash(ls:*) Bash(mkdir:*) Bash(sd:*) Bash(sed:*) Bash(diff) Edit Write' --permission-mode acceptEdits < /dev/null >> ${sq(laneLog)} 2>&1`,
-		],
-		{ cwd: wt, env, stdout: "ignore", stderr: "ignore", stdin: "ignore" },
-	);
+	const proc = spawnClaude({
+		bin,
+		prompt,
+		cwd: wt,
+		logFile: laneLog,
+		env,
+	});
 	proc.unref();
 	const entry: Lane = {
 		sid,
