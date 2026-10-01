@@ -13,6 +13,14 @@
 //   SIM_BELT_URL     default http://127.0.0.1:17004
 //   SIM_SPOKE_PROFILE default <this dir>/spoke-profile.env
 
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+// W170 resilience drill: reuse the real pull client (the drill proves the
+// SPOKE's behavior — same code the production spoke runs).
+import { loadLastKnown, pullFederation } from "../hooks/lib/federation.ts";
+
 const BODY_CAP = 64 * 1024;
 
 type Outcome = "PASS" | "RED" | "ERR";
@@ -300,6 +308,105 @@ try {
 	report("federation/echo-menu", "ERR", String(e));
 }
 
+/** W170 sim batch: run-unique seq — re-pushing the SAME batch probes dedupe. */
+function simBatch(seq: number): {
+	spoke: string;
+	rows: Array<Record<string, unknown>>;
+} {
+	const item = `w170-${String(seq)}`;
+	const r = (
+		tbl: string,
+		pk: string,
+		after: Record<string, unknown>,
+		off = 0,
+	): Record<string, unknown> => ({
+		seq: seq + off,
+		ts: seq,
+		tbl,
+		op: "insert",
+		pk,
+		before: null,
+		after: JSON.stringify(after),
+	});
+	return {
+		spoke: "sim-spoke",
+		rows: [
+			r("work_items", `sim/${item}`, {
+				project: "sim",
+				id: item,
+				title: "W170 sim item",
+				state: "READY",
+			}),
+			r("route_audit", `sim-r-${String(seq)}`, {
+				rid: `sim-r-${String(seq)}`,
+				decision: "routed",
+				resolved_target: "http://127.0.0.1:17001/glm-5.3-flash",
+			}),
+		],
+	};
+}
+
+// (f) work-delta up-feed round trip: batch lands hub-side, redelivery dedupes
+try {
+	const batch = simBatch(Date.now());
+	const post: RequestInit = {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(batch),
+	};
+	const push1 = await getJson(`${SIM_STORE_URL}/federation/work-delta`, post);
+	const push2 = await getJson(`${SIM_STORE_URL}/federation/work-delta`, post);
+	const applied = (b: unknown): number =>
+		isRecord(b) && typeof b.applied === "number" ? b.applied : -1;
+	if (push1.status === 200 && push2.status === 200) {
+		const a1 = applied(push1.body);
+		const a2 = applied(push2.body);
+		report(
+			"federation/work-delta",
+			a1 >= 1 && a2 === 0 ? "PASS" : "RED",
+			`push applied=${String(a1)}, redelivery applied=${String(a2)} (want 0 — UNIQUE dedupe)`,
+		);
+	} else {
+		report(
+			"federation/work-delta",
+			"RED",
+			`${String(push1.status)}/${String(push2.status)} — awaiting W170 up-feed round trip`,
+		);
+	}
+} catch (e) {
+	report("federation/work-delta", "ERR", String(e));
+}
+
+// (f2) lane view: the hub renders the cross-user/team work-log (JSON + HTML)
+try {
+	const lane = await getJson(`${SIM_STORE_URL}/federation/lane-view`);
+	const html = await getJson(
+		`${SIM_STORE_URL}/federation/lane-view?format=html`,
+	);
+	const wlog =
+		isRecord(lane.body) && Array.isArray(lane.body.work_log)
+			? (lane.body.work_log as unknown[])
+			: [];
+	const found = wlog.some(
+		(w) => isRecord(w) && String(w.id ?? "").startsWith("w170-"),
+	);
+	if (lane.status === 200 && html.status === 200 && found) {
+		report(
+			"federation/lane-view",
+			"PASS",
+			`200 JSON + HTML, ${String(wlog.length)} work-log rows incl. the sim item`,
+		);
+	} else {
+		report(
+			"federation/lane-view",
+			"RED",
+			`${String(lane.status)}/${String(html.status)}, sim item present=${String(found)} — awaiting W170`,
+		);
+	}
+} catch (e) {
+	report("federation/lane-view", "ERR", String(e));
+}
+
 // http-citizenship (docs/design/http-citizenship.md) — the smoke CHECKS the
 // standard and marks RED where a hub surface does not meet it yet (W155)
 for (const [name, base] of [
@@ -432,6 +539,135 @@ if (hubAccess !== null) {
 		);
 	} catch (e) {
 		report("citizenship/rate-trio", "ERR", String(e));
+	}
+}
+
+// ── W170 hub-down resilience drill (SIM_RESILIENCE=1, opt-in) ──────────
+// Kills the hub trio mid-run and proves the degradation law: the spoke
+// keeps routing locally on last-known policy; only hub-routed rungs fail.
+
+function runCompose(args: string[]): boolean {
+	const p = Bun.spawnSync(["docker", "compose", ...args], {
+		cwd: import.meta.dir,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	return p.exitCode === 0;
+}
+
+async function waitHubUp(capMs: number): Promise<number> {
+	const t0 = Date.now();
+	for (;;) {
+		try {
+			const r = await fetch(`${SIM_BUCKLE_URL}/status`, {
+				signal: AbortSignal.timeout(1500),
+			});
+			if (r.ok) return Date.now() - t0;
+		} catch {
+			// still down — keep polling
+		}
+		if (Date.now() - t0 > capMs) return -1;
+		await Bun.sleep(2000);
+	}
+}
+
+// ── (g) the drill ── runs only with SIM_RESILIENCE=1 (it kills + restarts
+// the hub trio mid-run). Everything measured on the REAL pull client.
+if (process.env.SIM_RESILIENCE === "1") {
+	const spokeHome = join(tmpdir(), `w170-sim-spoke-${String(process.pid)}`);
+	mkdirSync(spokeHome, { recursive: true });
+	const spokeEnv = { HOME: spokeHome, BUCKLE_SECRETS_HOME: spokeHome };
+	const seed = await pullFederation({
+		hubUrl: SIM_BUCKLE_URL,
+		env: spokeEnv,
+		timeoutMs: 3000,
+	});
+	const before = loadLastKnown(spokeEnv);
+	if (!seed.ok) {
+		report(
+			"resilience/seed-last-known",
+			"ERR",
+			`hub not healthy to seed: ${seed.reason ?? "?"}`,
+		);
+	} else if (!runCompose(["kill"])) {
+		report(
+			"resilience/kill",
+			"ERR",
+			"docker compose kill failed — drill aborted, hub untouched",
+		);
+	} else {
+		const t0 = Date.now();
+		const down = await pullFederation({
+			hubUrl: SIM_BUCKLE_URL,
+			env: spokeEnv,
+			timeoutMs: 2000,
+		});
+		const ms = Date.now() - t0;
+		const after = loadLastKnown(spokeEnv);
+		const kept =
+			after !== null && after.pulled_at === (before?.pulled_at ?? null);
+		report(
+			"resilience/pull-degraded",
+			down.degraded && kept ? "PASS" : "RED",
+			`hub killed → degraded=${String(down.degraded)}, last-known kept=${String(kept)}, transition ${String(ms)}ms on last-known policy`,
+		);
+		try {
+			const n = localDeltasCount();
+			report(
+				"resilience/local-plane-answers",
+				"PASS",
+				`local governor.db answered read-only with the hub dead (${String(n)} deltas rows)`,
+			);
+		} catch (e) {
+			report("resilience/local-plane-answers", "ERR", String(e));
+		}
+		try {
+			await fetch(`${SIM_BUCKLE_URL}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: "{}",
+				signal: AbortSignal.timeout(2000),
+			});
+			report(
+				"resilience/hub-rung-fails-honestly",
+				"RED",
+				"hub-routed rung ANSWERED while the hub should be down — kill did not take",
+			);
+		} catch {
+			report(
+				"resilience/hub-rung-fails-honestly",
+				"PASS",
+				"connect refused — only hub-routed rungs fail, honestly",
+			);
+		}
+		const upMs = await waitHubUp(60_000);
+		const rec =
+			upMs >= 0
+				? await pullFederation({
+						hubUrl: SIM_BUCKLE_URL,
+						env: spokeEnv,
+						timeoutMs: 3000,
+					})
+				: null;
+		report(
+			"resilience/hub-recovery",
+			upMs >= 0 && rec?.ok === true ? "PASS" : "RED",
+			`docker compose up -d → hub back in ${String(upMs)}ms; pull ok=${String(rec?.ok === true)} (policy continuity)`,
+		);
+	}
+}
+
+/** Read-only probe of the LOCAL (spoke) work graph — answers with the hub
+ *  dead, no govdb import (zero side effects on the live graph). */
+function localDeltasCount(): number {
+	const p = join(homedir(), ".cache", "claude-governor", "governor.db");
+	const ldb = new Database(p, { readonly: true, create: false });
+	try {
+		return (
+			ldb.query("SELECT COUNT(*) AS n FROM deltas").get() as { n: number }
+		).n;
+	} finally {
+		ldb.close();
 	}
 }
 

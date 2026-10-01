@@ -121,7 +121,7 @@ const DOC_AID_ROLLUP_SQL = `CREATE TABLE IF NOT EXISTS aid_rollup (
 );`;
 
 describe("v8 migration shape", () => {
-	test("user_version 10 (v10 W166 knowledge split rode on top), all seven router tables present with the designed columns", () => {
+	test("user_version 11 (v11 W170 federation work-delta landing zone rode on top), all seven router tables present with the designed columns", () => {
 		const db = freshDb();
 		db.close();
 		openGovernorDb();
@@ -129,7 +129,7 @@ describe("v8 migration shape", () => {
 		const uv = (
 			d.query("PRAGMA user_version").get() as { user_version: number }
 		).user_version;
-		expect(uv).toBe(10);
+		expect(uv).toBe(11);
 		for (const [tbl, cols] of Object.entries(NEW_TABLES)) {
 			const have = (
 				d.query(`PRAGMA table_info(${tbl})`).all() as { name: string }[]
@@ -171,7 +171,7 @@ describe("v8 migration shape", () => {
 				)
 				.get() as { n: number }
 		).n;
-		expect(uv).toBe(10);
+		expect(uv).toBe(11);
 		expect(n).toBe(36);
 		const legacy = d
 			.query(

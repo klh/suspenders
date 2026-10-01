@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-w170-up-"));
+const REAL_HOME = process.env.HOME;
 process.env.HOME = HOME;
 // query bust: this file's own govdb instance, bound to the temp HOME
 const { openGovernorDb } = await import(
@@ -33,6 +34,9 @@ function freshDb(): Database {
 }
 
 afterAll(() => {
+	// restore the process HOME — this file repointed it for govdb isolation;
+	// leaking it contaminates every later test-file's HOME-derived paths.
+	process.env.HOME = REAL_HOME;
 	rmSync(HOME, { recursive: true, force: true });
 });
 

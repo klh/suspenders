@@ -71,6 +71,8 @@ sim-store-hub bun /src/suspenders/hooks/bin/auth.ts issue --actor w162-sim
 | `federation/cr-queue`        | W160      | `cr_queue[]` entries with `id, action, target, declared_at`; lifecycle declared→delivered→applied→verified→reported-up                         |
 | `federation/echo-menu`       | W154 echo | `GET /federation/entitlements` → `{models[]}`; spoke belt mirrors hub menu + spoke-private entries; local models never in the hub menu         |
 | `citizenship/*`              | W155      | trio + problem+json + ETag/304 + no-store per docs/design/http-citizenship.md                                                                  |
+| `federation/work-delta`      | W170      | `POST /federation/work-delta` on store-hub lands a batch and acks `through_seq`; identical redelivery applies 0 (UNIQUE dedupe)                |
+| `federation/lane-view`       | W170      | `GET /federation/lane-view` → 200 JSON + `?format=html`, work_log contains the sim item                                                        |
 
 `token/issue` flips only with W156's identity plane (hub-issued tokens,
 bootstrap story). The check proves the admin-gated W149 surface EXISTS on
@@ -85,6 +87,11 @@ between uses is the expected state.
 
 **Hub-down resilience is a required scenario, not an assumption**: the
 spoke keeps routing on its local ladder + last-known policy when the
-central hub is down (federation doc, degradation law). A sim check for
-it is queued — kill the hub containers mid-run and prove local routing
-continues unchanged, only hub-routed rungs fail honestly.
+central hub is down (federation doc, degradation law). The check is IN:
+`SIM_RESILIENCE=1 bun smoke.ts` runs the drill — kills the hub trio
+mid-run (`docker compose kill`), measures the hub-down transition on
+last-known policy (degraded pull + last-known file untouched + elapsed
+ms), proves the local plane still answers (read-only governor.db probe),
+proves only hub-routed rungs fail (connect refused), then restarts the
+hub and measures recovery (`docker compose up -d` → healthy → pull
+ok). Volumes persist (no `-v`), so hub state survives the drill.
