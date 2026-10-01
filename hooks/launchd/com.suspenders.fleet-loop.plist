@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DELIVERED NOT INSTALLED (W145) — activation is a coordinator step.
+  Activate: SUSPENDERS_PREFIX=~/.claude/hooks/suspenders ./install.sh --with-launchd
+  Belt LLM routing for spawned lanes: BELT_URL / BELT_TOKEN env at install time
+  (defaults: http://127.0.0.1:4100 / empty).
+-->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -11,11 +17,28 @@
 		<string>watch</string>
 		<string>--repo</string>
 		<string>__REPO__</string>
+		<string>--glob</string>
+		<string>suspenders/*</string>
 		<string>--ladder</string>
-		<string>__LADDER__</string>
+		<string>git merge --no-ff {branch}</string>
+		<string>--dispatch-cmd</string>
+		<string>__BUN__ scripts/dispatch-next.ts --target 3</string>
 		<string>--every</string>
 		<string>120</string>
 	</array>
+	<key>WorkingDirectory</key>
+	<string>__REPO__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>__HOME__</string>
+		<key>ANTHROPIC_BASE_URL</key>
+		<string>__BELT_URL__</string>
+		<key>ANTHROPIC_AUTH_TOKEN</key>
+		<string>__BELT_TOKEN__</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
