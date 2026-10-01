@@ -20,7 +20,8 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
-import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
+import { isDecisionKind, openGovernorDb, tokenUsage } from "../lib/govdb.ts";
+import { scrub, servicemon } from "../lib/servicemon.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "./fleet-board-html.ts";
 
@@ -2048,7 +2049,40 @@ function orchRegister(
 	return { status: 200, body: { ok: true, plan: pid, children } };
 }
 
-Bun.serve({
+// W125 — tokens_total for /metrics: the per-item token metrics (govdb
+// tokenUsage) aggregated per project. tokenUsage parses lane transcripts
+// (facts-cache keyed by mtime) — the aggregate refresh rides the /status TTL
+// window, NEVER per scrape: a 293-transcript fleet must not be re-read on
+// every poll. scrub keeps /Users paths out of the project labels.
+let tokAggAt = 0;
+function feedTokens(): void {
+	if (tokAggAt && sm.refreshS > 0 && Date.now() - tokAggAt < sm.refreshS * 1000)
+		return;
+	tokAggAt = Date.now();
+	for (const p of projectList()) {
+		const agg = { in: 0, out: 0, cacheR: 0, cacheC: 0 };
+		for (const t of tokenUsage(db, p, Date.now()).values()) {
+			if (!t) continue;
+			agg.in += t.in;
+			agg.out += t.out;
+			agg.cacheR += t.cacheR;
+			agg.cacheC += t.cacheC;
+		}
+		const proj = scrub(p);
+		sm.tokensSet("in", agg.in, { project: proj });
+		sm.tokensSet("out", agg.out, { project: proj });
+		sm.tokensSet("cache_read", agg.cacheR, { project: proj });
+		sm.tokensSet("cache_create", agg.cacheC, { project: scrub(p) });
+	}
+}
+
+const sm = servicemon({
+	service: "fleet-board",
+	port: PORT,
+	onMetrics: feedTokens,
+});
+
+const base = {
 	port: PORT,
 	hostname: BIND,
 	async fetch(req) {
@@ -2935,7 +2969,11 @@ Bun.serve({
 			});
 		return new Response("not found", { status: 404 });
 	},
-});
+};
+
+// W125 — the observability wrap: /status + /metrics ride the SAME fetch via
+// lib/servicemon.ts; the route body above stays untouched.
+Bun.serve(sm.wrapped(base));
 console.log(
 	`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise /api/comment /api/start /api/ship /api/orchestrate)`,
 );

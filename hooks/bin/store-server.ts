@@ -16,12 +16,18 @@
 //        (port: --port > GOVERNOR_STORE_PORT > 7794; 7791 belt, 7795
 //        knowledge-api, 7799 board — 7794 was free)
 import { openGovernorDb, type GovernorStore } from "../lib/govdb.ts";
+import { servicemon } from "../lib/servicemon.ts";
 
 const PORT =
 	Number(process.argv[process.argv.indexOf("--port") + 1] ?? "") ||
 	Number(process.env.GOVERNOR_STORE_PORT ?? 7794) ||
 	7794;
 const TOKEN = process.env.GOVERNOR_STORE_TOKEN ?? "";
+
+// W125 — shared /status + /metrics (lib/servicemon.ts). /health stays for
+// compat. tokens_total is NOT served here: the store sees no token usage, and
+// omitting the family honestly beats faking zeros.
+const sm = servicemon({ service: "store-server", port: PORT });
 
 // one connection for the whole server; /rpc requests serialize on it. A SECOND
 // connection serves tagged transaction statements: WAL keeps outside reads
@@ -55,7 +61,7 @@ const exec = (
 	};
 };
 
-Bun.serve({
+const base = {
 	hostname: "127.0.0.1",
 	port: PORT,
 	async fetch(req) {
@@ -145,7 +151,11 @@ Bun.serve({
 			);
 		});
 	},
-});
+};
+
+// W125 — the observability wrap: /status + /metrics ride the SAME fetch via
+// lib/servicemon.ts; the route body above stays untouched.
+Bun.serve(sm.wrapped(base));
 
 console.log(
 	`governor store on 127.0.0.1:${PORT} (${TOKEN ? "token" : "open, loopback-only"})`,

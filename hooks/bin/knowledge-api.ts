@@ -4,6 +4,7 @@ import {
 	withTrust,
 	KNOWLEDGE_PRECEDENCE,
 } from "../lib/knowledge.ts";
+import { servicemon } from "../lib/servicemon.ts";
 // knowledge-api.ts — W91 #9b: the knowledge port's HTTP face. The SAME store
 // handlers, second transport: a consumer on another machine calls
 // http://<knowledge-api>/search instead of importing the lib. Thin by design
@@ -36,7 +37,12 @@ const str = (v: unknown): string | null =>
 // resolution root for source_ref hashing (trust markers) + /curate doc scans
 const API_ROOT = process.env.KNOWLEDGE_REPO_ROOT ?? process.cwd();
 
-Bun.serve({
+// W125 — shared /status + /metrics (lib/servicemon.ts). No token dimension on
+// this service: search/enqueue never see usage, so tokens_total is omitted
+// honestly rather than served as fake zeros.
+const sm = servicemon({ service: "knowledge-api", port });
+
+const base = {
 	port,
 	// remote manners (#9): never assume co-location — every route is one port
 	// call, no chatty multi-round-trip handlers
@@ -135,5 +141,9 @@ Bun.serve({
 			return json({ error: e instanceof Error ? e.message : String(e) }, 500);
 		}
 	},
-});
+};
+
+// W125 — the observability wrap: /status + /metrics ride the SAME fetch via
+// lib/servicemon.ts; the route body above stays untouched.
+Bun.serve(sm.wrapped(base));
 console.error(`suspenders-knowledge-api: port ${port}`);
