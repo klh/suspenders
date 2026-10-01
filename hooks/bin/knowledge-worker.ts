@@ -31,6 +31,7 @@ import {
 	docForRef,
 	loadDocs,
 	loadRootDocs,
+	pointerFromText,
 	redactSecrets,
 	substitutionCheck,
 } from "../lib/knowledge.ts";
@@ -168,7 +169,8 @@ function gateScan(
 	const own = docForRef(root, codeOrigin);
 	const v = substitutionCheck(it.fact, own ? [...docs, own] : docs);
 	if (!v.covered) {
-		// not doc-covered: honor a model-declared pointer ref when resolvable
+		// not doc-covered: honor a model-declared pointer ref when resolvable —
+		// kept verbatim, never rewritten by the mechanical layer (W112 test)
 		if (it.sourceRef) {
 			const d = docForRef(root, it.sourceRef);
 			if (d)
@@ -178,6 +180,13 @@ function gateScan(
 					sourceHash: sha256Hex(d.text),
 				};
 		}
+		// W112 mechanical fallback: the model left source_ref empty (or named a
+		// file that does not resolve) — extract doc paths from the fact text
+		// and anchor to the first that EXISTS under DOCS_ROOT; hash = the file
+		// content. Nothing resolves → the codeOrigin default below keeps the
+		// trust marker honest.
+		const p = pointerFromText(it.fact, root);
+		if (p) return { fact: it.fact, sourceRef: p.ref, sourceHash: p.hash };
 		return { fact: it.fact, sourceRef: codeOrigin, sourceHash: fallbackHash };
 	}
 	if (!v.residue)

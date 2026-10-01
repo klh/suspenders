@@ -521,3 +521,54 @@ export function docForRef(
 	}
 	return null;
 }
+
+// ─── W112 mechanical pointer fallback ───
+// W113 (5b6a8c5): injection value rides file-level pointers; the distill model
+// still never emits source_ref (W108). So after distill, the worker extracts
+// path-like tokens from the fact text itself and anchors the row to the first
+// one that exists under KNOWLEDGE_DOCS_ROOT — no model judgment involved.
+
+// path-like token: word/dot/slash/hyphen chars ending in a code/doc extension
+const DOC_PATH_RE = /[\w./-]+\.(?:md|mdx|ts|tsx|json|toml)/g;
+
+// version-shaped segment ("v1.2", "1.2.1") — a lookalike, never a real
+// directory or file name in these repos
+const VERSION_SEGMENT_RE = /^v?\d+(\.\d+)+$/;
+
+// extract candidate repo-relative doc paths from prose. Order-stable, deduped.
+// Lookalikes rejected: absolute paths and URL remainders (leading "/" or
+// "//" — the scheme's ":" is outside the char class, so "https://host/x.md"
+// matches as "//host/x.md"), and version-shaped segments ("v1.2.md").
+// Existence is NOT checked here — see pointerFromText.
+export function extractDocPaths(text: string): string[] {
+	const out: string[] = [];
+	for (const m of text.matchAll(DOC_PATH_RE)) {
+		const tok = m[0];
+		if (tok.startsWith("/") || tok.includes("//")) continue;
+		const stem = tok.replace(/\.(?:md|mdx|ts|tsx|json|toml)$/, "");
+		if (stem.split("/").some((s) => VERSION_SEGMENT_RE.test(s))) continue;
+		if (!out.includes(tok)) out.push(tok);
+	}
+	return out;
+}
+
+// first extracted path that EXISTS under root → { ref, hash of the FILE
+// CONTENT } (pointer rows hash the referenced doc, same shape as the W103
+// substitution conversion). Nothing resolves → null — the caller leaves
+// source_ref empty so the trust marker stays honest.
+export function pointerFromText(
+	text: string,
+	root: string,
+): { ref: string; hash: string } | null {
+	for (const ref of extractDocPaths(text)) {
+		try {
+			return {
+				ref,
+				hash: createHash("sha256")
+					.update(readFileSync(join(root, ref), "utf8"))
+					.digest("hex"),
+			};
+		} catch {} // absent/unreadable — try the next candidate
+	}
+	return null;
+}

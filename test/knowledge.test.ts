@@ -94,6 +94,12 @@ const DOC_TEXT =
 	"Fleet knowledge rows must never restate what a single file already teaches. The substitution contract converts doc-covered facts to pointer rows and keeps the non-obvious residue only.";
 writeFileSync(join(REPO, DOC_REL), DOC_TEXT);
 
+// W112 fixture: a second doc a MODEL-declared source_ref points at
+const MODEL_REF_REL = "docs/model-ref.md";
+const MODEL_REF_TEXT =
+	"Model-declared source refs are honored verbatim by the mechanical gate.";
+writeFileSync(join(REPO, MODEL_REF_REL), MODEL_REF_TEXT);
+
 // the distill LLM stub: /v1/models names the model; /v1/chat/completions
 // returns a canned distillation so no real model is needed. W103: the stub
 // reads the payload and returns substitution-themed items for the W103 runs.
@@ -108,11 +114,13 @@ const stub = Bun.serve({
 				messages?: { content?: string }[];
 			} | null;
 			const text = body?.messages?.map((m) => m.content ?? "").join(" ") ?? "";
-			const items = text.includes("w103-substitution")
-				? w103Items()
-				: text.includes("w103-curate-bait")
-					? baitItem()
-					: distillArr(u.searchParams.get("echo") ?? "");
+			const items = text.includes("w112-")
+				? w112Items(text)
+				: text.includes("w103-substitution")
+					? w103Items()
+					: text.includes("w103-curate-bait")
+						? baitItem()
+						: distillArr(u.searchParams.get("echo") ?? "");
 			return Response.json({
 				choices: [{ message: { content: JSON.stringify(items) } }],
 			});
@@ -201,6 +209,38 @@ afterAll(() => {
 	rmSync(HOME, { recursive: true, force: true });
 	rmSync(REPO, { recursive: true, force: true });
 });
+
+// ─── W112 pointer-row fixtures ───
+// one payload shape, three model behaviors; the facts stay below the
+// substitution-coverage threshold (unique marker tokens) so each exercises
+// the NOT-covered branch of the gate. Discriminator: "w112-" in the request.
+function w112Items(text: string): unknown[] {
+	const fact = text.includes("w112-fallback")
+		? "Mechanical fallback quirk: facts naming docs/pointer-source.md anchor pointer rows only when the file exists. zq112fb"
+		: text.includes("w112-model-ref")
+			? "Model emitted refs stay verbatim even when the fact also names docs/pointer-source.md. zq112mr"
+			: "Absent path probe: names docs/absent-zq112.md that is not on disk. zq112ms";
+	const topic = text.includes("w112-fallback")
+		? "w112 mechanical fallback"
+		: text.includes("w112-model-ref")
+			? "w112 model ref verbatim"
+			: "w112 absent path honest";
+	const sourceRef = text.includes("w112-model-ref")
+		? "docs/model-ref.md"
+		: null;
+	return [
+		{
+			topic,
+			fact,
+			confidence: 0.9,
+			domain: "suspenders",
+			area: "gates",
+			origin_kind: "lesson",
+			origin_system: null,
+			source_ref: sourceRef,
+		},
+	];
+}
 
 describe("knowledge ingest pipeline", () => {
 	const PAYLOAD =
@@ -543,5 +583,82 @@ describe("W103 knowledge-api faces", () => {
 		} finally {
 			proc.kill();
 		}
+	});
+});
+
+// ─── W112 mechanical pointer fallback ───
+
+import { extractDocPaths, pointerFromText } from "../hooks/lib/knowledge.ts";
+
+describe("W112 extractDocPaths", () => {
+	test("extracts repo-relative paths from prose, deduped, order kept", () => {
+		expect(
+			extractDocPaths(
+				"gate lives in hooks/lib/knowledge.ts, then docs/w112-notes.md, then docs/w112-notes.md again",
+			),
+		).toEqual(["hooks/lib/knowledge.ts", "docs/w112-notes.md"]);
+	});
+
+	test("rejects lookalikes: URL remainders, absolute paths, versions", () => {
+		expect(
+			extractDocPaths("spec at https://example.com/guide.md ends"),
+		).toEqual([]);
+		expect(extractDocPaths("http://host/x.md too")).toEqual([]);
+		expect(extractDocPaths("shipped v1.2.md then 1.2.1.md")).toEqual([]);
+		expect(extractDocPaths("absolute /etc/nailgun.toml path")).toEqual([]);
+	});
+
+	test("pointerFromText: first EXISTING path wins, else null", () => {
+		expect(pointerFromText("only docs/absent-zz.md here", REPO)).toBeNull();
+		expect(pointerFromText("see docs/pointer-source.md", REPO)).toEqual({
+			ref: DOC_REL,
+			hash: sha256Hex(DOC_TEXT),
+		});
+	});
+});
+
+describe("W112 pointer rows through the worker", () => {
+	const enq = (marker: string) =>
+		run([
+			"knowledge-enqueue",
+			"--source",
+			"w112 verify",
+			"--payload",
+			`${marker}: probe`,
+		]);
+	const rowByTopic = (topic: string) =>
+		q<{ source_ref: string | null; source_hash: string | null }>(
+			`SELECT source_ref, source_hash FROM knowledge WHERE topic = '${topic}'`,
+		);
+
+	test("model-empty source_ref is filled mechanically, hash = doc content", async () => {
+		expect(enq("w112-fallback").code).toBe(0);
+		const w = await runWorker({ ...INGEST_ENV, KNOWLEDGE_DOCS_ROOT: REPO });
+		expect(w.err).toBe("");
+		expect(w.out).toContain("1 written, 0 skipped");
+		const rows = rowByTopic("w112 mechanical fallback");
+		expect(rows.length).toBe(1);
+		expect(rows[0].source_ref).toBe(DOC_REL);
+		expect(rows[0].source_hash).toBe(sha256Hex(DOC_TEXT));
+	});
+
+	test("model-declared source_ref is preserved untouched", async () => {
+		expect(enq("w112-model-ref").code).toBe(0);
+		const w = await runWorker({ ...INGEST_ENV, KNOWLEDGE_DOCS_ROOT: REPO });
+		expect(w.err).toBe("");
+		const rows = rowByTopic("w112 model ref verbatim");
+		expect(rows.length).toBe(1);
+		// the model's ref verbatim — NOT the doc the fact text names
+		expect(rows[0].source_ref).toBe(MODEL_REF_REL);
+		expect(rows[0].source_hash).toBe(sha256Hex(MODEL_REF_TEXT));
+	});
+
+	test("fact naming a missing file leaves source_ref empty (honest trust)", async () => {
+		expect(enq("w112-missing").code).toBe(0);
+		const w = await runWorker({ ...INGEST_ENV, KNOWLEDGE_DOCS_ROOT: REPO });
+		expect(w.err).toBe("");
+		const rows = rowByTopic("w112 absent path honest");
+		expect(rows.length).toBe(1);
+		expect(rows[0].source_ref).toBeNull();
 	});
 });

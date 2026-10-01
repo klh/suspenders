@@ -26,8 +26,10 @@ object per durable item:
 "origin_system": "<machine/site: mac-m5max | nas | azure | ... or null>",
 "supersedes_id": <row id the source text EXPLICITLY says this replaces or
 corrects, else null — extraction only, never your own judgment>,
-"source_ref": <ONLY for pointer rows: repo-relative path of the doc the
-fact extends without restating, else null — see the substitution contract>
+"source_ref": <repo-relative path of the doc the fact extends without
+restating, else null. REQUIRED — must not be null — whenever the payload
+names a doc path (a .md/.mdx/.ts/.tsx/.json/.toml file the fact extends
+or whose content it relies on): see the substitution contract>
 }
 
 ## No secrets — never
@@ -81,3 +83,26 @@ measured +45% tokens exactly there). Therefore:
   per-machine quirks, and decision rationale NOT in docs/.
 - The plane's mechanical check independently rejects or pointer-izes; your
   judgment is the first pass, not the only one.
+
+## Pointer-row example (strict)
+
+The exact output shape for one item whose payload names a doc path — every
+key, in this order, with "source_ref" REQUIRED and non-null:
+
+[
+{
+"topic": "gate chunk splice corruption",
+"fact": "Inserts over 40 lines corrupt at emission; chunks stay under 35 lines and each is parse-checked before splicing.",
+"confidence": 0.9,
+"domain": "suspenders",
+"area": "gates",
+"origin_kind": "lesson",
+"source_ref": "docs/emission-chunk-splice.md",
+"origin_system": null,
+"supersedes_id": null
+}
+]
+
+source_ref carries the path EXACTLY as the payload names it, repo-relative.
+Never invent a path the payload does not name — a wrong pointer is worse
+than none. Facts that name no doc emit "source_ref": null.
