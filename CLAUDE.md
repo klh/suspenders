@@ -27,8 +27,10 @@ Any .ts (or equivalent) that grows past **1500 lines MUST be decomposed**:
 split by responsibility, DRY the second duplicate, and run a codescan for
 shareable patterns (ast-grep) before adding code near the limit — one
 source of truth per pattern, helpers over copy-paste. Applies to every lane
-and every klh repo. Current offenders tracked on the graph (decomposition
-item); the on-write gate flags them.
+and every klh repo. The on-write gate **blocks** any .ts past 1500 lines
+(W157 2026-10-01: law enforced in hooks/gates/files.ts — the W157 backlog is
+cleared; fleet-board, coord, board-html and the fleet-board suite all live
+under the limit).
 
 ## Streams Over Buffers
 

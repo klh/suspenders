@@ -123,6 +123,19 @@ export function filesCheck(hook: HookInput): FilesExit {
 		}
 	}
 
+	// W157 (law.ts-1500-decompose): a .ts past 1500 lines is decompose
+	// territory. The W157 backlog (fleet-board / coord / board-html / its
+	// test) landed 2026-10-01, so this ships as a hard block — the brief's
+	// WARN grace phase collapsed into the flip in this same landing.
+	if (F.endsWith(".ts") && existsSync(F)) {
+		const n = readFileSync(F, "utf8").split("\n").length;
+		if (n > 1500)
+			return {
+				kind: "block",
+				err: `1500-LINE LIMIT: ${basename(F)} is ${n} lines (law.ts-1500-decompose, CLAUDE.md "1500-Line Hard Limit"). Decompose into single-purpose modules before the next write — pattern: hooks/board/, hooks/coord/, hooks/board-html/ (W157).\n`,
+			};
+	}
+
 	// The sanctioned WRITE itself is the lease's new ground truth (owner
 	// 2026-09-22: the governor integrates): refresh on every successful
 	// edit — not only when a formatter happened to change more — so the
