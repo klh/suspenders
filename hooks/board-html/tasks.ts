@@ -1,7 +1,6 @@
 // hooks/board-html/tasks.ts — tasks table + kanban + drawer (W157 client chunk).
 // String.raw matches the original single-template semantics; bun's
 // non-ASCII escaping in String.raw reproduces the served page bytes.
-// biome-ignore lint/complexity/noUselessStringRaw: byte-compat (W157)
 export const TASKS = String.raw`// --- 4: tasks table (Tasks tab, /api/tasks) + drawer (/api/task) ---
 // view state: session filter + column sort, persisted per browser (owner
 // asked: filter tasks by owning session, sortable table, fragments grouped)
@@ -242,7 +241,10 @@ function kanbanCard(t){
   if (t.model) html += '<span class="kmodel' + (t.locality === 'local' ? ' loc' : '') + '" title="model running this lane">' + esc(String(t.model)) + (t.locality ? ' (' + esc(String(t.locality)) + ')' : '') + '</span>';
   if (t.tail && t.tail.text) html += '<div class="ktail">' + esc(t.tail.text) + '</div>';
   if (startable) {
-    var pick = execPick[t.project + '\u0000' + t.id] || 'claude';
+    var pick = execPick[t.project + '\u0000' + t.id] || (function(){
+      for (var di = 0; di < execOpts.length; di++) if (String(execOpts[di].value || '').indexOf('glm-5.3-flash') >= 0) return execOpts[di].value;
+      return 'claude';
+    })();
     var opts = '';
     for (var xi = 0; xi < execOpts.length; xi++) {
       var xo = execOpts[xi];
