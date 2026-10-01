@@ -185,7 +185,12 @@ export function harvestUsage(
 		const body = text.slice(0, nl + 1);
 		const next = start + nl + 1;
 		const sid = basename(rel).replace(/\.jsonl$/, "");
-		const actor = actorOf.get(sid)?.actor ?? "unassigned";
+		// attribution fallback: the settings default_actor (config-over-code)
+		// — "unassigned" only when no default is configured
+		const actor =
+			actorOf.get(sid)?.actor ??
+			readBoardSettings().settings.default_actor ??
+			"unassigned";
 		for (const line of body.split("\n")) {
 			if (!line.includes('"type":"assistant"')) continue;
 			let o:
