@@ -27,6 +27,28 @@ class, no model names, no content) so global dashboards stay complete;
 default OFF, per-team opt-in alongside the routing policy. This is a
 boundary law, not an implementation gap.
 
+## Domain separation (data-egress law, owner directive 2026-10-01)
+
+Traffic and knowledge follow the same domain boundary, bidirectionally:
+
+1. **Spoke-private LLM traffic NEVER transits the hub.** Local-swarm and
+   BYO user-plane models are routed by the local belt directly to the
+   configured endpoints — the hub is not in the path, not proxied, not
+   even observed. Only hub-entitled models' traffic goes through
+   buckle-hub.
+2. **Knowledge follows provenance.** The session-end settle contributes
+   to the CENTRAL hub knowledge store only what was learned in
+   hub-routed sessions. Learnings from local/BYO-LLM sessions stay on
+   the spoke's local knowledge shelf — private repo code, personal
+   data, and trade secrets must not leak across domains through
+   knowledge write-back. Sessions touching both domains take the most
+   restrictive domain (private, period).
+3. Implementation shape: every session/lane carries a provenance label
+   (hub | private) derived from what it actually routed through; the
+   settle step sorts by label; the hub-ward feed filters on hub only.
+   W159 implements the sort; the W160 CR/policy channels never carry
+   private-domain content either.
+
 ## Degradation law
 
 Hub-unreachable ≠ down. Spokes keep: local ladder + last-known policy +
