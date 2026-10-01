@@ -13,6 +13,7 @@
 // /console/settings/apply (mtime guard + atomic write). Invalid config is
 // rejected with the parser's own error, verbatim.
 import type {
+	BoardSettings,
 	BoardSettingsState,
 	PolicyGatewayParsed,
 	ResolvedPolicy,
@@ -75,7 +76,7 @@ const tagLine = (tags: Record<string, string>): string =>
 
 // ─── top bar (the klh-stack shell, identical on every page) ───────────────
 export const topbar = (
-	active: "belt" | "suspenders" | "local" | "settings" | "",
+	active: "belt" | "suspenders" | "local" | "settings" | "onboarding" | "",
 	me?: ConsoleMe,
 ): string => {
 	const cur = (k: string): string =>
@@ -90,7 +91,7 @@ export const topbar = (
 	const dropInner = me
 		? `<div class="cavhead"><span class="cavbig">${esc(initial(actor))}</span><span><span class="cavname">${esc(actor)}</span><br><span class="cavsub">${tagLine(me.tags)}</span></span></div><div class="cavsec">switch actor (demo preview)</div>${sel()}<div class="cavnote">demo preview — stamps nothing live; live switching is a follow-up item</div>`
 		: `<div class="cavname" id="cavload">loading actor…</div>`;
-	return `<style>${SHELL_CSS}</style><nav id="cbar" aria-label="klh console"><a class="cw" href="/">klh·console</a><span class="cnavs"><a class="cnav"${cur("belt")} href="/console/belt">belt</a><a class="cnav"${cur("suspenders")} href="/">suspenders</a><a class="cnav"${cur("local")} href="/console/local">local</a></span><span class="cend"><a class="cgear"${cur("settings")} href="/console/settings" aria-label="console settings" title="settings">${GEAR}</a><span class="cavwrap"><button type="button" id="cavbtn" class="cavbtn" aria-haspopup="true" aria-expanded="false" aria-label="current actor">${esc(initial(actor))}</button><span id="cavdrop" class="cavdrop" hidden>${dropInner}</span></span></span></nav>`;
+	return `<style>${SHELL_CSS}</style><nav id="cbar" aria-label="klh console"><a class="cw" href="/">klh·console</a><span class="cnavs"><a class="cnav"${cur("belt")} href="/console/belt">belt</a><a class="cnav"${cur("suspenders")} href="/">suspenders</a><a class="cnav"${cur("local")} href="/console/local">local</a><a class="cnav"${cur("onboarding")} href="/console/onboarding">onboarding</a></span><span class="cend"><a class="cgear"${cur("settings")} href="/console/settings" aria-label="console settings" title="settings">${GEAR}</a><span class="cavwrap"><button type="button" id="cavbtn" class="cavbtn" aria-haspopup="true" aria-expanded="false" aria-label="current actor">${esc(initial(actor))}</button><span id="cavdrop" class="cavdrop" hidden>${dropInner}</span></span></span></nav>`;
 };
 
 // Dropdown behavior: click toggles, outside-click + Escape close (focus
@@ -133,7 +134,7 @@ export const TOPBAR_JS = TOPBAR_JS_A + TOPBAR_JS_B;
 // ─── page shell ───────────────────────────────────────────────────────────
 export const consolePage = (
 	title: string,
-	active: "belt" | "suspenders" | "local" | "settings" | "",
+	active: "belt" | "suspenders" | "local" | "settings" | "onboarding" | "",
 	body: string,
 	me?: ConsoleMe,
 ): string =>
@@ -385,6 +386,17 @@ export const settingsFormPage = (
 	);
 };
 
+export interface SettingsIndexArgs {
+	pol: {
+		path: string;
+		source: string;
+		gateway: PolicyGatewayParsed | null;
+		error: string | null;
+	} | null;
+	set: BoardSettingsState;
+	me?: ConsoleMe;
+}
+
 export const settingsIndexPage = (a: SettingsIndexArgs): string => {
 	const pol = a.pol;
 	const polCard = pol
@@ -407,14 +419,14 @@ export const settingsIndexPage = (a: SettingsIndexArgs): string => {
 		`<div class="panel"><h2>suspenders-board.json · ${esc(s.path)}${s.exists ? "" : " · not created yet"}</h2>` +
 		(s.error
 			? `<div class="errbox">current file does not parse: ${esc(s.error)}</div>`
-			: `<div class="knobs"><span class="kchip">STATUS_REFRESH_S: <b>${s.settings.status_refresh_s ?? "default (5s)"}</b></span><span class="kchip">harvest TTL: <b>${s.settings.harvest_ttl_s ? `${s.settings.harvest_ttl_s}s` : "default (300s)"}</b></span><span class="kchip">default actor: <b>${s.settings.default_actor ? esc(s.settings.default_actor) : "unset"}</b></span></div>`) +
+			: `<div class="knobs"><span class="kchip">STATUS_REFRESH_S: <b>${s.settings.status_refresh_s ?? "default (5s)"}</b></span><span class="kchip">harvest TTL: <b>${s.settings.harvest_ttl_s ? `${s.settings.harvest_ttl_s}s` : "default (300s)"}</b></span><span class="kchip">default actor: <b>${s.settings.default_actor ? esc(s.settings.default_actor) : "unset"}</b></span><span class="kchip">team: <b>${s.settings.team ? esc(s.settings.team) : "unset"}</b></span><span class="kchip">optimize for: <b>${s.settings.optimize_for ?? "unset"}</b></span><span class="kchip">primary work: <b>${s.settings.primary_work ?? "unset"}${s.settings.work_mix ? ` (${esc(s.settings.work_mix)})` : ""}</b></span></div>`) +
 		`</div>`;
 	return consolePage(
 		"SETTINGS",
 		"settings",
 		`<style>${PAGE_CSS}</style><p class="dimpl">One entry per feature, each with its real config surface. Writes are config-over-code: YAML/JSON in known paths, never code. Every write previews a diff and needs an explicit confirm; invalid config is rejected with the parser's error.</p>` +
 			polCard +
-			`<div class="panel"><h2>edit</h2><div class="btnrow"><a class="btn2" href="/console/settings/belt">belt · budgets</a> <a class="btn2" href="/console/settings/buckle">buckle · ladder + cooldowns</a> <a class="btn2" href="/console/settings/suspenders">suspenders · board</a></div></div>` +
+			`<div class="panel"><h2>edit</h2><div class="btnrow"><a class="btn2" href="/console/onboarding">team onboarding wizard</a> <a class="btn2" href="/console/settings/belt">belt · budgets</a> <a class="btn2" href="/console/settings/buckle">buckle · ladder + cooldowns</a> <a class="btn2" href="/console/settings/suspenders">suspenders · board</a></div></div>` +
 			setCard,
 		a.me,
 	);
@@ -451,4 +463,120 @@ export const previewPage = (a: PreviewArgs, me?: ConsoleMe): string => {
 			confirmForm,
 		me,
 	);
+};
+
+// ─── onboarding wizard (/console/onboarding) — W153, the board-v3-spec
+// "First-run setup wizard" (enterprise 5-step pattern). Steps 1–2 collect
+// persisted wizard state (the form posts to /console/onboarding/preview,
+// which rides the shared settings preview→apply flow); steps 3–5 are
+// read-only: detected machine, recommended installation, verification.
+export interface MachineAssessment {
+	platform: string;
+	arch: string;
+	chip: string;
+	cores: number;
+	totalMemGb: number;
+	freeMemGb: number;
+	accel: string;
+}
+
+export interface RecommendedModel {
+	name: string;
+	sizeGb: string;
+	note: string;
+}
+
+export interface RecommendedInstall {
+	runner: string;
+	models: RecommendedModel[];
+	ports: { name: string; port: number }[];
+	note: string;
+}
+
+export interface SetupCheck {
+	id: string;
+	label: string;
+	ok: boolean;
+	detail: string;
+	fix: string | null;
+}
+
+export interface OnboardingArgs {
+	set: BoardSettingsState;
+	machine: MachineAssessment;
+	recommend: RecommendedInstall;
+	checks: SetupCheck[];
+	gateway: HealthProbe[];
+}
+
+const WIZARD_CSS = `.steps{counter-reset:step}.step{background:#1c1b19;border:1px solid rgba(255,255,255,.10);border-radius:3px;padding:12px 14px;margin:0 0 14px}.step h2{margin:0 0 8px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#d8900f}.step h2 .sn{color:#98958e}.radios{display:flex;gap:8px;flex-wrap:wrap}.radios label{border:1px solid rgba(255,255,255,.14);border-radius:2px;padding:6px 12px;font-size:11.5px;cursor:pointer;display:flex;align-items:center;gap:6px}.radios label:has(input:checked){border-color:#d8900f}`;
+
+// steps 1–2: the persisted-preferences form. One submit → preview → confirm,
+// exactly the settings flow; empty string = unset (removes the knob).
+const wizardForm = (s: BoardSettings): string => {
+	const radio = (v: string, label: string): string =>
+		`<label><input type="radio" name="optimize_for" value="${v}"${s.optimize_for === v ? " checked" : ""}>${label}</label>`;
+	const opt = (v: string): string =>
+		`<option value="${v}"${s.primary_work === v ? " selected" : ""}>${v}</option>`;
+	return (
+		`<form method="post" action="/console/onboarding/preview">` +
+		`<div class="step"><h2><span class="sn">step 1</span> · optimize for</h2><div class="radios">${radio("cost", "cost · cheapest healthy target")}${radio("balanced", "balanced")}${radio("speed", "speed · premium tiers first")}</div></div>` +
+		`<div class="step"><h2><span class="sn">step 2</span> · team profile</h2><div class="formgrid">` +
+		`<div><label class="k" for="f_pw">primary work</label><select id="f_pw" name="primary_work">${["coding", "architecture", "product", "business", "finance", "mix"].map(opt).join("")}</select><div class="cfoot">what this team mainly runs the fleet for — "mix" requires the weights field</div></div>` +
+		`<div><label class="k" for="f_mix">work mix (weights)</label><input class="wide" id="f_mix" name="work_mix" value="${esc(s.work_mix ?? "")}" placeholder="coding:60,architecture:40"><div class="cfoot">name:weight pairs; required when primary work is "mix"</div></div>` +
+		`<div><label class="k" for="f_team">team</label><input class="wide" id="f_team" name="team" value="${esc(s.team ?? "")}"><div class="cfoot">team identity for this console (display-only today)</div></div>` +
+		`<div><label class="k" for="f_dept">department</label><input class="wide" id="f_dept" name="department" value="${esc(s.department ?? "")}"></div>` +
+		`<div><label class="k" for="f_actor">default actor</label><input class="wide" id="f_actor" name="default_actor" value="${esc(s.default_actor ?? "")}"><div class="cfoot">preselects the avatar's demo switch (same knob as the suspenders settings form)</div></div>` +
+		`</div></div>`
+	);
+};
+
+// step 3: detected hardware — honest, zero subprocesses, platform APIs only
+const machineCard = (m: MachineAssessment): string =>
+	`<div class="kvrow"><b>${esc(m.chip)}</b> · ${m.cores} cores</div><div class="kvrow">memory: <span class="num">${m.totalMemGb} GB total · ${m.freeMemGb} GB free</span></div><div class="kvrow">acceleration: ${esc(m.accel)}</div><div class="kvrow">platform: ${esc(m.platform)}/${esc(m.arch)}</div>`;
+
+// step 4: derived recommendation — advice, not a write (the note rides along)
+const recommendCard = (r: RecommendedInstall): string =>
+	`<p><b>${esc(r.runner)}</b></p><table class="ct"><thead><tr><th>model</th><th>download</th><th>note</th></tr></thead><tbody>` +
+	r.models
+		.map(
+			(mo) =>
+				`<tr><td>${esc(mo.name)}</td><td class="num">${esc(mo.sizeGb)}</td><td class="dim">${esc(mo.note)}</td></tr>`,
+		)
+		.join("") +
+	`</tbody></table>` +
+	`<div class="knobs">${r.ports.map((p) => `<span class="kchip">${esc(p.name)}: <b>:${p.port}</b></span>`).join("")}</div>` +
+	`<p class="cfoot">${esc(r.note)}</p>`;
+
+// step 5: verification — advisory wiring checks + live gateway health probes
+const verifyCard = (c: SetupCheck[], g: HealthProbe[]): string =>
+	`<table class="ct"><tbody>` +
+	c
+		.map(
+			(k) =>
+				`<tr><td><span class="${k.ok ? "ok" : "bad"}">${k.ok ? "OK" : "CHECK"}</span></td><td><b>${esc(k.label)}</b></td><td class="dim">${esc(k.detail)}</td></tr>`,
+		)
+		.join("") +
+	`</tbody></table><div class="tiles">${g.map((p) => `<div class="tile"><div class="tnum"><span class="${p.up ? "ok" : "bad"}">${p.up ? "UP" : "DOWN"}</span></div><div class="tkey">${esc(p.name)} :${p.port}</div><div class="tsub">${esc(p.detail)}</div></div>`).join("")}</div>` +
+	`<p class="cfoot">checks are advisory — each carries its own fix; gateways are probed live at render time</p>`;
+
+// the wizard page: steps 1–2 (the form) then 3–5 (read-only), one shell
+export const onboardingPage = (a: OnboardingArgs, me?: ConsoleMe): string => {
+	const onboarded = Boolean(
+		a.set.settings.optimize_for ||
+			a.set.settings.primary_work ||
+			a.set.settings.team,
+	);
+	const body =
+		`<style>${WIZARD_CSS}${PAGE_CSS}</style>` +
+		(onboarded
+			? `<div class="flash">team onboarding complete — this page re-edits the wizard state</div>`
+			: `<div class="flash">first run — walk the five steps; steps 1–2 save via the settings preview→confirm flow</div>`) +
+		`<form method="post" action="/console/onboarding/preview">` +
+		wizardForm(a.set.settings) +
+		`<div class="btnrow"><button class="btn" type="submit">preview diff</button><a class="btn2" href="/console/settings">cancel</a></div></form>` +
+		`<div class="step"><h2><span class="sn">step 3</span> · machine assessment</h2>${machineCard(a.machine)}</div>` +
+		`<div class="step"><h2><span class="sn">step 4</span> · recommended installation</h2>${recommendCard(a.recommend)}</div>` +
+		`<div class="step"><h2><span class="sn">step 5</span> · verification</h2>${verifyCard(a.checks, a.gateway)}</div>`;
+	return consolePage("TEAM ONBOARDING", "onboarding", body, me);
 };

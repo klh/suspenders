@@ -1,4 +1,7 @@
 // console-settings.test.ts — W147: the board console shell + settings flow.
+// W153: + the team onboarding wizard (5-step, board-v3-spec) — wizard knobs
+// in board settings, the /console/onboarding page, and its preview→apply
+// round-trip on the same throwaway board.
 // Unit: policy parse/patch/diff + board-settings merge on TEMP files only.
 // HTTP: console routes against a real board on a throwaway port with a temp
 // HOME and BELT_POLICY pinned to a TEMP COPY of the policy — never the live
@@ -306,5 +309,119 @@ describe("console routes (real board, temp config)", () => {
 		const st = readBoardSettings(boardSettingsPath(HOME));
 		expect(st.settings.status_refresh_s).toBe(9);
 		expect(st.settings.harvest_ttl_s).toBe(120);
+	});
+});
+
+describe("onboarding wizard (W153)", () => {
+	test("wizard knobs: enum + mix-format validation, round-trip, empty = unset", () => {
+		const p = join(HOME, "wizard-settings.json");
+		expect(() => formToBoardSettings({ optimize_for: "cheapest" })).toThrow(
+			/optimize_for/,
+		);
+		expect(() => formToBoardSettings({ primary_work: "hustle" })).toThrow(
+			/primary_work/,
+		);
+		expect(() =>
+			formToBoardSettings({ work_mix: "coding:60; arch 40" }),
+		).toThrow(/work_mix/);
+		expect(() =>
+			formToBoardSettings({ work_mix: "coding:60,coding:40" }),
+		).toThrow(/duplicate/);
+		applyBoardSettings(
+			p,
+			formToBoardSettings({
+				optimize_for: "balanced",
+				primary_work: "mix",
+				work_mix: "coding:60,architecture:40",
+				team: "platform",
+				department: "engineering",
+			}),
+		);
+		const st = readBoardSettings(p);
+		expect(st.settings.optimize_for).toBe("balanced");
+		expect(st.settings.work_mix).toBe("coding:60,architecture:40");
+		expect(st.settings.team).toBe("platform");
+		applyBoardSettings(p, formToBoardSettings({ team: "" }));
+		expect(readBoardSettings(p).settings.team).toBeUndefined();
+	});
+
+	test("wizard page renders the 5 steps + topbar nav", async () => {
+		const wiz = await (await fetch(`${BASE}/console/onboarding`)).text();
+		expect(wiz).toContain("TEAM ONBOARDING");
+		for (const s of ["step 1", "step 2", "step 3", "step 4", "step 5"])
+			expect(wiz).toContain(s);
+		expect(wiz).toContain('action="/console/onboarding/preview"');
+		expect(wiz).toContain('name="work_mix"');
+		expect(wiz).toContain("machine assessment");
+		expect(wiz).toContain("recommended installation");
+		expect(wiz).toContain("verification");
+		expect(wiz).toContain("cores"); // step 3 detected hardware
+		expect(wiz).toContain(":4100"); // step 4 fixed ports
+		expect(wiz).toMatch(/(DOWN|UP)/); // step 5 live probes, honest
+		expect(wiz).toContain('href="/console/onboarding"'); // topbar nav
+	});
+
+	test("wizard state JSON: not onboarded on a fresh temp HOME", async () => {
+		const d = (await (
+			await fetch(`${BASE}/api/console/onboarding`)
+		).json()) as {
+			ok: boolean;
+			onboarded: boolean;
+			settings: Record<string, string | number>;
+		};
+		expect(d.ok).toBe(true);
+		expect(d.onboarded).toBe(false);
+		expect(d.settings.team).toBeUndefined();
+	});
+
+	test("wizard preview → apply round-trip persists the knobs", async () => {
+		const pv = await postForm("/console/onboarding/preview", {
+			optimize_for: "cost",
+			primary_work: "mix",
+			work_mix: "coding:60,business:40",
+			team: "platform",
+			department: "eng",
+			default_actor: "demo:wizard@demo",
+		});
+		const page = await pv.text();
+		expect(page).toContain('pre class="diff"');
+		const values = page.match(/name="values" value="([^"]*)"/)?.[1] ?? "";
+		const mtime = page.match(/name="mtime" value="([^"]*)"/)?.[1] ?? "";
+		const ap = await postForm("/console/settings/apply", {
+			feature: "suspenders",
+			values,
+			mtime,
+		});
+		expect(ap.status).toBe(303);
+		const st = readBoardSettings(boardSettingsPath(HOME));
+		expect(st.settings.optimize_for).toBe("cost");
+		expect(st.settings.work_mix).toBe("coding:60,business:40");
+		expect(st.settings.team).toBe("platform");
+	});
+
+	test("wizard rejects invalid input honestly, writes nothing", async () => {
+		const before = readBoardSettings(boardSettingsPath(HOME)).settings;
+		const pv = await postForm("/console/onboarding/preview", {
+			optimize_for: "cheapest",
+			primary_work: "coding",
+		});
+		expect(await pv.text()).toMatch(/optimize_for/);
+		const pv2 = await postForm("/console/onboarding/preview", {
+			primary_work: "mix",
+			work_mix: "",
+		});
+		expect(await pv2.text()).toMatch(/work_mix: required/);
+		expect(readBoardSettings(boardSettingsPath(HOME)).settings).toEqual(before);
+		const d = (await (
+			await fetch(`${BASE}/api/console/onboarding`)
+		).json()) as { onboarded: boolean };
+		expect(d.onboarded).toBe(true); // the earlier apply persisted
+	});
+
+	test("settings hub shows wizard chips + wizard link", async () => {
+		const s = await (await fetch(`${BASE}/console/settings`)).text();
+		expect(s).toContain("team onboarding wizard");
+		expect(s).toContain("optimize for:"); // chip
+		expect(s).toContain("primary work:"); // chip
 	});
 });

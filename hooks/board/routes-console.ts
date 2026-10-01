@@ -3,7 +3,6 @@
 // entry's handler list); returns null when nothing matches.
 import { BELT_REPO } from "./context.ts";
 import { json, writeGuard } from "./helpers.ts";
-import { board } from "./data.ts";
 import { consoleMe, gatherBeltView, gatherLocalView } from "./console-view.ts";
 import {
 	htmlHdr,
@@ -23,11 +22,17 @@ import type { PolicyGatewayParsed } from "../lib/board-config.ts";
 import {
 	beltPage,
 	localPage,
-	Feature,
+	type Feature,
+	onboardingPage,
 	previewPage,
 	settingsFormPage,
 	settingsIndexPage,
 } from "../bin/console-html.ts";
+import {
+	gatherOnboardingView,
+	onboardingPreview,
+	onboardingState,
+} from "./onboarding.ts";
 
 export async function handleConsole(
 	req: Request,
@@ -51,6 +56,19 @@ export async function handleConsole(
 				"cache-control": "no-store",
 			},
 		});
+	// W153 team onboarding wizard: the 5-step page + the preview that rides
+	// the shared settings apply flow (write-guarded like every other POST)
+	if (url.pathname === "/console/onboarding")
+		return new Response(
+			await onboardingPage(await gatherOnboardingView(), consoleMe()),
+			{ headers: htmlHdr() },
+		);
+	if (req.method === "POST" && url.pathname === "/console/onboarding/preview") {
+		const guard = writeGuard(req, url);
+		if (guard) return guard;
+		const f = new URLSearchParams(await req.text());
+		return onboardingPreview(f, consoleMe());
+	}
 	if (url.pathname === "/api/console/me") {
 		// avatar dropdown data: board host's latest actor (unassigned until
 		// coord bootstrap --actor stamps it) + tags + distinct known actors
@@ -63,6 +81,11 @@ export async function handleConsole(
 			actors: m.actors,
 			default_actor: m.defaultActor,
 		});
+	}
+	if (url.pathname === "/api/console/onboarding") {
+		// W153 wizard state as JSON — lanes/agents check onboarding without
+		// scraping HTML; derived from the same board-settings knobs
+		return json(onboardingState());
 	}
 	if (url.pathname === "/console/settings") {
 		const pol = resolvePolicy({ beltRepo: BELT_REPO });

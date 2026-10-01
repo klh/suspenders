@@ -306,6 +306,54 @@ export interface BoardSettings {
 	status_refresh_s?: number;
 	harvest_ttl_s?: number;
 	default_actor?: string;
+	// W153 onboarding wizard state (board-v3-spec "First-run setup wizard":
+	// setup wizard state = persisted config, not a code edit)
+	optimize_for?: string;
+	primary_work?: string;
+	work_mix?: string;
+	team?: string;
+	department?: string;
+}
+
+// the wizard's step 1/2 vocabularies (board-v3-spec.md) — the only values
+// the onboarding flow may write; empty string = unset (removes the knob)
+export const OPTIMIZE_FOR = ["cost", "balanced", "speed"] as const;
+export const PRIMARY_WORK = [
+	"coding",
+	"architecture",
+	"product",
+	"business",
+	"finance",
+	"mix",
+] as const;
+
+// weighted mix (primary_work "mix"): "coding:60,architecture:40" — at least
+// one pair, lowercase slug names, finite weights > 0, ≤12 entries. Returns
+// the normalized string (spaces trimmed, order kept).
+export function validateWorkMix(v: unknown): string {
+	if (typeof v !== "string" || !v.trim())
+		throw new ConfigError("work_mix: must be a name:weight pair list");
+	const pairs = v
+		.split(",")
+		.map((p) => p.trim())
+		.filter(Boolean);
+	if (!pairs.length)
+		throw new ConfigError("work_mix: must be a name:weight pair list");
+	if (pairs.length > 12)
+		throw new ConfigError("work_mix: at most 12 work kinds");
+	const seen = new Set<string>();
+	const norm = pairs.map((p) => {
+		const m = /^([a-z0-9_-]{1,40}):(\d+(?:\.\d+)?)$/.exec(p);
+		if (!m)
+			throw new ConfigError(
+				`work_mix: "${p.slice(0, 60)}" is not name:weight (e.g. coding:60)`,
+			);
+		if (seen.has(m[1]))
+			throw new ConfigError(`work_mix: duplicate kind "${m[1]}"`);
+		seen.add(m[1]);
+		return `${m[1]}:${m[2]}`;
+	});
+	return norm.join(",");
 }
 
 export const boardSettingsPath = (home = process.env.HOME ?? ""): string =>
@@ -320,6 +368,20 @@ const numKnob = (
 	if (v === undefined || v === null || v === "") return undefined;
 	if (typeof v !== "number" || !Number.isFinite(v) || v < min)
 		throw new ConfigError(`${k}: must be a number >= ${min}`);
+	return v;
+};
+
+// string knob: absent/null/"" = unset; else check(k's value) may throw the
+// honest ConfigError; returns the value (or undefined when unset)
+const strKnob = (
+	o: Record<string, unknown>,
+	k: string,
+	check: (v: string) => void,
+): string | undefined => {
+	const v = o[k];
+	if (v === undefined || v === null || v === "") return undefined;
+	if (typeof v !== "string") throw new ConfigError(`${k}: must be a string`);
+	check(v);
 	return v;
 };
 
@@ -340,6 +402,29 @@ export function validateBoardSettings(v: unknown): BoardSettings {
 			throw new ConfigError("default_actor: must be a string (max 200 chars)");
 		out.default_actor = da;
 	}
+	// W153 onboarding wizard state — enum + format knobs, same semantics:
+	// absent/empty = unset, invalid = rejected with the honest error
+	out.optimize_for = strKnob(o, "optimize_for", (v) => {
+		if (!(OPTIMIZE_FOR as readonly string[]).includes(v))
+			throw new ConfigError(
+				`optimize_for: must be one of ${OPTIMIZE_FOR.join(", ")}`,
+			);
+	});
+	out.primary_work = strKnob(o, "primary_work", (v) => {
+		if (!(PRIMARY_WORK as readonly string[]).includes(v))
+			throw new ConfigError(
+				`primary_work: must be one of ${PRIMARY_WORK.join(", ")}`,
+			);
+	});
+	out.work_mix = strKnob(o, "work_mix", validateWorkMix);
+	out.team = strKnob(o, "team", (v) => {
+		if (v.length > 200)
+			throw new ConfigError("team: must be a string (max 200 chars)");
+	});
+	out.department = strKnob(o, "department", (v) => {
+		if (v.length > 200)
+			throw new ConfigError("department: must be a string (max 200 chars)");
+	});
 	return out;
 }
 
@@ -381,12 +466,24 @@ export function readBoardSettings(
 
 // Form semantics: empty string = unset (removes the knob). Numbers coerce
 // from the form strings; anything non-numeric throws the honest error.
+// Form semantics: empty string = unset (removes the knob); an ABSENT key
+// (the wizard's values-JSON carries only wizard fields) = also unset in the
+// patch, which merge-preserves the current value. Numbers coerce from the
+// form strings; anything non-numeric throws the honest error.
 export function formToBoardSettings(f: Record<string, string>): BoardSettings {
 	return validateBoardSettings({
 		status_refresh_s:
-			f.status_refresh_s === "" ? undefined : Number(f.status_refresh_s),
-		harvest_ttl_s: f.harvest_ttl_s === "" ? undefined : Number(f.harvest_ttl_s),
+			(f.status_refresh_s ?? "") === ""
+				? undefined
+				: Number(f.status_refresh_s),
+		harvest_ttl_s:
+			(f.harvest_ttl_s ?? "") === "" ? undefined : Number(f.harvest_ttl_s),
 		default_actor: f.default_actor,
+		optimize_for: f.optimize_for,
+		primary_work: f.primary_work,
+		work_mix: f.work_mix,
+		team: f.team,
+		department: f.department,
 	});
 }
 
