@@ -8,7 +8,7 @@
 // env:   SUSPENDERS_LLM_URL   (default http://127.0.0.1:8901/v1/chat/completions)
 //        SUSPENDERS_LLM_MODEL (default "local")
 //        SUSPENDERS_LLM_KEY   (optional bearer token)
-import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
+import { isDecisionKind, openStore } from "../lib/govdb.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
 import {
 	chatRemote,
@@ -55,7 +55,7 @@ async function defaultModel(url: string, key?: string): Promise<string> {
 	}
 }
 
-const db = openGovernorDb();
+const db = openStore();
 const ev = db
 	.query(
 		"SELECT id, ts, source, kind, scope, payload, target FROM events WHERE id = ?",

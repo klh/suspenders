@@ -28,7 +28,6 @@
 //
 //   titles...  — when the parent has no children yet, shatter it first
 //                (1-2 children free; >2 needs --plan per the W16 split gate)
-import { Database } from "bun:sqlite";
 import {
 	existsSync,
 	mkdirSync,
@@ -36,6 +35,7 @@ import {
 	realpathSync,
 	writeFileSync,
 } from "node:fs";
+import { openStore } from "../hooks/lib/govdb.ts";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import {
@@ -139,7 +139,7 @@ const main = async (): Promise<void> => {
 	const DB_PATH = `${process.env.HOME}/.cache/claude-governor/governor.db`;
 	if (!existsSync(DB_PATH))
 		die(`no governor db at ${DB_PATH} — bootstrap the control plane first`);
-	const db = new Database(DB_PATH, { readonly: true });
+	const db = openStore();
 
 	type Item = {
 		id: string;

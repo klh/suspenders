@@ -1,7 +1,7 @@
 // usage-seed.test.ts — W127: seed/purge round-trip. Seeded rows are clearly
 // flagged (actor LIKE 'demo:%', sids demo-*) and purge removes exactly those.
 import { describe, test, expect, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openMemoryStore, type GovernorStore } from "../hooks/lib/govdb.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,21 +22,21 @@ const ROLLUP_DDL =
 const SESSIONS_DDL =
 	"CREATE TABLE sessions (sid TEXT PRIMARY KEY, project TEXT, role TEXT, parent_sid TEXT, worktree TEXT, started_at INTEGER NOT NULL, hb INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'RUNNING', capabilities TEXT, transcript_path TEXT, actor TEXT, tags TEXT)";
 
-function freshDb(): Database {
-	const db = new Database(":memory:", { create: true });
+function freshDb(): GovernorStore {
+	const db = openMemoryStore();
 	db.run(ROLLUP_DDL);
 	db.run(SESSIONS_DDL);
 	return db;
 }
 
-const demoRollups = (db: Database): number =>
+const demoRollups = (db: GovernorStore): number =>
 	(
 		db
 			.query("SELECT COUNT(*) AS n FROM usage_rollup WHERE actor LIKE 'demo:%'")
 			.get() as { n: number }
 	).n;
 
-const realRollups = (db: Database): number =>
+const realRollups = (db: GovernorStore): number =>
 	(
 		db
 			.query(

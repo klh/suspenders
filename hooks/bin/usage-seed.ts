@@ -4,8 +4,7 @@
 // (mulberry32) → re-seed over the same window replaces rows (INSERT OR
 // REPLACE on the (hour_bucket, actor, model) PK); --purge removes exactly
 // the demo rows (actor LIKE 'demo:%', sids demo-*). No real identity data.
-import type { Database } from "bun:sqlite";
-import { openGovernorDb } from "../lib/govdb.ts";
+import { openStore, type GovernorStore } from "../lib/govdb.ts";
 
 const H = 3_600_000;
 
@@ -54,7 +53,7 @@ const mulberry32 = (seed: number): (() => number) => {
 const DEMO_DAYS = 28;
 
 export function seedUsage(
-	db: Database,
+	db: GovernorStore,
 	opts: { nowMs?: number } = {},
 ): { actors: number; rows: number } {
 	const now = opts.nowMs ?? Date.now();
@@ -109,7 +108,10 @@ export function seedUsage(
 	return { actors: ACTORS.length, rows };
 }
 
-export function purgeUsage(db: Database): { rows: number; sessions: number } {
+export function purgeUsage(db: GovernorStore): {
+	rows: number;
+	sessions: number;
+} {
 	const r1 = db
 		.query("DELETE FROM usage_rollup WHERE actor LIKE 'demo:%'")
 		.run();
@@ -118,7 +120,7 @@ export function purgeUsage(db: Database): { rows: number; sessions: number } {
 }
 
 if (import.meta.main) {
-	const db = openGovernorDb();
+	const db = openStore();
 	if (process.argv.includes("--purge")) {
 		console.log(JSON.stringify(purgeUsage(db)));
 	} else {

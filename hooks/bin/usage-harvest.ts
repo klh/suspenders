@@ -7,10 +7,9 @@
 // count); a grown one is read as an append-only tail (JSONL transcripts are
 // append-only), so each usage line is aggregated exactly once. Runs as a
 // board-API subroutine (TTL-gated maybeHarvest) — never a daemon.
-import type { Database } from "bun:sqlite";
 import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
-import { openGovernorDb } from "../lib/govdb.ts";
+import { openStore, type GovernorStore } from "../lib/govdb.ts";
 
 // routing-doctrine classes (belt routing-policy.yaml ladder: flash → local →
 // cloud full models); the raw model string is kept alongside the group.
@@ -66,7 +65,7 @@ function readTail(path: string, start: number): string {
 }
 
 export function harvestUsage(
-	db: Database,
+	db: GovernorStore,
 	opts: { root?: string } = {},
 ): HarvestStats {
 	const root = opts.root ?? `${process.env.HOME}/.claude/projects`;
@@ -241,7 +240,7 @@ export function harvestUsage(
 // (same process or overlapping board requests) fold into the running one.
 let inFlight = false;
 export function maybeHarvest(
-	db: Database,
+	db: GovernorStore,
 	ttlMs = 5 * 60_000,
 ): HarvestStats | null {
 	const row = db
@@ -268,7 +267,7 @@ export function maybeHarvest(
 }
 
 if (import.meta.main) {
-	const db = openGovernorDb();
+	const db = openStore();
 	const force = process.argv.includes("--force");
 	const s = maybeHarvest(db, force ? 0 : undefined);
 	console.log(JSON.stringify(s ?? { skipped: "ttl-fresh" }));
