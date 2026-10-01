@@ -8,6 +8,8 @@ import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const REAL_HOME = process.env.HOME;
+const REAL_SECRETS = process.env.BUCKLE_SECRETS_HOME;
+const REAL_STORE = process.env.GOVERNOR_STORE_URL;
 const HOME = mkdtempSync(join(process.cwd(), ".auth-rot-test-home-"));
 process.env.HOME = HOME;
 process.env.BUCKLE_SECRETS_HOME = join(HOME, "secrets");
@@ -18,7 +20,14 @@ const govdb = await import("../hooks/lib/govdb.ts");
 
 afterAll(() => {
 	auth.resetAuthCache();
+	// restore EVERYTHING this file pinned — test files share one process and
+	// later files (fleet-board, w159-settle) must not inherit this sandbox.
+	// delete-or-assign: env-assigning undefined coerces to "undefined" in bun
 	process.env.HOME = REAL_HOME;
+	if (REAL_SECRETS === undefined) delete process.env.BUCKLE_SECRETS_HOME;
+	else process.env.BUCKLE_SECRETS_HOME = REAL_SECRETS;
+	if (REAL_STORE === undefined) delete process.env.GOVERNOR_STORE_URL;
+	else process.env.GOVERNOR_STORE_URL = REAL_STORE;
 	rmSync(HOME, { recursive: true, force: true });
 });
 
