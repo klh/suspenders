@@ -29,3 +29,11 @@ shareable patterns (ast-grep) before adding code near the limit — one
 source of truth per pattern, helpers over copy-paste. Applies to every lane
 and every klh repo. Current offenders tracked on the graph (decomposition
 item); the on-write gate flags them.
+
+## Streams Over Buffers
+
+Streaming interfaces by default — no whole-payload buffering or memory
+hangups unless strictly necessary: streams for HTTP/SSE pass-through,
+NDJSON/line streams for logs and feeds, bounded rings with backpressure
+for async writes (the W143 ledger ring is the pattern). Buffers only for
+bounded, size-capped payloads. Fleet law (`law.streams-over-buffers`).
