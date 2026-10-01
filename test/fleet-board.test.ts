@@ -1,11 +1,9 @@
-// fleet-board.test.ts — decision lifecycle + endpoint hardening against a
-// real board on a throwaway port, isolated HOME (same recipe as smoke.test.ts).
-// Exercises the docs/decisions-api.md contract: schema v2 lifecycle
-// (OPEN → ANSWERED → ACKNOWLEDGED / OPEN → CANCELLED), answer_token
-// idempotency, delivery, and the /api/decisions feed shape.
+// fleet-board.test.ts — the fleet-board HTTP surface (W157 split; the
+// factory fixture in test/helpers/board-fixture.ts gives every test
+// file its own scratch HOME + board; flows live in fleet-board-flows.
+import { afterAll, describe, expect, test } from "bun:test";
 
 import { Database } from "bun:sqlite";
-import { afterAll, describe, expect, test } from "bun:test";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -14,147 +12,10 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { request as httpRequest } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDecisionKind } from "../hooks/lib/govdb.ts";
-
-const HOME = mkdtempSync(join(tmpdir(), "suspenders-board-"));
-const REPO = mkdtempSync(join(tmpdir(), "suspenders-boardrepo-"));
-mkdirSync(join(REPO, ".git"), { recursive: true });
-// W55: a REAL git repo for the diff endpoint (REPO's .git is an empty dir)
-const GREPO = mkdtempSync(join(tmpdir(), "suspenders-boardgit-"));
-const env = {
-	...process.env,
-	HOME,
-	SUSPENDERS_LLM_URL: "http://127.0.0.1:1/v1/chat/completions",
-	SUSPENDERS_MDNS: "0",
-};
-const bin = join(import.meta.dir, "..", "hooks", "bin");
-const PORT = 7847;
-const BASE = `http://127.0.0.1:${PORT}`;
-
-function run(cmd: string, args: string[]) {
-	const p = Bun.spawnSync(["bun", join(bin, cmd), ...args], {
-		cwd: REPO,
-		env,
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	return {
-		out: p.stdout.toString(),
-		err: p.stderr.toString(),
-		code: p.exitCode,
-	};
-}
-const q = (s: string) => encodeURIComponent(s);
-
-// rows off the board's JSON feeds — Record<string, unknown> keeps the feed
-// callbacks honest without modeling every endpoint (the wire data is
-// untrusted until the assertion pins it)
-type Row = Record<string, unknown>;
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function getData() {
-	const r = await fetch(`${BASE}/api/data`);
-	return r.json();
-}
-// board() lists EVERY partition — the module-scope --demo board shares this
-// DB and its partition may sort before ours (platform-dependent), so tests
-// must select their own project, never projects[0]
-const MY_PROJ = realpathSync(REPO);
-async function myProject() {
-	const d = await getData();
-	return d.projects.find((p: Row) => p.project === MY_PROJ);
-}
-async function getDecisions() {
-	// v3 default is OPEN-only (docs/board-api.md) — the lifecycle tests below
-	// also read resolved rows, so they ride the history view
-	return (await fetch(`${BASE}/api/decisions?history=1`)).json();
-}
-async function post(
-	path: string,
-	body: unknown,
-	headers: Record<string, string> = {},
-) {
-	const r = await fetch(`${BASE}${path}`, {
-		method: "POST",
-		headers: { "content-type": "application/json", ...headers },
-		body: JSON.stringify(body),
-	});
-	return { status: r.status, json: await r.json() };
-}
-// fetch() refuses to set Host/Origin — raw node:http for the hostile cases
-function rawPost(
-	headers: Record<string, string>,
-	body: string,
-): Promise<{ status: number | undefined; body: string }> {
-	return new Promise((resolve) => {
-		const rq = httpRequest(
-			{
-				host: "127.0.0.1",
-				port: PORT,
-				path: "/api/ack",
-				method: "POST",
-				headers,
-			},
-			(res) => {
-				let b = "";
-				res.on("data", (c) => (b += c));
-				res.on("end", () => resolve({ status: res.statusCode, body: b }));
-			},
-		);
-		rq.end(body);
-	});
-}
-function fork(feed: { decisions: Row[] }, question: string) {
-	const hits = feed.decisions.filter((d: Row) => d.question === question);
-	expect(hits.length).toBeLessThanOrEqual(1); // questions unique per test
-	return hits[0];
-}
-// work add with a dynamic id — never hard-code W-numbers, the sequence shifts
-function addWork(title: string, args: string[] = []): string {
-	const r = run("work.ts", ["add", title, ...args]);
-	if (r.code !== 0) throw new Error(`work add failed: ${r.err}`);
-	const db = new Database(`${HOME}/.cache/claude-governor/governor.db`, {
-		readonly: true,
-	});
-	const row = db
-		.query("SELECT id FROM work_items WHERE title = ?")
-		.get(title) as { id: string };
-	db.close();
-	return row.id;
-}
-
-const proc = Bun.spawn(
-	["bun", join(bin, "fleet-board.ts"), "--port", String(PORT)],
-	{ cwd: REPO, env, stdout: "pipe", stderr: "pipe" },
-);
-// second instance for --demo seeding (same temp HOME — the demo partition
-// lives in its governor.db, never in a real project)
-let demoProc: Bun.Subprocess | null = null;
-async function waitUp(base: string) {
-	for (let i = 0; i < 100; i++) {
-		try {
-			if ((await fetch(`${base}/api/data`)).ok) return;
-		} catch {}
-		await sleep(100);
-	}
-	throw new Error(`fleet board did not start on ${base}`);
-}
-await waitUp(BASE);
-
-afterAll(async () => {
-	proc.kill();
-	await proc.exited;
-	if (demoProc) {
-		demoProc.kill();
-		await demoProc.exited;
-	}
-	rmSync(HOME, { recursive: true, force: true });
-	rmSync(REPO, { recursive: true, force: true });
-	rmSync(GREPO, { recursive: true, force: true });
-});
+import { boardFixture } from "./helpers/board-fixture.ts";
+const { HOME, REPO, GREPO, env, bin, PORT, BASE, run, q, sleep, getData, myProject, getDecisions, post, rawPost, fork, addWork, waitUp, demoProc, setDemoProc } = await boardFixture(7847, afterAll);
 
 describe("served page", () => {
 	test("inline script parses as JS (catches template corruption)", async () => {
@@ -1022,10 +883,10 @@ describe("demo mode (--demo)", () => {
 	const DEMO_PORT = 7848;
 	const DEMO_BASE = `http://127.0.0.1:${DEMO_PORT}`;
 	const demoProj = `${HOME}/.cache/claude-governor/demo`;
-	demoProc = Bun.spawn(
+	setDemoProc(Bun.spawn(
 		["bun", join(bin, "fleet-board.ts"), "--demo", "--port", String(DEMO_PORT)],
 		{ cwd: REPO, env, stdout: "pipe", stderr: "pipe" },
-	);
+	));
 
 	test("seeds sessions, claim labels, 4 mixed items, 2 OPEN + 2 ANSWERED forks, a dozen events", async () => {
 		await waitUp(DEMO_BASE);
@@ -1087,7 +948,7 @@ describe("demo mode (--demo)", () => {
 	test("re-seed on restart is a no-op — no duplicate partition", async () => {
 		demoProc?.kill();
 		await demoProc?.exited;
-		demoProc = Bun.spawn(
+		setDemoProc(Bun.spawn(
 			[
 				"bun",
 				join(bin, "fleet-board.ts"),
@@ -1096,7 +957,7 @@ describe("demo mode (--demo)", () => {
 				String(DEMO_PORT),
 			],
 			{ cwd: REPO, env, stdout: "pipe", stderr: "pipe" },
-		);
+		));
 		await waitUp(DEMO_BASE);
 		const feed = await (await fetch(`${DEMO_BASE}/api/tasks`)).json();
 		expect(feed.tasks.filter((t: Row) => t.project === demoProj).length).toBe(
@@ -1450,337 +1311,5 @@ describe("W76 lane tail + message-to-lane", () => {
 			body: '{"id":"WTAIL1","note":"x"}',
 		});
 		expect(plain.status).toBe(415);
-	});
-});
-
-// then detached `fleet-loop ship`; the E2E waits for the MERGED log line.
-describe("W64 ship trigger", () => {
-	const g = (args: string[], cwd = GREPO) =>
-		Bun.spawnSync(["/usr/bin/git", ...args], {
-			cwd,
-			env,
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-	// ship-ready fixture: work item + suspenders/<id> branch one commit ahead
-	// of main, made in a shared throwaway worktree (removed after each use);
-	// ownerless by default so the liveness guard stays out of the way
-	function shipFixture(id: string, owner?: string): void {
-		const wt = join(GREPO, "wt-tmp");
-		const wa = g(["worktree", "add", "-b", `suspenders/${id}`, wt]);
-		if (wa.exitCode !== 0) throw new Error(`worktree add failed: ${wa.stderr}`);
-		g(["config", "user.email", "t@threads.dk"], wt);
-		g(["config", "user.name", "t"], wt);
-		writeFileSync(join(wt, "ship.txt"), `${id}\n`);
-		g(["add", "-A"], wt);
-		const c = g(["commit", "-m", `lane ${id}`], wt);
-		if (c.exitCode !== 0) throw new Error(`fixture commit failed: ${c.stderr}`);
-		g(["worktree", "remove", wt]);
-		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
-		db.run("PRAGMA busy_timeout = 4500");
-		db.query(
-			"INSERT INTO work_items (project, id, title, state, owner_sid, created_by, created_at, updated_at) VALUES (?, ?, 'ship demo', 'CLAIMED', ?, 'test', ?, ?)",
-		).run(GREPO, id, owner ?? null, Date.now(), Date.now());
-		db.close();
-	}
-	const shipJson = (repo: string, ladder: string | null): void => {
-		mkdirSync(join(repo, ".fleet"), { recursive: true });
-		if (ladder === null)
-			rmSync(join(repo, ".fleet", "ship.json"), { force: true });
-		else
-			writeFileSync(
-				join(repo, ".fleet", "ship.json"),
-				JSON.stringify({ ladder }),
-			);
-	};
-	const waitBranch = (branch: string, gone: boolean): boolean => {
-		for (let i = 0; i < 100; i++) {
-			const exists =
-				g(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])
-					.exitCode === 0;
-			if (exists !== gone) return true;
-			Bun.sleepSync(100);
-		}
-		return false;
-	};
-
-	test("served page wires the ship button + llms.txt lists /api/ship", async () => {
-		const page = await (await fetch(`${BASE}/`)).text();
-		expect(page).toContain("diffbtn ship");
-		expect(page).toContain("shipItem");
-		expect(page).toContain("/api/ship");
-		const txt = await (await fetch(`${BASE}/llms.txt`)).text();
-		expect(txt).toContain("/api/ship");
-	});
-
-	test("validation: missing fields 400, unknown item 404, no-ladder 409", async () => {
-		expect((await post("/api/ship", { project: GREPO })).status).toBe(400);
-		expect(
-			(await post("/api/ship", { project: GREPO, id: "WNOPE" })).status,
-		).toBe(404);
-		// branch exists + ahead + no live lane + no owner → the LADDER guard
-		// is what refuses (ship.json never written for WSHIPZ)
-		shipFixture("WSHIPZ");
-		const noLadder = await post("/api/ship", { project: GREPO, id: "WSHIPZ" });
-		expect(noLadder.status).toBe(409);
-		expect(noLadder.json.error).toContain("no ladder configured");
-		expect(noLadder.json.error).toContain("ship.json");
-	});
-
-	test("live-lane pid guard: a live lanes.json entry vetoes the ship", async () => {
-		shipFixture("WSHIPL");
-		mkdirSync(join(GREPO, ".fleet"), { recursive: true });
-		writeFileSync(
-			join(GREPO, ".fleet", "lanes.json"),
-			JSON.stringify([
-				{
-					sid: "w64-test-lane",
-					item: "WSHIPL",
-					pid: process.pid,
-					branch: "suspenders/WSHIPL",
-					worktree: "",
-				},
-			]),
-		);
-		const r = await post("/api/ship", { project: GREPO, id: "WSHIPL" });
-		expect(r.status).toBe(409);
-		expect(r.json.error).toContain("live lane");
-		expect(r.json.error).toContain("pid");
-	});
-
-	test("live-owner guard: a RUNNING session with a warm transcript vetoes", async () => {
-		shipFixture("WSHIPO", "w64-live-owner");
-		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
-		db.run("PRAGMA busy_timeout = 4500");
-		db.query(
-			"INSERT OR REPLACE INTO sessions (sid, project, role, started_at, hb, state) VALUES ('w64-live-owner', ?, 'worker', ?, ?, 'RUNNING')",
-		).run(GREPO, Date.now(), Date.now());
-		db.close();
-		const r = await post("/api/ship", { project: GREPO, id: "WSHIPO" });
-		expect(r.status).toBe(409);
-		expect(r.json.error).toContain("still live");
-	});
-
-	test("merge-ladder guard: a live .fleet/merge-active marker vetoes the ship (W101)", async () => {
-		shipFixture("WMRG");
-		shipJson(GREPO, 'git merge --no-ff {branch} -m "shipped {branch}"');
-		// marker pid = this test process; the board re-runs ps itself and
-		// compares cmdline identity, exactly as fleet-loop's mergeRunnerAlive
-		mkdirSync(join(GREPO, ".fleet"), { recursive: true });
-		writeFileSync(
-			join(GREPO, ".fleet", "merge-active"),
-			JSON.stringify({
-				pid: process.pid,
-				cmd: Bun.spawnSync(
-					["ps", "-o", "command=", "-p", String(process.pid)],
-					{ stdout: "pipe", stderr: "pipe" },
-				)
-					.stdout.toString()
-					.trim(),
-				branch: "suspenders/WMRG",
-				ts: Date.now(),
-			}),
-		);
-		const r = await post("/api/ship", { project: GREPO, id: "WMRG" });
-		expect(r.status).toBe(409);
-		expect(r.json.error).toContain("merge ladder in flight");
-		// the marker names THIS process (still alive) — remove it or the next
-		// ship test's detached child reads a live runner and vetoes too
-		rmSync(join(GREPO, ".fleet", "merge-active"));
-	});
-
-	test("end-to-end: ok + detached child merges through the ladder and retires the branch", async () => {
-		shipFixture("WSHIP1");
-		shipJson(GREPO, 'git merge --no-ff {branch} -m "shipped {branch}"');
-		writeFileSync(join(GREPO, ".fleet", "lanes.json"), "[]");
-		const t0 = Date.now();
-		const r = await post("/api/ship", { project: GREPO, id: "WSHIP1" });
-		expect(r.status).toBe(200);
-		expect(r.json.ok).toBe(true);
-		expect(r.json.branch).toBe("suspenders/WSHIP1");
-		expect(r.json.ladder).toContain("shipped {branch}");
-		// the detached child does the real work — wait for retirement
-		expect(waitBranch("suspenders/WSHIP1", true)).toBe(true);
-		expect(Date.now() - t0).toBeLessThan(60_000);
-		// ladder substitution proven by the merge subject; loop.log carries it
-		expect(g(["log", "--format=%s", "-1"]).stdout.toString()).toContain(
-			"shipped suspenders/WSHIP1",
-		);
-		const logTail = readFileSync(join(GREPO, ".fleet", "loop.log"), "utf8");
-		expect(logTail).toContain("MERGED suspenders/WSHIP1");
-		expect(logTail).toContain("RETIRED suspenders/WSHIP1");
-		// shipped = branch retired — a second ship is an honest 404
-		const again = await post("/api/ship", { project: GREPO, id: "WSHIP1" });
-		expect(again.status).toBe(404);
-		expect(again.json.error).toContain("no branch");
-	});
-});
-
-describe("W57 orchestrate box", () => {
-	const OPORT = 7849;
-	const OB = `http://127.0.0.1:${OPORT}`;
-	const MPORT = 7850;
-	const MB = `http://127.0.0.1:${MPORT}`;
-	// mock OpenAI-compatible endpoint: fenced-JSON proposal for normal goals,
-	// prose-only garbage for goals containing JUNK (the parse-failure path)
-	const mock = Bun.serve({
-		port: MPORT,
-		fetch: async (req) => {
-			const body = (await req.json().catch(() => ({}))) as {
-				messages?: { role: string; content: string }[];
-			};
-			const goal = body.messages?.find((m) => m.role === "user")?.content ?? "";
-			if (goal.includes("JUNK")) {
-				return Response.json({
-					choices: [{ message: { content: "sorry, no json here" } }],
-				});
-			}
-			const proposal = {
-				title: "csv export for the tasks table",
-				children: [
-					{ title: "export scaffolding", brief: "route + content negotiation" },
-					{ title: "streaming for big exports", brief: "cursor pagination" },
-					{ title: "docs row", brief: "" },
-				],
-			};
-			return Response.json({
-				choices: [
-					{
-						message: {
-							content: `\`\`\`json\n${JSON.stringify(proposal)}\n\`\`\``,
-						},
-					},
-				],
-				usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
-			});
-		},
-	});
-	const orchProc = Bun.spawn(
-		["bun", join(bin, "fleet-board.ts"), "--port", String(OPORT)],
-		{
-			cwd: REPO,
-			env: { ...env, SUSPENDERS_LLM_URL: `${MB}/v1/chat/completions` },
-			stdout: "pipe",
-			stderr: "pipe",
-		},
-	);
-	afterAll(async () => {
-		orchProc.kill();
-		await orchProc.exited;
-		mock.stop(true);
-	});
-	const postO = async (path: string, body: unknown) => {
-		const r = await fetch(`${OB}${path}`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(body),
-		});
-		return { status: r.status, json: await r.json() };
-	};
-	test("llms.txt lists both orchestrate routes", async () => {
-		const txt = await (await fetch(`${BASE}/llms.txt`)).text();
-		expect(txt).toContain("/api/orchestrate/register");
-		expect(txt).toContain("/api/orchestrate ");
-	});
-	test("unreachable LLM degrades to 502, nothing written", async () => {
-		const r = await post("/api/orchestrate", {
-			project: MY_PROJ,
-			goal: "anything",
-		});
-		expect(r.status).toBe(502);
-		expect(r.json.ok).toBe(false);
-	});
-	test("propose parses fenced LLM json into a proposal", async () => {
-		await waitUp(OB);
-		const r = await postO("/api/orchestrate", {
-			project: MY_PROJ,
-			goal: "add csv export",
-		});
-		expect(r.status).toBe(200);
-		expect(r.json.ok).toBe(true);
-		expect(r.json.proposal.title).toContain("csv export");
-		expect(r.json.proposal.children.length).toBe(3);
-		expect(r.json.proposal.children[0].brief).toBeTruthy();
-		expect(r.json.model).toBeTruthy();
-	});
-	test("junk LLM output answers 502 with a retryable error", async () => {
-		const r = await postO("/api/orchestrate", {
-			project: MY_PROJ,
-			unused: 0,
-			goal: "JUNK goal",
-		});
-		expect(r.status).toBe(502);
-		expect(r.json.error).toContain("no parseable plan");
-	});
-	test("register validation: 400s before any work-graph write", async () => {
-		expect(
-			(await postO("/api/orchestrate/register", { goal: "x" })).status,
-		).toBe(400);
-		expect(
-			(await postO("/api/orchestrate/register", { project: MY_PROJ })).status,
-		).toBe(400);
-		expect(
-			(
-				await postO("/api/orchestrate/register", {
-					project: MY_PROJ,
-					title: "t",
-					children: ["only one child"],
-				})
-			).status,
-		).toBe(400);
-		expect(
-			(
-				await postO("/api/orchestrate/register", {
-					project: MY_PROJ,
-					title: "t",
-					children: Array.from({ length: 9 }, (_, i) => `c${i}`),
-				})
-			).status,
-		).toBe(400);
-	});
-	test("register runs the plan-gated split in the target repo", async () => {
-		const reg = await postO("/api/orchestrate/register", {
-			project: MY_PROJ,
-			title: "W57 e2e orchestration",
-			children: [
-				"first independently actionable child",
-				"second independently actionable child",
-				"third independently actionable child",
-			],
-		});
-		expect(reg.status).toBe(200);
-		expect(reg.json.ok).toBe(true);
-		expect(reg.json.plan).toMatch(/^W\d+$/);
-		expect(reg.json.children.length).toBe(3);
-		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`, {
-			readonly: true,
-		});
-		const parent = db
-			.query("SELECT state FROM work_items WHERE project = ? AND id = ?")
-			.get(MY_PROJ, reg.json.plan) as { state: string } | null;
-		expect(parent?.state).toBe("SHATTERED");
-		const kids = db
-			.query(
-				"SELECT id, state FROM work_items WHERE project = ? AND parent_id = ? ORDER BY id",
-			)
-			.all(MY_PROJ, reg.json.plan) as { id: string; state: string }[];
-		db.close();
-		expect(kids.length).toBe(3);
-		for (const k of kids) expect(k.state).toBe("READY");
-		const feed = await (await fetch(`${OB}/api/tasks`)).json();
-		const plan = feed.tasks.find((t: Row) => t.id === reg.json.plan);
-		expect(plan?.title).toBe("plan: W57 e2e orchestration");
-	});
-	test("orchestrate telemetry lands as an llm.call event", async () => {
-		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`, {
-			readonly: true,
-		});
-		const row = db
-			.query(
-				"SELECT COUNT(*) AS n FROM events WHERE kind = 'llm.call' AND source = 'orchestrate'",
-			)
-			.get() as { n: number };
-		db.close();
-		expect(row.n).toBeGreaterThanOrEqual(1);
 	});
 });
