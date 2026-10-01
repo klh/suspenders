@@ -32,6 +32,20 @@ and every klh repo. The on-write gate **blocks** any .ts past 1500 lines
 cleared; fleet-board, coord, board-html and the fleet-board suite all live
 under the limit).
 
+## UI Engineering Law
+
+Console/board UI is **Lit web components + CSS design tokens**.
+**NEVER `innerHTML`, never `document.write`** — anywhere, ever, including
+migrations of legacy chunks (they get REWRITTEN to lit-html templates, not
+ported). Follow the `lit-dev` + `frontend-ui-engineering` skills
+(`~/.claude/skills-available/`): domain compositions (topbar, work-card,
+usage…), **native elements and integration first** (`<select>`, `<dialog>`,
+`<details>` before custom), inheritance via composition. Components own
+their DOM (shadow DOM, reactive properties, CustomEvents); tokens own the
+styling (surface/ink/spacing/type + plane hues). Lit is vendored (offline
+LAN — never CDN). Legacy string chunks retire per the W184 staged
+migration — elimination, not deprecation.
+
 ## Streams Over Buffers
 
 Streaming interfaces by default — no whole-payload buffering or memory
