@@ -739,6 +739,75 @@ export async function verifyJwt(
 		);
 	return { ok: true, claims: j.claims, keyId: j.claims.jti };
 }
+// id_token validation for the console login flow (W175): the same RS256
+// trust chain as verifyJwt's oidc path (discovery → JWKS, iss, audience,
+// expiry) via a synthetic Bearer request; verifyIdToken (below) adds the
+// nonce check + name-claim mapping on top of this core.
+export async function verifyIdTokenSign(
+	token: string,
+	expected: {
+		iss: string;
+		audience: string;
+		discovery: string;
+		fetchImpl?: typeof fetch;
+		now?: () => number;
+	},
+): Promise<
+	| { ok: true; claims: Record<string, unknown> }
+	| { ok: false; code: string; error: string }
+> {
+	const headers = {
+		get: (n: string): string | null =>
+			n.toLowerCase() === "authorization" ? `Bearer ${token}` : null,
+	};
+	const r = await verifyJwt({ headers }, undefined, {
+		config: {
+			issuers: [
+				{
+					type: "oidc",
+					iss: expected.iss,
+					discovery: expected.discovery,
+					audience: expected.audience,
+				},
+			],
+		},
+		fetchImpl: expected.fetchImpl,
+		now: expected.now,
+	});
+	if (!r.ok) return { ok: false, code: r.code, error: r.error };
+	const p = r.claims as unknown as Record<string, unknown>;
+	return { ok: true, claims: p };
+}
+// The public wrapper: core signature/iss/aud/exp, then the id_token-only
+// checks — nonce (when the authorize request sent one) and the username.
+export async function verifyIdToken(
+	token: string,
+	expected: {
+		iss: string;
+		audience: string;
+		discovery: string;
+		nonce?: string;
+		fetchImpl?: typeof fetch;
+		now?: () => number;
+	},
+): Promise<
+	| { ok: true; claims: Record<string, unknown>; username: string | null }
+	| { ok: false; code: string; error: string }
+> {
+	const c = await verifyIdTokenSign(token, expected);
+	if (!c.ok) return c;
+	const p = c.claims;
+	if (expected.nonce !== undefined && p.nonce !== expected.nonce)
+		return {
+			ok: false,
+			code: "nonce_mismatch",
+			error: "id_token nonce mismatch",
+		};
+	const u = p.preferred_username;
+	const username =
+		typeof u === "string" ? u : typeof p.sub === "string" ? p.sub : null;
+	return { ok: true, claims: p, username };
+}
 // fingerprint helper — reports show FIRST/LAST 4 + length, never raw material
 export const fingerprint = (t: string): string =>
 	`${t.slice(0, 4)}…${t.slice(-4)} (${String(t.length)} chars)`;

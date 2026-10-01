@@ -1,21 +1,6 @@
 // hooks/board/routes-meta.ts — meta: /llms.txt (LLMS_TXT), / (the SPA page), 404 tail (W157 route module).
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
-import { CLI, db } from "./context.ts";
-import { json } from "./helpers.ts";
-import {
-	tasks,
-	activity,
-	sessions,
-	board,
-	claims,
-	events,
-	inbox,
-	llm,
-} from "./data.ts";
-import { orchestrate } from "./orch.ts";
-import { servicemon } from "../lib/servicemon.ts";
-import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "../bin/fleet-board-html.ts";
 
 export const LLMS_TXT = `# suspenders
@@ -44,7 +29,10 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - GET /console/belt   gateway view (read-only): resolved routing-policy.yaml (ladder, budgets), buckle upstreams pool, :4101/:4100 servicemon health, belt API reachability
 - GET /console/local  Caddy-served .local services from the klh-local registry (static view)
 - GET /console/settings   settings hub — one entry per feature (belt budgets, buckle ladder+cooldowns, suspenders board knobs); every write previews a diff + confirms
-- GET /api/console/me avatar data: {ok, actor, tags, actors[], default_actor} — board host's latest session actor, "unassigned" until coord bootstrap --actor stamps one
+- GET /api/console/me avatar data: {ok, actor, tags, actors[], default_actor, user, has_login} — the console session's actor (cookie; falls back to the host's latest stamped session, then the settings default)
+- GET /console/spend   self-service my-spend for the console session's actor: usage_rollup totals (by day/model, ?days=1..90), W141 budget counters (api_keys limits + budget_state), auth_events tail
+- GET /console/login   OIDC login (authorization-code + PKCE, authentik-first per W151) — redirects to the configured issuer; unconfigured renders setup guidance
+- GET /console/callback OIDC redirect target — validates state+PKCE, verifies the id_token (discovery→JWKS→RS256), mints the signed console session cookie
 - GET /llms.txt       this file
 
 ## Write endpoints (human at the board; origin/host guarded)
@@ -60,6 +48,8 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/orchestrate/register   register a proposed plan as a plan-gated work split through the work CLI (project, title, children required; children 2..8; the plan item is the split parent — the AGENTS.md add-plan-then-split flow)
 - POST /console/settings/preview   settings diff preview (origin/host guarded; form-encoded feature+values; invalid config = rejected with the parser's error, nothing written)
 - POST /console/settings/apply     settings apply (origin/host guarded; feature + values JSON + preview mtime; mtime guard rejects concurrent edits; atomic tmp+rename write to the allowlisted config path only)
+- POST /console/actor   the LIVE actor switch (origin/host guarded; JSON {actor} — must be a known actor, the settings default, or the logged-in user): stamps the signed console session cookie + an auth_events actor_switched row
+- POST /console/logout  clear the console session (origin/host guarded; auth_events logout row)
 
 ## Advice LLM
 
@@ -78,7 +68,7 @@ and nothing registers. Nothing else on the board depends on it.
 a Threads thing — http://www.threads.dk`;
 
 export async function handleMeta(
-	req: Request,
+	_req: Request,
 	url: URL,
 ): Promise<Response | null> {
 	if (url.pathname === "/llms.txt")
@@ -97,6 +87,7 @@ export async function handleMeta(
 				"cache-control": "no-store",
 			},
 		});
+	// the 404 tail — last handler, always matches (kept: handleMeta never
+	// returns null; the signature stays for the handler-list uniformity)
 	return new Response("not found", { status: 404 });
-	return null;
 }

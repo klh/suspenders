@@ -3,8 +3,6 @@
 // sibling modules and the route modules import them.
 
 import { db, BELT_REPO } from "./context.ts";
-import { json } from "./helpers.ts";
-import { sessions } from "./data.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
 import {
 	ConfigError,
@@ -14,7 +12,7 @@ import {
 	resolvePolicy,
 } from "../lib/board-config.ts";
 import type { PolicyPatch, PolicyGatewayParsed } from "../lib/board-config.ts";
-import {
+import type {
 	ConsoleMe,
 	BeltView,
 	Feature,
@@ -50,6 +48,158 @@ export const consoleMe = (): ConsoleMe => {
 		defaultActor: readBoardSettings().settings.default_actor ?? "",
 	};
 };
+
+// ─── W175: my-spend data (self-service per-actor budgets/spend) ───────────
+export interface SpendWindow {
+	tokens: number;
+	requests: number;
+}
+
+// the my-spend payload for one actor: window usage + per-model breakdown
+export interface ActorUsage {
+	tokens: number;
+	requests: number;
+	byDay: { day: string; tokens: number; requests: number }[];
+	byModel: { model: string; tokens: number; requests: number }[];
+}
+
+export const actorUsage = (
+	q: {
+		query(sql: string): {
+			get(...v: unknown[]): unknown;
+			all(...v: unknown[]): unknown[];
+		};
+	},
+	actor: string,
+	days: number,
+	nowMs = Date.now(),
+): ActorUsage => {
+	const from = Math.floor((nowMs - days * 86_400_000) / 3_600_000) * 3_600_000;
+	const to = Math.floor(nowMs / 3_600_000) * 3_600_000;
+	const win = "hour_bucket >= ? AND hour_bucket <= ?";
+	const tot = q
+		.query(
+			"SELECT COALESCE(SUM(in_tok+out_tok+cache_r+cache_c),0) AS tok, COALESCE(SUM(requests),0) AS rq FROM usage_rollup WHERE actor = ? AND " +
+				win,
+		)
+		.get(actor, from, to) as { tok: number; rq: number } | null;
+	const dayRows = q
+		.query(
+			"SELECT (hour_bucket/86400000)*86400000 AS d, SUM(in_tok+out_tok+cache_r+cache_c) AS tok, SUM(requests) AS rq FROM usage_rollup WHERE actor = ? AND " +
+				win +
+				" GROUP BY d ORDER BY d",
+		)
+		.all(actor, from, to) as { d: number; tok: number; rq: number }[];
+	const modelRows = q
+		.query(
+			"SELECT model, SUM(in_tok+out_tok+cache_r+cache_c) AS tok, SUM(requests) AS rq FROM usage_rollup WHERE actor = ? AND " +
+				win +
+				" GROUP BY model ORDER BY tok DESC",
+		)
+		.all(actor, from, to) as { model: string; tok: number; rq: number }[];
+	return {
+		tokens: tot?.tok ?? 0,
+		requests: tot?.rq ?? 0,
+		byDay: dayRows.map((r) => ({
+			day: new Date(r.d).toISOString().slice(0, 10),
+			tokens: r.tok ?? 0,
+			requests: r.rq ?? 0,
+		})),
+		byModel: modelRows.map((r) => ({
+			model: r.model,
+			tokens: r.tok ?? 0,
+			requests: r.rq ?? 0,
+		})),
+	};
+};
+
+// budgets: the actor's active access keys (W141 governance) + the W135 O(1)
+// counters. budget_state rows are shown as the facts they are — (key_id,
+// window) usage counters; limits ride api_keys.rpm_limit/tpm_limit.
+export interface ActorBudget {
+	key_id: string;
+	label: string | null;
+	team: string | null;
+	rpm_limit: number | null;
+	tpm_limit: number | null;
+	rows: {
+		window: string;
+		used_rpm: number;
+		used_tpm: number;
+		window_start: number;
+	}[];
+}
+
+export const actorBudgets = (
+	q: {
+		query(sql: string): {
+			get(...v: unknown[]): unknown;
+			all(...v: unknown[]): unknown[];
+		};
+	},
+	actor: string,
+): ActorBudget[] => {
+	const keys = q
+		.query(
+			"SELECT key_id, name, team, rpm_limit, tpm_limit FROM api_keys WHERE actor = ? AND token_type = 'access' AND revoked_at IS NULL AND rotated_at IS NULL ORDER BY created_at DESC LIMIT 50",
+		)
+		.all(actor) as {
+		key_id: string;
+		name: string | null;
+		team: string | null;
+		rpm_limit: number | null;
+		tpm_limit: number | null;
+	}[];
+	return keys.map((k) => {
+		const rows = q
+			.query(
+				"SELECT window, used_rpm, used_tpm, window_start FROM budget_state WHERE key_id = ? ORDER BY window",
+			)
+			.all(k.key_id) as {
+			window: string;
+			used_rpm: number;
+			used_tpm: number;
+			window_start: number;
+		}[];
+		let label: string | null = null;
+		try {
+			label = (JSON.parse(k.name ?? "") as { label?: string }).label ?? null;
+		} catch {
+			label = k.name ?? null;
+		}
+		return {
+			key_id: k.key_id,
+			label,
+			team: k.team,
+			rpm_limit: k.rpm_limit,
+			tpm_limit: k.tpm_limit,
+			rows,
+		};
+	});
+};
+
+// the actor's recent identity-ledger rows (auth_events) — last 10, newest first
+export interface ActorAuthEvent {
+	ts: number;
+	event: string;
+	via: string | null;
+}
+
+export const actorAuthEvents = (
+	q: {
+		query(sql: string): {
+			all(...v: unknown[]): unknown[];
+		};
+	},
+	actor: string,
+	limit = 10,
+): ActorAuthEvent[] =>
+	q
+		.query(
+			"SELECT ts, event, via FROM auth_events WHERE actor = ? ORDER BY ts DESC LIMIT " +
+				Number(limit),
+		)
+		.all(actor) as ActorAuthEvent[];
 
 export const healthProbe = async (
 	name: string,

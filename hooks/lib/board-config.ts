@@ -306,6 +306,11 @@ export interface BoardSettings {
 	status_refresh_s?: number;
 	harvest_ttl_s?: number;
 	default_actor?: string;
+	// W175 console login (OIDC authorization-code + PKCE, authentik-first per
+	// the W151 verdict). Public-client pair: no secret in the settings file —
+	// authentik issues a PKCE client. Empty = login honestly unconfigured.
+	oidc_issuer?: string;
+	oidc_client_id?: string;
 }
 
 export const boardSettingsPath = (home = process.env.HOME ?? ""): string =>
@@ -339,6 +344,24 @@ export function validateBoardSettings(v: unknown): BoardSettings {
 		if (typeof da !== "string" || da.length > 200)
 			throw new ConfigError("default_actor: must be a string (max 200 chars)");
 		out.default_actor = da;
+	}
+	const oi = o.oidc_issuer;
+	if (oi !== undefined && oi !== null && oi !== "") {
+		if (typeof oi !== "string" || oi.length > 300)
+			throw new ConfigError("oidc_issuer: must be a string (max 300 chars)");
+		let ok = false;
+		try {
+			const u = new URL(oi);
+			ok = u.protocol === "https:" || u.protocol === "http:";
+		} catch {}
+		if (!ok) throw new ConfigError("oidc_issuer: must be an http(s) URL");
+		out.oidc_issuer = oi;
+	}
+	const oc = o.oidc_client_id;
+	if (oc !== undefined && oc !== null && oc !== "") {
+		if (typeof oc !== "string" || oc.length > 200)
+			throw new ConfigError("oidc_client_id: must be a string (max 200 chars)");
+		out.oidc_client_id = oc;
 	}
 	return out;
 }
@@ -387,6 +410,8 @@ export function formToBoardSettings(f: Record<string, string>): BoardSettings {
 			f.status_refresh_s === "" ? undefined : Number(f.status_refresh_s),
 		harvest_ttl_s: f.harvest_ttl_s === "" ? undefined : Number(f.harvest_ttl_s),
 		default_actor: f.default_actor,
+		oidc_issuer: f.oidc_issuer,
+		oidc_client_id: f.oidc_client_id,
 	});
 }
 

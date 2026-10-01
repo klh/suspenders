@@ -24,6 +24,10 @@ export interface ConsoleMe {
 	tags: Record<string, string>;
 	actors: string[];
 	defaultActor: string;
+	// W175: the logged-in user (OIDC console session) or null; hasLogin=true
+	// renders the "log in" link (an issuer is configured), logout otherwise.
+	user: string | null;
+	hasLogin: boolean;
 }
 
 // ─── shared chrome ────────────────────────────────────────────────────────
@@ -58,6 +62,10 @@ const SHELL_CSS = `
 .cavsec { margin-top:9px; font-size:10px; color:#98958e; text-transform:uppercase; letter-spacing:.06em; }
 .cavdrop select { width:100%; margin-top:4px; }
 .cavnote { margin-top:7px; font-size:10.5px; color:#98958e; }
+.cavrow { display:flex; gap:12px; margin-top:9px; align-items:center; }
+.cavlink { font-size:11px; color:#d8900f; text-decoration:none; background:none; border:none; padding:0; cursor:pointer; font:inherit; font-size:11px; }
+.cavlink:hover { text-decoration:underline; }
+.cavform { display:inline; }
 `;
 
 // gear icon — inline SVG, no icon font, no external deps
@@ -83,12 +91,14 @@ export const topbar = (
 	const actor = me?.actor ?? "unassigned";
 	const sel = (): string => {
 		const opts = me.actors.includes(me.defaultActor)
-			? me.actors
+			? me.actors.slice()
 			: [me.defaultActor, ...me.actors];
-		return `<select id="cavsel" aria-label="switch actor (demo preview)">${opts.map((a) => `<option${a === me.defaultActor ? " selected" : ""}>${esc(a)}</option>`).join("")}</select>`;
+		if (me.user && !opts.includes(me.user)) opts.unshift(me.user);
+		const chosen = actor !== "unassigned" ? actor : me.defaultActor;
+		return `<select id="cavsel" aria-label="switch actor">${opts.map((a) => `<option${a === chosen ? " selected" : ""}>${esc(a)}</option>`).join("")}</select>`;
 	};
 	const dropInner = me
-		? `<div class="cavhead"><span class="cavbig">${esc(initial(actor))}</span><span><span class="cavname">${esc(actor)}</span><br><span class="cavsub">${tagLine(me.tags)}</span></span></div><div class="cavsec">switch actor (demo preview)</div>${sel()}<div class="cavnote">demo preview — stamps nothing live; live switching is a follow-up item</div>`
+		? `<div class="cavhead"><span class="cavbig">${esc(initial(actor))}</span><span><span class="cavname">${esc(actor)}</span><br><span class="cavsub">${tagLine(me.tags)}</span></span></div><div class="cavsec">switch actor</div>${sel()}<div class="cavnote">switching stamps your console session + the auth ledger (auth_events)</div><div class="cavrow"><a class="cavlink" href="/console/spend">my spend</a>${me.user ? `<form method="post" action="/console/logout" class="cavform"><button type="submit" class="cavlink">log out</button></form>` : me.hasLogin ? `<a class="cavlink" href="/console/login">log in</a>` : ""}</div>`
 		: `<div class="cavname" id="cavload">loading actor…</div>`;
 	return `<style>${SHELL_CSS}</style><nav id="cbar" aria-label="klh console"><a class="cw" href="/">klh·console</a><span class="cnavs"><a class="cnav"${cur("belt")} href="/console/belt">belt</a><a class="cnav"${cur("suspenders")} href="/">suspenders</a><a class="cnav"${cur("local")} href="/console/local">local</a></span><span class="cend"><a class="cgear"${cur("settings")} href="/console/settings" aria-label="console settings" title="settings">${GEAR}</a><span class="cavwrap"><button type="button" id="cavbtn" class="cavbtn" aria-haspopup="true" aria-expanded="false" aria-label="current actor">${esc(initial(actor))}</button><span id="cavdrop" class="cavdrop" hidden>${dropInner}</span></span></span></nav>`;
 };
@@ -104,6 +114,11 @@ function set(o){open=o;drop.hidden=!o;btn.setAttribute('aria-expanded',o?'true':
 btn.addEventListener('click',function(e){e.stopPropagation();set(!open);});
 document.addEventListener('click',function(e){if(open&&e.target instanceof Node&&!drop.contains(e.target))set(false);});
 document.addEventListener('keydown',function(e){if(open&&e.key==='Escape'){set(false);btn.focus();}});`;
+// live actor switch: POST /console/actor then reload — the panel's select
+// exists on server-rendered pages; the SPA fill adds its own handler.
+const TOPBAR_JS_C = `
+var csel=document.getElementById('cavsel');
+if(csel){csel.addEventListener('change',function(){fetch('/console/actor',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({actor:csel.value})}).then(function(r){if(r.ok)location.reload();});});}`;
 
 // Panel fill for the SPA (no server-rendered me): one /api/console/me fetch
 // builds the same panel the console pages render server-side.
@@ -118,17 +133,24 @@ head.querySelector('.cavname').textContent=d.actor||'unassigned';
 var tg=(d.tags&&d.tags.team?d.tags.team:'')+(d.tags&&d.tags.department?(d.tags.team?' · ':'')+d.tags.department:'');
 head.querySelector('.cavsub').textContent=tg||'no team tags';
 var load=document.getElementById('cavload');load.replaceWith(head);
-var sec=document.createElement('div');sec.className='cavsec';sec.textContent='switch actor (demo preview)';head.after(sec);
-var sel=document.createElement('select');sel.id='cavsel';sel.setAttribute('aria-label','switch actor (demo preview)');
+var sec=document.createElement('div');sec.className='cavsec';sec.textContent='switch actor';head.after(sec);
+var sel=document.createElement('select');sel.id='cavsel';sel.setAttribute('aria-label','switch actor');
 var opts=(d.actors&&d.actors.length)?d.actors.slice():[];
 if(d.default_actor&&opts.indexOf(d.default_actor)<0)opts.unshift(d.default_actor);
 if(!opts.length)opts=['unassigned'];
 opts.forEach(function(a){var o=document.createElement('option');o.textContent=a;if(a===d.default_actor)o.selected=true;sel.appendChild(o);});
 sec.after(sel);
-var note=document.createElement('div');note.className='cavnote';note.textContent='demo preview — stamps nothing live; live switching is a follow-up item';sel.after(note);
+var note=document.createElement('div');note.className='cavnote';note.textContent='switching stamps your console session + the auth ledger (auth_events)';sel.after(note);
+var row=document.createElement('div');row.className='cavrow';
+var link=document.createElement('a');link.className='cavlink';link.href='/console/spend';link.textContent='my spend';row.appendChild(link);
+if(d.has_login&&!d.user){var li=document.createElement('a');li.className='cavlink';li.href='/console/login';li.textContent='log in';row.appendChild(li);}
+if(d.user){var fo=document.createElement('form');fo.method='post';fo.action='/console/logout';fo.className='cavform';
+var lb=document.createElement('button');lb.type='submit';lb.className='cavlink';lb.textContent='log out';fo.appendChild(lb);row.appendChild(fo);}
+sel.after(row);
+sel.addEventListener('change',function(){fetch('/console/actor',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({actor:sel.value})}).then(function(r){if(r.ok)location.reload();});});
 }).catch(function(){});}
 })();`;
-export const TOPBAR_JS = TOPBAR_JS_A + TOPBAR_JS_B;
+export const TOPBAR_JS = TOPBAR_JS_A + TOPBAR_JS_C + TOPBAR_JS_B;
 
 // ─── page shell ───────────────────────────────────────────────────────────
 export const consolePage = (
@@ -330,10 +352,22 @@ export const settingsFormPage = (
 			) +
 			`</div>` +
 			textField(
-				"default actor (demo switch preselect)",
+				"default actor (dropdown preselect fallback)",
 				"default_actor",
 				s.default_actor ?? "",
-				"preselects the avatar dropdown's demo switch; coord bootstrap default is a follow-up",
+				"preselects the avatar dropdown when no console session is stamped",
+			) +
+			textField(
+				"oidc_issuer",
+				"oidc_issuer",
+				s.oidc_issuer ?? "",
+				"console login issuer base URL (e.g. https://authentik.local/application/o/klh-console/) — this form changes but never clears a knob; edit suspenders-board.json to unset",
+			) +
+			textField(
+				"oidc_client_id",
+				"oidc_client_id",
+				s.oidc_client_id ?? "",
+				"the issuer's public PKCE client id for this console",
 			) +
 			`</div>`;
 		return formFrame(
@@ -407,7 +441,7 @@ export const settingsIndexPage = (a: SettingsIndexArgs): string => {
 		`<div class="panel"><h2>suspenders-board.json · ${esc(s.path)}${s.exists ? "" : " · not created yet"}</h2>` +
 		(s.error
 			? `<div class="errbox">current file does not parse: ${esc(s.error)}</div>`
-			: `<div class="knobs"><span class="kchip">STATUS_REFRESH_S: <b>${s.settings.status_refresh_s ?? "default (5s)"}</b></span><span class="kchip">harvest TTL: <b>${s.settings.harvest_ttl_s ? `${s.settings.harvest_ttl_s}s` : "default (300s)"}</b></span><span class="kchip">default actor: <b>${s.settings.default_actor ? esc(s.settings.default_actor) : "unset"}</b></span></div>`) +
+			: `<div class="knobs"><span class="kchip">STATUS_REFRESH_S: <b>${s.settings.status_refresh_s ?? "default (5s)"}</b></span><span class="kchip">harvest TTL: <b>${s.settings.harvest_ttl_s ? `${s.settings.harvest_ttl_s}s` : "default (300s)"}</b></span><span class="kchip">default actor: <b>${s.settings.default_actor ? esc(s.settings.default_actor) : "unset"}</b></span><span class="kchip">login: <b>${s.settings.oidc_issuer ? esc(s.settings.oidc_issuer) : "no OIDC issuer configured"}</b></span></div>`) +
 		`</div>`;
 	return consolePage(
 		"SETTINGS",
@@ -451,4 +485,99 @@ export const previewPage = (a: PreviewArgs, me?: ConsoleMe): string => {
 			confirmForm,
 		me,
 	);
+};
+
+// ─── my spend (/console/spend) — self-service per-actor budgets/spend ─────
+export interface SpendArgs {
+	actor: string;
+	user: string | null;
+	days: number;
+	tokens: number;
+	requests: number;
+	byDay: { day: string; tokens: number; requests: number }[];
+	byModel: { model: string; tokens: number; requests: number }[];
+	budgets: {
+		key_id: string;
+		label: string | null;
+		team: string | null;
+		rpm_limit: number | null;
+		tpm_limit: number | null;
+		rows: {
+			window: string;
+			used_rpm: number;
+			used_tpm: number;
+			window_start: number;
+		}[];
+	}[];
+	events: { ts: number; event: string; via: string | null }[];
+}
+
+const nfmt = (n: number): string => n.toLocaleString("en-US");
+
+const tile = (n: number, label: string): string =>
+	`<div class="tile"><div class="tnum num">${nfmt(n)}</div><div class="tkey">${esc(label)}</div></div>`;
+
+const spendTiles = (a: SpendArgs): string =>
+	`<div class="tiles">${tile(a.tokens, `tokens · last ${a.days}d`)}${tile(a.requests, `requests · last ${a.days}d`)}</div>`;
+
+const dayRow = (r: { day: string; tokens: number; requests: number }): string =>
+	`<tr><td>${esc(r.day)}</td><td class="num">${nfmt(r.tokens)}</td><td class="num">${nfmt(r.requests)}</td></tr>`;
+
+const modelRow = (r: {
+	model: string;
+	tokens: number;
+	requests: number;
+}): string =>
+	`<tr><td>${esc(r.model)}</td><td class="num">${nfmt(r.tokens)}</td><td class="num">${nfmt(r.requests)}</td></tr>`;
+
+const budgetRow = (k: SpendArgs["budgets"][number]): string => {
+	const head = `<tr><td><b>${esc(k.label ?? k.key_id.slice(0, 8))}</b><span class="dim"> · ${esc(k.key_id.slice(0, 8))}</span></td><td class="num">${k.rpm_limit ?? "—"} / min</td><td class="num">${k.tpm_limit ?? "—"} / min</td></tr>`;
+	const rows = k.rows
+		.map(
+			(w) =>
+				`<tr><td class="dim">· window ${esc(w.window)}</td><td class="num">${nfmt(w.used_rpm)} req</td><td class="num">${nfmt(w.used_tpm)} tok</td></tr>`,
+		)
+		.join("");
+	return head + rows;
+};
+
+export const spendPage = (a: SpendArgs, me?: ConsoleMe): string => {
+	const body =
+		`<style>${PILL_CSS}</style>` +
+		spendTiles(a) +
+		`<div class="panel"><h2>usage by day</h2>` +
+		(a.byDay.length
+			? `<table class="ct"><thead><tr><th>day</th><th>tokens</th><th>requests</th></tr></thead><tbody>${a.byDay.map(dayRow).join("")}</tbody></table>`
+			: `<p class="dimpl">no usage rows in the window for this actor</p>`) +
+		(a.byModel.length
+			? `<div class="panel"><h2>usage by model</h2><table class="ct"><thead><tr><th>model</th><th>tokens</th><th>requests</th></tr></thead><tbody>${a.byModel.map(modelRow).join("")}</tbody></table></div>`
+			: "") +
+		`<div class="panel"><h2>budgets (buckle keys)</h2>` +
+		(a.budgets.length
+			? `<table class="ct"><tbody>${a.budgets.map(budgetRow).join("")}</tbody></table>`
+			: `<p class="dimpl">no active buckle keys for this actor — budgets are enforced at the belt gateway (W141), provisioned via the buckle governance plane</p>`) +
+		`<div class="panel"><h2>identity ledger (last 10)</h2>` +
+		(a.events.length
+			? `<table class="ct"><tbody>${a.events.map((e2) => `<tr><td class="dim">${new Date(e2.ts).toISOString().slice(0, 16).replace("T", " ")}</td><td>${esc(e2.event)}</td><td class="dim">${esc(e2.via ?? "")}</td></tr>`).join("")}</tbody></table>`
+			: `<p class="dimpl">no auth_events rows for this actor yet</p>`);
+	return consolePage(`MY SPEND · ${a.actor}`, "local", body, me);
+};
+
+// ─── login (/console/login) — unconfigured guidance + error surface ───────
+// (when an issuer IS configured the route redirects straight to it; this
+// page only renders when there is nothing to redirect to, or something failed)
+export interface LoginArgs {
+	configured: boolean;
+	error?: string | null;
+}
+
+export const loginPage = (a: LoginArgs, me?: ConsoleMe): string => {
+	const card = a.configured
+		? `<div class="panel"><h2>log in</h2>` +
+			(a.error
+				? `<div class="errbox">${esc(a.error)}</div>`
+				: `<p class="dimpl">redirecting to your identity provider…</p>`) +
+			`</div>`
+		: `<div class="panel"><h2>log in</h2><p class="dimpl">No identity provider configured. The console login is an OIDC authorization-code + PKCE flow (authentik-first per the W151 verdict; any compliant issuer works).</p><p class="cfoot">Set two knobs on <a href="/console/settings/suspenders">the suspenders settings page</a>: <b>oidc_issuer</b> (the issuer base URL, e.g. https://authentik.local/application/o/klh-console/) and <b>oidc_client_id</b> (a public PKCE client). SCIM pre-provisioning is a later item.</p></div>`;
+	return consolePage("CONSOLE · LOGIN", "settings", card, me);
 };
