@@ -141,6 +141,17 @@ fi
 
 # --with-launchd: template-substitute and load the macOS agents
 if [[ $WITH_LAUNCHD -eq 1 ]]; then
+  # W172 LAN trust model: the board is loopback-only by default. A non-loopback
+  # SUSPENDERS_BIND without a shared secret makes the board REFUSE to start at
+  # runtime — warn here so the operator sees why before reboot.
+  case ${SUSPENDERS_BIND:-127.0.0.1} in
+    127.0.0.1 | ::1 | localhost) ;;
+    *)
+      if [[ -z ${SUSPENDERS_BOARD_TOKEN:-} ]]; then
+        echo "WARNING: SUSPENDERS_BIND=${SUSPENDERS_BIND} without SUSPENDERS_BOARD_TOKEN — the fleet board will refuse to start (W172 trust gate). Export SUSPENDERS_BOARD_TOKEN, or drop SUSPENDERS_BIND for the loopback default (LAN access rides the Caddy edge)."
+      fi
+      ;;
+  esac
   if [[ "$(uname)" != "Darwin" ]]; then
     echo "→ --with-launchd skipped (not macOS)"
   else
@@ -149,6 +160,7 @@ if [[ $WITH_LAUNCHD -eq 1 ]]; then
       name="$(basename "$f")"
       out="$HOME/Library/LaunchAgents/$name"
       sed -e "s|__BUN__|$BUN_BIN|" -e "s|__HOME__|$HOME|" -e "s|__PREFIX__|$PREFIX|" -e "s|__REPO__|$REPO_DIR|" \
+        -e "s|__BIND__|${SUSPENDERS_BIND:-127.0.0.1}|" -e "s|__BOARD_TOKEN__|${SUSPENDERS_BOARD_TOKEN:-}|" \
         -e "s|__BELT_URL__|${BELT_URL:-http://127.0.0.1:4100}|" -e "s|__BELT_TOKEN__|${BELT_TOKEN:-}|" "$f" >"$out"
       launchctl bootout "gui/$(id -u)/${name%.plist}" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$out"
@@ -172,7 +184,7 @@ fi
 KLH_LOCAL_BIN="$HOME/.local/bin/klh-local"
 if [[ -x "$KLH_LOCAL_BIN" ]] && command -v caddy >/dev/null 2>&1; then
   if "$KLH_LOCAL_BIN" register suspenders --port 7799 --health /; then
-    echo "→ suspenders.local → 127.0.0.1:7799 (klh-local / Caddy)"
+    echo "→ suspenders.local → 127.0.0.1:7799 (klh-local / Caddy PQ-TLS edge — the board's LAN exposure)"
   else
     echo "→ klh-local register failed (non-fatal) — board stays on http://127.0.0.1:7799"
   fi
@@ -186,6 +198,7 @@ echo "  bun $PREFIX/bin/fleet-board.ts        # live fleet board (+ decision for
 echo "  bun $PREFIX/bin/work.ts ready         # what the fleet can pick up"
 echo "  bun $PREFIX/bin/monitor.ts            # control-plane health"
 echo "env knobs: SUSPENDERS_LLM_URL / SUSPENDERS_LLM_MODEL / SUSPENDERS_LLM_KEY (advice worker)"
+echo "trust (W172): board binds 127.0.0.1; LAN exposure = Caddy edge, or export SUSPENDERS_BOARD_TOKEN (every request then needs 'Authorization: Bearer <token>')"
 echo "local-llm: $LLM_HOME (swarm serve supervisor; BELT_TIER=minimal residents + :4000 router)"
 echo "  bun $LLM_HOME/swarm.ts status   # swarm health"
 echo "  bun $LLM_HOME/swarm.ts serve    # resident supervisor (launchd label com.suspenders.local-llm)"

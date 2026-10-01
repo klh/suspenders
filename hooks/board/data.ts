@@ -3,7 +3,6 @@
 // sibling modules and the route modules import them.
 
 import {
-	CLI,
 	db,
 	BIND,
 	REG_DIR,
@@ -11,7 +10,7 @@ import {
 	gatePath,
 	sessionStartPath,
 } from "./context.ts";
-import { json } from "./helpers.ts";
+import { boardToken, isLoopbackBind } from "./gate.ts";
 import {
 	projOf,
 	syncDecisions,
@@ -263,7 +262,15 @@ export async function setupChecks(): Promise<unknown[]> {
 			detail: llm.detail,
 			fix: llm.ok ? null : "local LLM stack docs",
 		},
-		{ id: "bind", label: "LAN binding", ok: true, detail: BIND, fix: null },
+		{
+			id: "bind",
+			label: "LAN binding",
+			ok: true,
+			detail: isLoopbackBind(BIND)
+				? `${BIND} (loopback-only — LAN access rides the Caddy edge${boardToken() ? "; shared-secret gate ON" : ""})`
+				: `${BIND}${boardToken() ? " (non-loopback, shared-secret gate ON)" : " (NON-LOOPBACK AND UNGATED — see the trust model in docs/board-api.md)"}`,
+			fix: null,
+		},
 	];
 }
 

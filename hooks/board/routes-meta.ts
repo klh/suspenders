@@ -1,21 +1,6 @@
 // hooks/board/routes-meta.ts — meta: /llms.txt (LLMS_TXT), / (the SPA page), 404 tail (W157 route module).
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
-import { CLI, db } from "./context.ts";
-import { json } from "./helpers.ts";
-import {
-	tasks,
-	activity,
-	sessions,
-	board,
-	claims,
-	events,
-	inbox,
-	llm,
-} from "./data.ts";
-import { orchestrate } from "./orch.ts";
-import { servicemon } from "../lib/servicemon.ts";
-import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "../bin/fleet-board-html.ts";
 
 export const LLMS_TXT = `# suspenders
@@ -27,6 +12,12 @@ cursors, inbox), decision forks with optional LLM advice, and this fleet
 board as the human + machine-readable view.
 
 Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's user-level Caddy)
+
+Access is a trust gate, not an auth system: the board binds 127.0.0.1 by
+default and LAN exposure rides the Caddy PQ-TLS edge. When the operator has
+exported SUSPENDERS_BOARD_TOKEN, every request needs
+"Authorization: Bearer <token>" — reads, writes, /status and /metrics
+included. A non-loopback bind without that token refuses to start.
 
 ## GET endpoints
 
@@ -78,18 +69,17 @@ and nothing registers. Nothing else on the board depends on it.
 a Threads thing — http://www.threads.dk`;
 
 export async function handleMeta(
-	req: Request,
+	_req: Request,
 	url: URL,
 ): Promise<Response | null> {
 	if (url.pathname === "/llms.txt")
-		if (url.pathname === "/llms.txt")
-			// static plain-text agent contract (see LLMS_TXT above)
-			return new Response(LLMS_TXT, {
-				headers: {
-					"content-type": "text/plain; charset=utf-8",
-					"cache-control": "no-store",
-				},
-			});
+		// static plain-text agent contract (see LLMS_TXT above)
+		return new Response(LLMS_TXT, {
+			headers: {
+				"content-type": "text/plain; charset=utf-8",
+				"cache-control": "no-store",
+			},
+		});
 	if (url.pathname === "/")
 		return new Response(HTML, {
 			headers: {
@@ -98,5 +88,4 @@ export async function handleMeta(
 			},
 		});
 	return new Response("not found", { status: 404 });
-	return null;
 }

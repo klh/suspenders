@@ -109,7 +109,7 @@ A worked session — bootstrap, register work, capability-gated dispatch, consul
 ## Security
 
 - The database stores no credentials; the secrets gate scans every Bash call (gitleaks + inline detection) before execution, repo-scoped even across `cd` boundaries.
-- The board binds to 127.0.0.1 only. LAN exposure is opt-in via `SUSPENDERS_BIND=0.0.0.0` (for example to reach it as `suspenders.local` behind a local reverse proxy). Write endpoints require a same-origin request from a browser, or a loopback Host for CLI clients.
+- The board binds to 127.0.0.1 only. LAN exposure is opt-in: route it through the Caddy PQ-TLS edge (`suspenders.local`), or set `SUSPENDERS_BOARD_TOKEN` — every request then needs `Authorization: Bearer <token>` (reads, writes, `/status` and `/metrics` included; constant-time compare). A non-loopback `SUSPENDERS_BIND` without the token refuses to start. Write endpoints additionally require a same-origin request from a browser, or a loopback / exact-bind Host for CLI clients — a wildcard bind name (`0.0.0.0`) is never accepted as Host.
 - `advise.ts` sends decision text and control-plane metadata to the LLM endpoint you configure (local by default). Point `SUSPENDERS_LLM_URL` at a cloud API only if that content may leave the machine.
 
 ## Docs

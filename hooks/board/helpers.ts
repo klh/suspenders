@@ -3,7 +3,7 @@
 // sibling modules and the route modules import them.
 
 import { BIND } from "./context.ts";
-import { sessions, board, payload } from "./data.ts";
+import { wildcardBind } from "./gate.ts";
 
 export function json(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data), {
@@ -34,12 +34,16 @@ export function writeGuard(req: Request, _url: URL): Response | null {
 		return null;
 	}
 	const hname = host.replace(/:\d+$/, "");
+	// W172: the exact non-wildcard bind name may count as a trusted Host (the
+	// proxy case); a wildcard bind (0.0.0.0, ::) is every interface — anyone
+	// on the LAN can send that Host header, so it is never a trust anchor.
+	const bindName = BIND.toLowerCase();
 	const okHost =
 		["localhost", "127.0.0.1", "::1", "[::1]", "[0:0:0:0:0:0:0:1]"].includes(
 			hname,
 		) ||
-		hname === BIND.toLowerCase() ||
-		hname === `[${BIND.toLowerCase()}]`;
+		(!wildcardBind(bindName) &&
+			(hname === bindName || hname === `[${bindName}]`));
 	if (!host || !okHost)
 		return json({ ok: false, error: "untrusted host" }, 403);
 	return null;

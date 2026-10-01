@@ -13,6 +13,28 @@ frontend consumes in `hooks/bin/fleet-board-html.ts`. All endpoints return JSON 
 - Times are epoch ms; ages precomputed as `*_s` seconds.
 - Labels: the UI never renders raw sids when a label exists — responses include both.
 
+## Trust model (W172)
+
+The board is a single-user surface with a loopback-first trust model. Three
+rules (hooks/board/gate.ts):
+
+- **Default bind is 127.0.0.1** — zero-config for the one human on the host.
+  The launchd template ships loopback (`SUSPENDERS_BIND=__BIND__`, installer
+  default 127.0.0.1).
+- **LAN exposure** rides the klh-local Caddy PQ-TLS edge
+  (`suspenders.local → 127.0.0.1:7799`); trust terminates at the proxy. For
+  harder guarantees put client certificates on the Caddy vhost — the board
+  stays out of the auth business (no-auth-code law: a shared secret is a
+  gate, not an auth system).
+- **Shared-secret gate**: `SUSPENDERS_BOARD_TOKEN` set → EVERY request
+  (reads, writes, `/status`, `/metrics`) must carry
+  `Authorization: Bearer <token>`, compared constant-time. A non-loopback
+  `SUSPENDERS_BIND` without the token **refuses to start**.
+- Write endpoints additionally keep the origin/host guard (`writeGuard`):
+  same-origin for browsers, loopback or the exact non-wildcard bind name for
+  non-browser clients — a wildcard bind (`0.0.0.0`, `::`) is never a trust
+  anchor.
+
 ## GET /api/tasks?project=
 
 `{ ok, projects, tasks: [...] }` — every work_item not SUPERSEDED/DONE-with-owner,

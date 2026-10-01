@@ -9,14 +9,11 @@
 // its claims, inbox, lane state, and the event tail.
 
 import { db, PORT, BIND } from "../board/context.ts";
-import { json } from "../board/helpers.ts";
+import { bindTrustError, boardToken, gated } from "../board/gate.ts";
 import { projectList } from "../board/lanes.ts";
-import { board, claims, inbox } from "../board/data.ts";
-import { orchestrate } from "../board/orch.ts";
 import { tokenUsage } from "../lib/govdb.ts";
 import { scrub, servicemon } from "../lib/servicemon.ts";
 import { readBoardSettings } from "../lib/board-config.ts";
-import { hostname } from "node:os";
 import { handleData } from "../board/routes-data.ts";
 import { handleUsage } from "../board/routes-usage.ts";
 import { handleDrawer } from "../board/routes-drawer.ts";
@@ -84,10 +81,24 @@ const base = {
 };
 
 // W125 — the observability wrap: /status + /metrics ride the SAME fetch via
-// lib/servicemon.ts; the route body above stays untouched.
-Bun.serve(sm.wrapped(base));
+// lib/servicemon.ts; the route body above stays untouched. W172: the trust
+// gate wraps OUTSIDE the servicemon handler — inside would leave /status and
+// /metrics (the token aggregates!) answering unauthenticated.
+const TOKEN = boardToken();
+const trustErr = bindTrustError(BIND, TOKEN);
+if (trustErr) {
+	console.error(`fleet board: ${trustErr}`);
+	process.exit(1);
+}
+const monitored = sm.wrapped(base);
+Bun.serve({ ...monitored, fetch: gated(TOKEN, monitored.fetch) });
 console.log(
 	`fleet board → http://127.0.0.1:${PORT}  (governor.db, 1s poll; writes: /api/answer /api/ack /api/advise /api/comment /api/start /api/ship /api/orchestrate)`,
+);
+console.log(
+	TOKEN
+		? `trust: gated — every request needs "Authorization: Bearer $SUSPENDERS_BOARD_TOKEN" (bind ${BIND})`
+		: `trust: open loopback — LAN access rides the Caddy PQ-TLS edge (bind ${BIND})`,
 );
 
 // best-effort Bonjour/mDNS: while the board runs, http://suspenders.local:PORT
