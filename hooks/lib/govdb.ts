@@ -658,6 +658,24 @@ export function openGovernorDb(): Database {
 				`CREATE TRIGGER IF NOT EXISTS deltas_${tbl}_${op} AFTER ${op.toUpperCase()} ON ${tbl} BEGIN INSERT INTO deltas (ts, tbl, op, pk, before, after) VALUES (${deltaNow}, '${tbl}', '${op}', ${pk.replaceAll("$.", `${R}.`)}, ${op === "insert" ? "NULL" : deltaImg(cols, "OLD")}, ${op === "delete" ? "NULL" : deltaImg(cols, "NEW")}); END`,
 			);
 		}
+	// v7 — usage analytics (W127): sessions.actor/tags give Copilot-style
+	// per-user/license drill-down (actor = user or license id; tags = JSON
+	// {team, department, ...}), usage_rollup is the hourly token ledger the
+	// board's /api/usage serves: one row per (hour_bucket, actor, model),
+	// UPSERT-ADD semantics so harvesters never overwrite — they add. Adds ride
+	// the established idempotent pattern (table_info-guarded ALTER, guarded
+	// CREATE every open).
+	if (!sessCols.includes("actor"))
+		db.run("ALTER TABLE sessions ADD COLUMN actor TEXT");
+	if (!sessCols.includes("tags"))
+		db.run("ALTER TABLE sessions ADD COLUMN tags TEXT");
+	db.run(
+		"CREATE TABLE IF NOT EXISTS usage_rollup (hour_bucket INTEGER NOT NULL, actor TEXT NOT NULL, model TEXT NOT NULL, model_group TEXT NOT NULL, in_tok INTEGER NOT NULL DEFAULT 0, out_tok INTEGER NOT NULL DEFAULT 0, cache_r INTEGER NOT NULL DEFAULT 0, cache_c INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (hour_bucket, actor, model))",
+	);
+	db.run(
+		"CREATE INDEX IF NOT EXISTS usage_rollup_actor ON usage_rollup(actor, hour_bucket)",
+	);
+	if (uv < 7) db.run("PRAGMA user_version = 7");
 	migrateJSON(db);
 	return db;
 }

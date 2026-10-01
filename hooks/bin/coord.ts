@@ -679,7 +679,7 @@ if (cmd === "emit") {
 	const as =
 		arg("--as") ??
 		die(
-			"usage: bootstrap --as <sid> [--role r] [--parent sid] [--worktree w] [--caps shell,fs,...]",
+			"usage: bootstrap --as <sid> [--role r] [--parent sid] [--worktree w] [--caps shell,fs,...] [--actor id] [--tags json]",
 		);
 	// project identity is always derived (projectIdentity) — no --project
 	// override, it would let sessions fragment the graph by hand
@@ -710,11 +710,23 @@ if (cmd === "emit") {
 						.get(parentSid) as { capabilities: string | null } | null
 				)?.capabilities ?? null;
 	}
+	// W127 usage attribution: actor = user/license id, tags = JSON ({team,
+	// department, ...}). COALESCE on conflict keeps the first stamp across
+	// re-bootstraps, same trust class as capabilities.
+	const actor: string | null = arg("--actor") ?? null;
+	let tags: string | null = arg("--tags") ?? null;
+	if (tags) {
+		try {
+			tags = JSON.stringify(JSON.parse(tags));
+		} catch {
+			die("--tags must be valid JSON");
+		}
+	}
 	// liveness sweeps read THIS host's transcript tree — a remote lane's view
 	// would close live sessions it cannot see; sweeping stays a host concern
 	if (db.local) sweepStaleSessions(db as Database);
 	db.query(
-		"INSERT INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities) VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?) ON CONFLICT(sid) DO UPDATE SET project = excluded.project, role = excluded.role, hb = excluded.hb, capabilities = COALESCE(excluded.capabilities, sessions.capabilities)",
+		"INSERT INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, actor, tags) VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?) ON CONFLICT(sid) DO UPDATE SET project = excluded.project, role = excluded.role, hb = excluded.hb, capabilities = COALESCE(excluded.capabilities, sessions.capabilities), actor = COALESCE(excluded.actor, sessions.actor), tags = COALESCE(excluded.tags, sessions.tags)",
 	).run(
 		as,
 		project,
@@ -724,6 +736,8 @@ if (cmd === "emit") {
 		Date.now(),
 		Date.now(),
 		caps,
+		actor,
+		tags,
 	);
 	const mine = db
 		.query(
