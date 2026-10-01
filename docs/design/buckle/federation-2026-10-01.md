@@ -67,9 +67,41 @@ and spoke are the same box, and even there the key moves into identity.db
 under the hub's secrets home. Rotation is a hub operation; spoke config
 never changes on rotation (JWKS fetch).
 
+## Spoke install baseline (owner law, 2026-10-01)
+
+Installing suspenders ALWAYS installs the local-llm swarm: smallest models
+that fit the bill (the registry tier system — `BELT_TIER=minimal` = ≤4GB
+residents), downloaded at install time. belt/suspenders/buckle/local wire
+so that **every response traverses the local belt**, which routes to local
+LLMs first and echoes what the CENTRAL belt says this user may see and
+choose from (entitlements differ per user/team — the spoke menu is the
+hub menu plus the spoke-private local entries). Hub-defined visibility,
+spoke-executed routing; local models never appear in the hub menu.
+
+## Two-stage fit (routing, owner law)
+
+The quick regexp check (W96 grammar, W140 parseHint, <1ms) ALWAYS sits in
+front. Behind it, a reclassifier refines fit for ambiguous cases — ideally
+a small local LLM — used for LONG-RUNNING task placement so heavy work
+lands where it does not overtax the user's system (the classifier runs on
+the spoke's smallest capable model, caches its verdict per task, never
+sits in the per-request hot path).
+
+## Session-end knowledge settle
+
+At session end, the local system contributes what it learned to the
+knowledge store. This is the write-back half of the knowledge-aids
+architecture (decision recap: W118-W121 research → W142 outcome —
+verified-only preseed IN, metered tokens-saved law, doc-covered ground
+gets pointer rows or rejection at ingest, never duplicate copies). The
+write-back exists as coord facts/`knowledge-enqueue` today; the settle
+step makes it a standard session phase: durable, non-obvious learnings
+only, deduped against the store, same verification bar as preseed.
+
 ## Sequencing
 
-Phase 1 (post-W144 cut-over): hub policy distribution + spoke pull.
-Phase 2: work-delta up-feed → global lane view. Phase 3: aggregate
-self-report (opt-in) + global usage/aid dashboards (W152 renders them).
-Nothing here re-opens W141-W143; federation is a phase, not a rewrite.
+Phase 1 (post-W144 cut-over): hub policy distribution + spoke pull (the
+echo model is phase 1: spoke belt mirrors hub entitlements). Phase 2:
+work-delta up-feed → global lane view. Phase 3: aggregate self-report
+(opt-in) + global usage/aid dashboards (W152 renders them). Nothing here
+re-opens W141-W143; federation is a phase, not a rewrite.
