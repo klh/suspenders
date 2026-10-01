@@ -2557,12 +2557,19 @@ const base = {
 			// as /api/usage: TTL-gated harvest then buildUsageReport)
 			maybeHarvest(db);
 			const d = Number(url.searchParams.get("days") ?? 28) || 28;
+			const team = url.searchParams.get("team") ?? "";
+			const dept = url.searchParams.get("dept") ?? "";
 			return new Response(
 				usagePage(
-					buildUsageReport(db, { days: Math.min(90, Math.max(1, d)) }),
+					buildUsageReport(db, {
+						days: Math.min(90, Math.max(1, d)),
+						team,
+						dept,
+					}),
 					{
 						days: Math.min(90, Math.max(1, d)),
-						team: url.searchParams.get("team") ?? "",
+						team,
+						dept,
 					},
 				),
 				{
@@ -2581,7 +2588,11 @@ const base = {
 			const d = Number(url.searchParams.get("days") ?? 28) || 28;
 			return json({
 				ok: true,
-				report: buildUsageReport(db, { days: Math.min(90, Math.max(1, d)) }),
+				report: buildUsageReport(db, {
+					days: Math.min(90, Math.max(1, d)),
+					team: url.searchParams.get("team") ?? "",
+					dept: url.searchParams.get("dept") ?? "",
+				}),
 			});
 		}
 		if (url.pathname === "/api/diff") {

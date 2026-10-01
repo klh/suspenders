@@ -32,6 +32,9 @@ export interface UsageReport {
 		byModel: (Sum & { model: string; group: ModelGroup })[];
 	}[];
 	rate: { tokPerSec: number; hourBucket: number };
+	// W152: team/department chip facets from the FULL sessions tag universe —
+	// unfiltered, so chips stay switchable while a filter is active.
+	facets: { teams: string[]; depts: string[] };
 	// W142 aid ROI seam: present only when aid events exist in the window
 	// (omit honestly otherwise). `join` is the contract join —
 	// aid_events(sid) ⋈ sessions(sid→actor) ⋈ usage_rollup(actor, hour).
@@ -85,23 +88,64 @@ const zeroGroups = (): Record<ModelGroup, number> => ({
 
 export function buildUsageReport(
 	db: Database,
-	opts: { days?: number; nowMs?: number } = {},
+	opts: {
+		days?: number;
+		nowMs?: number;
+		/** team tag filter — server-side, cuts every series */
+		team?: string;
+		/** department tag filter — server-side, cuts every series */
+		dept?: string;
+	} = {},
 ): UsageReport {
 	const days = opts.days ?? 28;
 	const now = opts.nowMs ?? Date.now();
 	const from = Math.floor((now - days * 86_400_000) / 3_600_000) * 3_600_000;
 	const to = Math.floor(now / 3_600_000) * 3_600_000;
 	const win = "hour_bucket >= ? AND hour_bucket <= ?";
+	// W152: actor tags ride sessions (actor → latest stamp). A team/dept
+	// filter resolves its actor allowlist through this same map, so EVERY
+	// series below is filtered server-side — the chips cut the whole
+	// dashboard, not just the actor table.
+	const tagsOf = new Map<string, string>();
+	for (const r of db
+		.query(
+			"SELECT actor, tags FROM sessions WHERE actor IS NOT NULL ORDER BY started_at",
+		)
+		.all() as { actor: string; tags: string | null }[])
+		tagsOf.set(r.actor, r.tags ?? "");
+	const wantTeam = opts.team ?? "";
+	const wantDept = opts.dept ?? "";
+	const allow: string[] = [];
+	for (const [a, raw] of tagsOf) {
+		if (!wantTeam && !wantDept) break;
+		let tg: Record<string, unknown> | null = null;
+		try {
+			tg = JSON.parse(raw) as Record<string, unknown>;
+		} catch {
+			tg = null;
+		}
+		if (
+			(!wantTeam || tg?.team === wantTeam) &&
+			(!wantDept || tg?.department === wantDept)
+		)
+			allow.push(a);
+	}
+	const inFrag =
+		allow.length > 0
+			? ` AND actor IN (${allow.map(() => "?").join(",")})`
+			: wantTeam || wantDept
+				? " AND 1=0" // filter active, nothing matches → honest zeros
+				: "";
 	const t = db
-		.query(`SELECT ${SUMS} FROM usage_rollup WHERE ${win}`)
-		.get(from, to) as Record<string, unknown> | null;
+		.query(`SELECT ${SUMS} FROM usage_rollup WHERE ${win}${inFrag}`)
+		.get(from, to, ...allow) as Record<string, unknown> | null;
 	const totals = rowSum(t);
 	// timeline: every bucket present (zeros filled), five groups per bucket
 	const tlRows = db
 		.query(
-			`SELECT hour_bucket AS h, model_group AS g, SUM(in_tok+out_tok+cache_r+cache_c) AS tok FROM usage_rollup WHERE ${win} GROUP BY h, g ORDER BY h`,
+			`SELECT hour_bucket AS h, model_group AS g, SUM(in_tok+out_tok+cache_r+cache_c) AS tok FROM usage_rollup WHERE ${win}${inFrag} GROUP BY h, g ORDER BY h`,
 		)
-		.all(from, to) as { h: number; g: string; tok: number }[];
+		.all(from, to, ...allow) as { h: number; g: string; tok: number }[];
 	const timeline: UsageReport["timeline"] = [];
 	for (let b = from; b <= to; b += 3_600_000)
 		timeline.push({ bucket: b, groups: zeroGroups() });
@@ -119,19 +163,12 @@ export function buildUsageReport(
 	}));
 	for (const p of timeline)
 		byHour[new Date(p.bucket).getHours()].tokens += ptok(p.groups);
-	// per-actor drill-down; tags ride the sessions table (actor → latest stamp)
-	const tagsOf = new Map<string, string>();
-	for (const r of db
-		.query(
-			"SELECT actor, tags FROM sessions WHERE actor IS NOT NULL ORDER BY started_at",
-		)
-		.all() as { actor: string; tags: string | null }[])
-		tagsOf.set(r.actor, r.tags ?? "");
+	// per-actor drill-down (the allowlist above pre-filters this query)
 	const actRows = db
 		.query(
-			`SELECT actor, ${SUMS} FROM usage_rollup WHERE ${win} GROUP BY actor ORDER BY SUM(in_tok+out_tok+cache_r+cache_c) DESC`,
+			`SELECT actor, ${SUMS} FROM usage_rollup WHERE ${win}${inFrag} GROUP BY actor ORDER BY SUM(in_tok+out_tok+cache_r+cache_c) DESC`,
 		)
-		.all(from, to) as { actor: string }[];
+		.all(from, to, ...allow) as { actor: string }[];
 	const actors = actRows.map((a) => {
 		const ms = db
 			.query(
@@ -163,13 +200,26 @@ export function buildUsageReport(
 	// recent throughput: newest non-empty bucket in the last 24h, out/3600
 	const last = db
 		.query(
-			`SELECT hour_bucket AS h, SUM(out_tok) AS o FROM usage_rollup WHERE ${win} GROUP BY h ORDER BY h DESC LIMIT 1`,
+			`SELECT hour_bucket AS h, SUM(out_tok) AS o FROM usage_rollup WHERE ${win}${inFrag} GROUP BY h ORDER BY h DESC LIMIT 1`,
 		)
-		.get(to - 86_400_000, to) as { h: number; o: number } | null;
+		.get(to - 86_400_000, to, ...allow) as { h: number; o: number } | null;
 	const rate = {
 		tokPerSec: last ? Math.round((num(last.o) / 3600) * 100) / 100 : 0,
 		hourBucket: last ? num(last.h) : to,
 	};
+	// W152 chip facets from the FULL tag universe — unfiltered, so chips
+	// stay switchable while a filter is active.
+	const teamsAll = new Set<string>();
+	const deptsAll = new Set<string>();
+	for (const raw of tagsOf.values()) {
+		try {
+			const tg = JSON.parse(raw) as Record<string, unknown>;
+			if (typeof tg.team === "string") teamsAll.add(tg.team);
+			if (typeof tg.department === "string") deptsAll.add(tg.department);
+		} catch {
+			// unparseable tags stamp no chips
+		}
+	}
 	const aids = aidSection(db, from, to);
 	return {
 		days,
@@ -180,6 +230,10 @@ export function buildUsageReport(
 		byHour,
 		actors,
 		rate,
+		facets: {
+			teams: [...teamsAll].sort(),
+			depts: [...deptsAll].sort(),
+		},
 		...(aids ? { aids } : {}),
 	};
 }
