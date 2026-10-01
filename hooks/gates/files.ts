@@ -54,6 +54,30 @@ export function filesCheck(hook: HookInput): FilesExit {
 	const isMd = /\.(md|markdown)$/i.test(F);
 	const isCode = /\.(ts|tsx|js|jsx|mjs|cjs|json|jsonc)$/i.test(F);
 
+	// ---- UI law (owner 2026-10-01, CLAUDE.md): NEVER innerHTML/document.write
+	// anywhere; document.createElement only inside web components (lit) ----
+	if (isCode) {
+		const payload = String(
+			hook.tool_input?.content ?? hook.tool_input?.new_string ?? "",
+		);
+		if (payload) {
+			const wcMark = /["'][^"']*lit["']|@customElement|customElements\.define/;
+			const isWc =
+				wcMark.test(payload) ||
+				(existsSync(F) && wcMark.test(readFileSync(F, "utf8")));
+			if (/innerHTML|document\.write\s*\(/.test(payload))
+				return {
+					kind: "block",
+					err: `UI LAW: innerHTML/document.write are NEVER allowed — rewrite as lit-html templates in a web component. ${F}\n`,
+				};
+			if (!isWc && /document\.createElement\s*\(/.test(payload))
+				return {
+					kind: "block",
+					err: `UI LAW: document.createElement only inside web components (import lit / @customElement). ${F}\n`,
+				};
+		}
+	}
+
 	// Worktree lanes (multi-agent): SKIP per-save formatting. The fmt mutates
 	// the file after the governor hashed it and every cycle risks a lost-update
 	// deny on the shared registry — 4.8K false "changed on disk" retries in the
