@@ -9,14 +9,12 @@
 // its claims, inbox, lane state, and the event tail.
 
 import { db, PORT, BIND } from "../board/context.ts";
-import { json } from "../board/helpers.ts";
 import { projectList } from "../board/lanes.ts";
-import { board, claims, inbox } from "../board/data.ts";
-import { orchestrate } from "../board/orch.ts";
 import { tokenUsage } from "../lib/govdb.ts";
 import { scrub, servicemon } from "../lib/servicemon.ts";
 import { readBoardSettings } from "../lib/board-config.ts";
-import { hostname } from "node:os";
+import { writeGuard } from "../board/helpers.ts";
+import { consoleMe } from "../board/console-view.ts";
 import { handleData } from "../board/routes-data.ts";
 import { handleUsage } from "../board/routes-usage.ts";
 import { handleDrawer } from "../board/routes-drawer.ts";
@@ -24,6 +22,8 @@ import { handleActions } from "../board/routes-actions.ts";
 import { handleOrch } from "../board/routes-orch.ts";
 import { handleConsole } from "../board/routes-console.ts";
 import { handleMeta } from "../board/routes-meta.ts";
+import { handleSuggest } from "../board/routes-suggest.ts";
+import { repoLawRoutes } from "./console-repo-law.ts";
 // W157: seedDemo() self-invokes at demo.ts module load — the monolith
 // executed it inline before Bun.serve; the side-effect import keeps that
 // timing (nothing else imports the demo module)
@@ -73,12 +73,21 @@ const base = {
 			handleDrawer,
 			handleActions,
 			handleOrch,
+			handleSuggest,
 			handleConsole,
 			handleMeta,
 		]) {
 			const r = await h(req, url);
 			if (r) return r;
 		}
+		// W163: the W164 seam — repo-scope law + BYO-LLM editors under
+		// /console/repo-law, mounted per the console-repo-law.ts MOUNT note
+		// (guard = the board's own writeGuard)
+		const law = await repoLawRoutes(req, url, {
+			guard: writeGuard,
+			me: consoleMe,
+		});
+		if (law) return law;
 		return new Response("not found", { status: 404 });
 	},
 };

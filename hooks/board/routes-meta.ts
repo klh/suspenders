@@ -1,21 +1,6 @@
 // hooks/board/routes-meta.ts — meta: /llms.txt (LLMS_TXT), / (the SPA page), 404 tail (W157 route module).
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
-import { CLI, db } from "./context.ts";
-import { json } from "./helpers.ts";
-import {
-	tasks,
-	activity,
-	sessions,
-	board,
-	claims,
-	events,
-	inbox,
-	llm,
-} from "./data.ts";
-import { orchestrate } from "./orch.ts";
-import { servicemon } from "../lib/servicemon.ts";
-import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "../bin/fleet-board-html.ts";
 
 export const LLMS_TXT = `# suspenders
@@ -58,6 +43,7 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness + merge-ladder guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, while a lane lives, or while a daemon merge ladder is mid-flight)
 - POST /api/orchestrate            LLM proposes a plan item + parallel children from a goal (project, goal required; read-only — nothing registers, 502 when no parseable plan comes back)
 - POST /api/orchestrate/register   register a proposed plan as a plan-gated work split through the work CLI (project, title, children required; children 2..8; the plan item is the split parent — the AGENTS.md add-plan-then-split flow)
+- POST /api/suggest   expand a terse composer draft into a brief-shaped prompt (the local minimal model reads the draft + running lanes; project, draft required — 502 when the model fails or answers junk)
 - POST /console/settings/preview   settings diff preview (origin/host guarded; form-encoded feature+values; invalid config = rejected with the parser's error, nothing written)
 - POST /console/settings/apply     settings apply (origin/host guarded; feature + values JSON + preview mtime; mtime guard rejects concurrent edits; atomic tmp+rename write to the allowlisted config path only)
 
@@ -78,18 +64,17 @@ and nothing registers. Nothing else on the board depends on it.
 a Threads thing — http://www.threads.dk`;
 
 export async function handleMeta(
-	req: Request,
+	_req: Request,
 	url: URL,
 ): Promise<Response | null> {
 	if (url.pathname === "/llms.txt")
-		if (url.pathname === "/llms.txt")
-			// static plain-text agent contract (see LLMS_TXT above)
-			return new Response(LLMS_TXT, {
-				headers: {
-					"content-type": "text/plain; charset=utf-8",
-					"cache-control": "no-store",
-				},
-			});
+		// static plain-text agent contract (see LLMS_TXT above)
+		return new Response(LLMS_TXT, {
+			headers: {
+				"content-type": "text/plain; charset=utf-8",
+				"cache-control": "no-store",
+			},
+		});
 	if (url.pathname === "/")
 		return new Response(HTML, {
 			headers: {
@@ -98,5 +83,4 @@ export async function handleMeta(
 			},
 		});
 	return new Response("not found", { status: 404 });
-	return null;
 }

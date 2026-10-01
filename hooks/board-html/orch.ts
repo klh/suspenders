@@ -7,6 +7,8 @@ export const ORCH = String.raw`// --- W57 orchestrate box: LLM proposes a plan +
 // /api/orchestrate → /api/orchestrate/register). Target = the global project
 // filter; the proposal is read-only until registered.
 var orch = { busy: false, regBusy: false, err: null, prop: null, model: '', ms: 0, proj: '' };
+// W163 composer suggest: draft -> brief-shaped prompt via /api/suggest
+var sugg = { busy: false };
 function orchProject(){
   var v = sel.value;
   return v && v !== 'all' ? v : null;
@@ -17,6 +19,8 @@ function renderOrch(){
   else clearErr(errEl);
   var go = byId('orchGo');
   if (go) { go.disabled = orch.busy; setText(go, orch.busy ? 'proposing…' : 'orchestrate'); }
+  var sb = byId('orchSuggest');
+  if (sb) { sb.disabled = sugg.busy; setText(sb, sugg.busy ? 'suggesting…' : 'suggest'); }
   var out = byId('orchOut');
   if (!out) return;
   if (!orch.prop) { sigSet(out, 'idle', ''); return; }
@@ -53,6 +57,36 @@ function doOrchestrate(){
     })
     .catch(function(e){ orch.busy = false; orch.err = String((e && e.message) || e); renderOrch(); });
 }
+function orchExpanded(){ var i = byId('orchGoal'); return !!i && i.rows > 1; }
+// W163: click expands the goal input to 4 rows + reveals the suggest button;
+// blur collapses again when the draft is empty (and no suggest in flight)
+function orchExpand(on){
+  var i = byId('orchGoal'); if (!i || orchExpanded() === on) return;
+  i.rows = on ? 4 : 1;
+  var sb = byId('orchSuggest'); if (sb) sb.hidden = !on;
+  var box = byId('orch'); if (box) box.classList.toggle('expanded', on);
+}
+function doSuggest(){
+  if (sugg.busy || orch.busy) return;
+  var proj = orchProject();
+  if (!proj) { orch.err = 'pick a project in the header filter first'; orch.prop = null; renderOrch(); return; }
+  var draft = (byId('orchGoal').value || '').trim();
+  if (draft.length < 8) { orch.err = 'draft too short — type a few words, then suggest'; renderOrch(); return; }
+  sugg.busy = true; orch.err = null; renderOrch();
+  fetch('/api/suggest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: proj, draft: draft }), signal: AbortSignal.timeout(95000) })
+    .then(function(r){ return r.json().catch(function(){ return {}; }); })
+    .then(function(j){
+      j = j || {}; sugg.busy = false;
+      if (j.ok) {
+        byId('orchGoal').value = j.prompt;
+        if (j.cached) toast('suggest: cached');
+      } else {
+        orch.err = String(j.error || 'suggest failed (HTTP ' + r.status + ')');
+      }
+      renderOrch();
+    })
+    .catch(function(e){ sugg.busy = false; orch.err = String((e && e.message) || e); renderOrch(); });
+}
 function orchReg(){
   if (!orch.prop || orch.busy || orch.regBusy) return;
   orch.regBusy = true;
@@ -71,9 +105,25 @@ function orchReg(){
 function orchDisc(){ if (orch.busy || orch.regBusy) return; orch.prop = null; renderOrch(); }
 (function(){
   var inp = byId('orchGoal');
-  if (inp) inp.addEventListener('keydown', function(e){ if (e.key === 'Enter') { e.preventDefault(); doOrchestrate(); } });
+  if (inp) {
+    inp.addEventListener('focus', function(){ orchExpand(true); });
+    inp.addEventListener('blur', function(){
+      setTimeout(function(){
+        if (!(byId('orchGoal').value || '').trim() && !sugg.busy) orchExpand(false);
+      }, 120);
+    });
+    // collapsed Enter = orchestrate (the old single-line habit); expanded,
+    // Enter inserts a newline and Cmd/Ctrl+Enter orchestrates
+    inp.addEventListener('keydown', function(e){
+      if (e.key !== 'Enter') return;
+      if (e.metaKey || e.ctrlKey) { e.preventDefault(); doOrchestrate(); return; }
+      if (!orchExpanded()) { e.preventDefault(); doOrchestrate(); }
+    });
+  }
   var go = byId('orchGo');
   if (go) go.addEventListener('click', doOrchestrate);
+  var sb = byId('orchSuggest');
+  if (sb) sb.addEventListener('click', doSuggest);
   document.addEventListener('click', function(e){
     var t = e.target.closest && e.target.closest('#orchReg');
     if (t) { orchReg(); return; }
