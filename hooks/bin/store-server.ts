@@ -15,7 +15,11 @@
 // run:   bun hooks/bin/store-server.ts [--port 7794]
 //        (port: --port > GOVERNOR_STORE_PORT > 7794; 7791 belt, 7795
 //        knowledge-api, 7799 board — 7794 was free)
-import { openGovernorDb, type GovernorStore } from "../lib/govdb.ts";
+import {
+	openGovernorDb,
+	knowledgeSqlViolation,
+	type GovernorStore,
+} from "../lib/govdb.ts";
 import { handleAuthRoutes } from "../lib/auth-server.ts";
 import { servicemon } from "../lib/servicemon.ts";
 
@@ -98,6 +102,14 @@ const base = {
 		const modeOk = ["get", "all", "run", "tx"].includes(body.mode ?? "");
 		if (!body.sql || !modeOk || !Array.isArray(body.params ?? []))
 			return new Response("bad request", { status: 400 });
+		// W166 — structural rejection: knowledge lives in knowledge.db; a
+		// knowledge statement must ride the knowledge port (makeStore), never
+		// the control-plane store (the design's W92 interaction).
+		const kbHit = knowledgeSqlViolation(body.sql);
+		if (kbHit)
+			return Response.json({
+				err: `knowledge statements are rejected on the control-plane store ('${kbHit}' is not resident in governor.db) — bind the knowledge port (makeStore())`,
+			});
 		if (body.mode === "tx") {
 			// op rides the sql field: begin | commit | rollback
 			const op = body.sql;

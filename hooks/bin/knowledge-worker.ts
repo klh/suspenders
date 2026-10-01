@@ -127,6 +127,15 @@ async function processRow(rowId: number): Promise<void> {
 			job.domain,
 			job.originSid,
 		);
+		// W166 (design §4): FTS5 optimize after every job that wrote rows —
+		// 70 ms measured against an LLM-paced job is noise; bounds segments.
+		if (written.length > 0) {
+			const t0 = performance.now();
+			await store.optimize();
+			console.log(
+				`knowledge-ingest: fts optimize ${Math.round(performance.now() - t0)}ms`,
+			);
+		}
 		console.log(
 			`knowledge-ingest: #${job.id} "${job.source.slice(0, 40)}" → ${written.length} written, ${skipped.length} skipped${converted ? `, ${converted} converted to pointer rows` : ""}`,
 		);

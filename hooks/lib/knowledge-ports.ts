@@ -29,7 +29,7 @@ import {
 	docForRef,
 	substitutionCheck,
 } from "./knowledge.ts";
-import { openGovernorDb } from "./govdb.ts";
+import { openGovernorDb, openKnowledgeDb } from "./govdb.ts";
 import { resolveBelt } from "./belt-locate.ts";
 
 export type { KnowledgeHit };
@@ -133,6 +133,15 @@ export interface KnowledgeStore {
 			coverage: number;
 		}[];
 	}>;
+	// W166: the W159 settle's provenance sort rides the PORT — the settle's
+	// knowledge writes must go through knowledge.db, never openGovernorDb.
+	settleHubEligible(
+		sid: string,
+		flag: 0 | 1,
+	): Promise<{ queueMarked: number; rowsBackfilled: number }>;
+	// W166 (design §4): FTS5 segment merge after every job that wrote rows —
+	// measured 70 ms per run, ~5% read-latency recovery after churn.
+	optimize(): Promise<void>;
 }
 
 export interface DistillClient {
@@ -158,10 +167,26 @@ export interface DistillClient {
 	>;
 }
 
-// ─── local adapter: governor.db (SQLite/WAL) + FTS5 + knowledge_queue ───
+// ─── local adapter: knowledge.db (SQLite/WAL) + FTS5 + knowledge_queue ───
 // the ONLY place in the knowledge layer allowed to open governor.db (#9b)
 export class SqliteKnowledgeStore implements KnowledgeStore {
-	constructor(private db: Database) {}
+	// governor handle for the control-plane bus INSERTs only (emitLanded,
+	// curateRecord) — knowledge rows and the queue ride `db` (knowledge.db).
+	private gov: Database | null;
+
+	constructor(
+		private db: Database,
+		governor?: Database | null,
+	) {
+		this.gov = governor ?? null;
+	}
+
+	// lazy, cached: the events bus lives in governor.db, opened on first use
+	// so tests can inject both handles (or none, defaulting to the files).
+	private bus(): Database {
+		if (!this.gov) this.gov = openGovernorDb();
+		return this.gov;
+	}
 
 	async peekNext(): Promise<{ id: number } | null> {
 		return (
@@ -384,7 +409,7 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 				`curate-flag: single-file-derivable from ${f.doc} (${f.coverage}% term coverage) — pointer-ize or retire (W103)`,
 			);
 		}
-		this.db
+		this.bus()
 			.query(
 				"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'knowledge.curate', 'knowledge', ?, NULL)",
 			)
@@ -457,7 +482,7 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 		queueId: number,
 		by: string | null,
 	): Promise<void> {
-		this.db
+		this.bus()
 			.query(
 				"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'knowledge.landed', ?, ?, NULL)",
 			)
@@ -485,6 +510,46 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 				)
 				.get() as { n: number }
 		).n;
+	}
+
+	// W166: hub_eligible stamp on BOTH the queue row and the distilled rows —
+	// idempotent (hub_eligible IS NULL guard), matching the W159 settle SQL.
+	// Counts ride pre-SELECTs: bun's stmt.changes on an UPDATE that fires the
+	// FTS sync trigger reports trigger/FTS ops too — never the honest delta.
+	async settleHubEligible(
+		sid: string,
+		flag: 0 | 1,
+	): Promise<{ queueMarked: number; rowsBackfilled: number }> {
+		const pending = (t: string): number =>
+			Number(
+				(
+					this.db
+						.query(
+							`SELECT COUNT(*) AS n FROM ${t} WHERE origin_sid = ? AND hub_eligible IS NULL`,
+						)
+						.get(sid) as { n: number }
+				).n,
+			);
+		const queueMarked = pending("knowledge_queue");
+		const rowsBackfilled = pending("knowledge");
+		this.db
+			.query(
+				"UPDATE knowledge_queue SET hub_eligible = ? WHERE origin_sid = ? AND hub_eligible IS NULL",
+			)
+			.run(flag, sid);
+		this.db
+			.query(
+				"UPDATE knowledge SET hub_eligible = ? WHERE origin_sid = ? AND hub_eligible IS NULL",
+			)
+			.run(flag, sid);
+		return { queueMarked, rowsBackfilled };
+	}
+
+	// W166: merge FTS5 segments — keeps the index bounded from row one.
+	async optimize(): Promise<void> {
+		this.db
+			.query("INSERT INTO knowledge_fts (knowledge_fts) VALUES ('optimize')")
+			.run();
 	}
 }
 
@@ -702,7 +767,7 @@ export function makeStore(): KnowledgeStore {
 		throw new Error(
 			`no remote knowledge-store adapter in this build (KNOWLEDGE_STORE_URL=${url}) — the local SQLite store is the only implementation; the port is the seam`,
 		);
-	return new SqliteKnowledgeStore(openGovernorDb());
+	return new SqliteKnowledgeStore(openKnowledgeDb());
 }
 
 export function makeDistillClient(): DistillClient {
@@ -739,7 +804,7 @@ export async function enqueueKnowledge(job: {
 		process.env.KNOWLEDGE_DOCS_ROOT ??
 		process.env.KNOWLEDGE_REPO_ROOT ??
 		process.cwd();
-	const db = openGovernorDb();
+	const db = openKnowledgeDb();
 	try {
 		const r = db
 			.query(

@@ -29,6 +29,9 @@ const worker = join(
 );
 const mcp = join(import.meta.dir, "..", "hooks", "bin", "knowledge-mcp.ts");
 const DB = join(HOME, ".cache", "claude-governor", "governor.db");
+// W166: knowledge rows + queue live in knowledge.db post-split — assertions
+// naming knowledge tables read THAT file (the port law, test-side).
+const KDB = join(HOME, ".cache", "claude-governor", "knowledge.db");
 
 // projectIdentity(), mirrored: git-common-dir from inside the temp repo
 function projectOf(dir: string): string {
@@ -77,7 +80,10 @@ async function runWorker(extraEnv: Record<string, string> = {}) {
 }
 
 function q<T>(sql: string): T[] {
-	const db = new Database(DB, { readonly: true });
+	// knowledge tables ride knowledge.db post-split (W166); everything else
+	// (events, sessions, facts) is control-plane governor.db.
+	const f = /\bknowledge(?:_queue|_fts)?\b/.test(sql) ? KDB : DB;
+	const db = new Database(f, { readonly: true });
 	const rows = db.query(sql).all() as T[];
 	db.close();
 	return rows;

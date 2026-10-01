@@ -295,6 +295,91 @@ export function tokenUsage(
 	return out;
 }
 
+// v10 statement list (W166): the knowledge split rides ONE transaction, so
+// the whole move is a fixed, reviewable statement table — kb side (CREATE +
+// copy preserving ids + FTS rebuild from main), then main side (DROP).
+// Trigger bodies may NOT schema-qualify (SQLite forbids cross-db references
+// inside a trigger) — the kb.name prefix registers the trigger in kb, where
+// the unqualified body/ON names resolve.
+// kb pre-existing (rolled-back attempt = empty file; RESET governor meeting
+// the post-split store = kb final + rows) must not break the move: DDL is
+// IF NOT EXISTS and the row copies ride ONLY into an empty kb (kb wins on
+// reset); split-brain (both sides hold rows) refuses loudly in the fn below.
+const KNOWLEDGE_SPLIT_V10 = (copy: boolean): string[] => [
+	"CREATE TABLE IF NOT EXISTS kb.knowledge (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, topic TEXT NOT NULL, fact TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0.5, domain TEXT, area TEXT, origin_kind TEXT, origin_system TEXT, code_origin TEXT, origin_sid TEXT, contributors TEXT, duplicate_of INTEGER, supersedes_id INTEGER, source_ref TEXT, source_hash TEXT, source TEXT NOT NULL DEFAULT 'knowledge-worker', state TEXT NOT NULL DEFAULT 'candidate', superseded_by INTEGER, created_at INTEGER, updated_at INTEGER, hub_eligible INTEGER)",
+	"CREATE VIRTUAL TABLE IF NOT EXISTS kb.knowledge_fts USING fts5(topic, fact, domain UNINDEXED, area UNINDEXED, origin_kind UNINDEXED, origin_system UNINDEXED, state UNINDEXED, content='knowledge', content_rowid='id')",
+	"CREATE TRIGGER IF NOT EXISTS kb.knowledge_fts_ai AFTER INSERT ON knowledge BEGIN INSERT INTO knowledge_fts (rowid, topic, fact) VALUES (NEW.id, NEW.topic, NEW.fact); END",
+	"CREATE TRIGGER IF NOT EXISTS kb.knowledge_fts_ad AFTER DELETE ON knowledge BEGIN INSERT INTO knowledge_fts (knowledge_fts, rowid, topic, fact) VALUES ('delete', OLD.id, OLD.topic, OLD.fact); END",
+	"CREATE TRIGGER IF NOT EXISTS kb.knowledge_fts_au AFTER UPDATE ON knowledge BEGIN INSERT INTO knowledge_fts (knowledge_fts, rowid, topic, fact) VALUES ('delete', OLD.id, OLD.topic, OLD.fact); INSERT INTO knowledge_fts (rowid, topic, fact) VALUES (NEW.id, NEW.topic, NEW.fact); END",
+	"CREATE TABLE IF NOT EXISTS kb.knowledge_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, result_key TEXT, domain TEXT, area TEXT, code_origin TEXT, started_at INTEGER, origin_sid TEXT, source_ref TEXT, source_hash TEXT, hub_eligible INTEGER)",
+	...(copy
+		? [
+				"INSERT INTO kb.knowledge (id, ts, topic, fact, confidence, domain, area, origin_kind, origin_system, code_origin, origin_sid, contributors, duplicate_of, supersedes_id, source_ref, source_hash, source, state, superseded_by, created_at, updated_at, hub_eligible) SELECT id, ts, topic, fact, confidence, domain, area, origin_kind, origin_system, code_origin, origin_sid, contributors, duplicate_of, supersedes_id, source_ref, source_hash, source, state, superseded_by, created_at, updated_at, hub_eligible FROM main.knowledge ORDER BY id",
+				"INSERT INTO kb.knowledge_queue (id, ts, source, payload, state, attempts, result_key, domain, area, code_origin, started_at, origin_sid, source_ref, source_hash, hub_eligible) SELECT id, ts, source, payload, state, attempts, result_key, domain, area, code_origin, started_at, origin_sid, source_ref, source_hash, hub_eligible FROM main.knowledge_queue ORDER BY id",
+				"INSERT INTO kb.knowledge_fts (rowid, topic, fact) SELECT id, topic, fact FROM main.knowledge",
+			]
+		: []),
+	"DROP TRIGGER IF EXISTS main.knowledge_fts_ai",
+	"DROP TRIGGER IF EXISTS main.knowledge_fts_ad",
+	"DROP TRIGGER IF EXISTS main.knowledge_fts_au",
+	"DROP TABLE IF EXISTS main.knowledge_fts",
+	"DROP TABLE IF EXISTS main.knowledge",
+	"DROP TABLE IF EXISTS main.knowledge_queue",
+];
+
+// W166: the v6-era knowledge tables leave governor.db (uv < 10) — one
+// transaction across main + attached kb; a crash rolls back, uv stays < 10,
+// and the next open retries. The pre-migration VACUUM INTO of governor.db
+// (knowledge rows still resident) is the rollback anchor.
+export function migrateKnowledgeSplit(db: Database): void {
+	db.run("ATTACH DATABASE ? AS kb", [`${REG}/knowledge.db`]);
+	const n = (s: string): number =>
+		Number((db.query(s).get() as { n: number }).n);
+	const mainN = n("SELECT COUNT(*) AS n FROM main.knowledge");
+	const kbHas =
+		n("SELECT COUNT(*) AS n FROM kb.sqlite_master WHERE name = 'knowledge'") >
+		0;
+	const kbN = kbHas ? n("SELECT COUNT(*) AS n FROM kb.knowledge") : 0;
+	// split-brain refusal: both files holding knowledge rows is not a state a
+	// migration may guess its way out of — name the pre-split backups instead.
+	if (kbHas && kbN > 0 && mainN > 0)
+		throw new Error(
+			"knowledge split (v10): governor.db AND knowledge.db both hold knowledge rows — resolve manually (pre-split snapshots: governor-pre-knowledge-split-*)",
+		);
+	if (mainN > 0) {
+		let bak = `${REG}/governor-pre-knowledge-split-${Date.now()}.db`;
+		for (let i = 1; existsSync(bak); i++)
+			bak = `${REG}/governor-pre-knowledge-split-${Date.now()}-${i}.db`;
+		db.run(`VACUUM INTO '${bak.replaceAll("'", "''")}'`);
+		console.error(
+			`[govdb] v10 pre-migration backup: ${bak} (${mainN} knowledge rows)`,
+		);
+	}
+	// page_size bakes at file creation — set BEFORE the first kb write; a
+	// no-op when kb already has pages (retry after a rolled-back attempt).
+	db.run("PRAGMA kb.page_size = 8192");
+	db.run("BEGIN IMMEDIATE");
+	try {
+		for (const sql of KNOWLEDGE_SPLIT_V10(kbN === 0)) db.run(sql);
+		db.run("PRAGMA user_version = 10");
+		db.run("COMMIT");
+	} catch (e) {
+		try {
+			db.run("ROLLBACK");
+		} catch {}
+		throw e instanceof Error
+			? new Error(
+					`govdb knowledge split (v10) failed, rolled back: ${e.message}`,
+					{
+						cause: e,
+					},
+				)
+			: e;
+	}
+	db.run("VACUUM"); // freed pages returned (design step 5, outside the tx)
+	db.run("DETACH DATABASE kb");
+}
+
 export function openGovernorDb(): Database {
 	mkdirSync(REG, { recursive: true });
 	const db = new Database(`${REG}/governor.db`, { create: true });
@@ -851,7 +936,36 @@ export function openGovernorDb(): Database {
 			db.run("ALTER TABLE knowledge ADD COLUMN hub_eligible INTEGER");
 		db.run("PRAGMA user_version = 9");
 	}
+	// v10 (W166) — knowledge.db split; see migrateKnowledgeSplit above.
+	if (uv < 10) migrateKnowledgeSplit(db);
 	migrateJSON(db);
+	return db;
+}
+
+// W166 — knowledge.db: the knowledge workload's OWN SQLite/WAL file
+// (docs/design/knowledge-db-2026-10-01.md): read-path pragmas for the FTS5
+// hot path. Ordering: busy_timeout BEFORE journal_mode (the openGovernorDb
+// shape — under contention the connection waits instead of throwing);
+// page_size is baked at file creation, so 8192 rides every open (decisive
+// on the first, a silent no-op once the file has pages).
+export function openKnowledgeDb(): Database {
+	mkdirSync(REG, { recursive: true });
+	const db = new Database(`${REG}/knowledge.db`, { create: true });
+	db.run("PRAGMA busy_timeout=2000");
+	db.run("PRAGMA page_size=8192");
+	try {
+		db.run("PRAGMA journal_mode=WAL");
+	} catch {
+		const mode = (
+			db.query("PRAGMA journal_mode").get() as { journal_mode?: string }
+		)?.journal_mode;
+		if (mode?.toLowerCase() !== "wal")
+			throw new Error(
+				`knowledge.db WAL unavailable (got: ${mode ?? "unknown"})`,
+			);
+	}
+	db.run("PRAGMA synchronous=NORMAL");
+	db.run("PRAGMA mmap_size=1073741824");
 	return db;
 }
 
@@ -888,6 +1002,21 @@ export interface GovernorStore {
 	run(sql: string, ...params: unknown[]): StoreResult;
 	transaction<T>(fn: () => T): () => T;
 	close(): void;
+}
+
+// W166 — the control-plane store must never proxy knowledge statements:
+// knowledge is no longer resident in governor.db, so a knowledge statement
+// riding the control plane either fails ("no such table") or — far worse —
+// silently puts the read-heavy FTS workload back on the write-hot file if
+// the tables are ever resurrected. String literals are stripped first:
+// events LIKE 'knowledge.%' and deltas tbl='knowledge' are legit
+// control-plane SQL over the WORD, never the table.
+export function knowledgeSqlViolation(sql: string): string | null {
+	const bare = sql
+		.replace(/'(?:[^']|'')*'/g, "''")
+		.replace(/"(?:[^"]|"")*"/g, '""');
+	const m = /\bknowledge(?:_fts|_queue)?\b/.exec(bare);
+	return m ? m[0] : null;
 }
 
 // HTTP binding: the same interface against bin/store-server.ts — sync by
