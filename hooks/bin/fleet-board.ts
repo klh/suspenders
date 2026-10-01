@@ -21,6 +21,8 @@ import {
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 import { isDecisionKind, openGovernorDb, tokenUsage } from "../lib/govdb.ts";
+import { maybeHarvest } from "./usage-harvest.ts";
+import { buildUsageReport } from "../lib/usage.ts";
 import { scrub, servicemon } from "../lib/servicemon.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "./fleet-board-html.ts";
@@ -2191,6 +2193,17 @@ const base = {
 					},
 					...llms,
 				],
+			});
+		}
+		if (url.pathname === "/api/usage") {
+			// W127: Copilot-style usage analytics — TTL-gated transcript harvest
+			// (usage-harvest.ts, never a daemon) then the pure report builder
+			// (lib/usage.ts). ?days=N clamps to 1..90.
+			maybeHarvest(db);
+			const d = Number(url.searchParams.get("days") ?? 28) || 28;
+			return json({
+				ok: true,
+				report: buildUsageReport(db, { days: Math.min(90, Math.max(1, d)) }),
 			});
 		}
 		if (url.pathname === "/api/diff") {
