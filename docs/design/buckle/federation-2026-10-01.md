@@ -98,6 +98,32 @@ write-back exists as coord facts/`knowledge-enqueue` today; the settle
 step makes it a standard session phase: durable, non-obvious learnings
 only, deduped against the store, same verification bar as preseed.
 
+## Hub change-request channel (push-down, owner law)
+
+belt or central suspenders can push a CHANGE REQUEST down to spokes:
+"update suspenders — new rules apply", "reconfigure belt", "adopt policy
+revision N". Mechanism stays spoke-pulled (degradation law): the phase-1
+policy pull payload carries a CR queue; the spoke reconciles through its
+own trusted paths — coord inbox delivery to live sessions, self-update
+via the installer path (W158), policy apply via the W147 settings
+writer, label restarts. CR lifecycle: declared → delivered → applied →
+verified → reported-up (or failed + escalated). Belt originates
+LLM-policy CRs; suspenders originates work-graph/rules CRs — same queue,
+same lifecycle.
+
+## Policy advisor (suggested enforcement, owner law)
+
+Machine-checkable policy rules run against the service a session is
+working on: health endpoint presence (the W125 servicemon law), HTTP
+citizenship (http-citizenship.md), the 1500-line law, qlty presence,
+auth-surface conventions. A violation SURFACES to the user as a
+suggestion with the policy citation and an opt-in offer — "according to
+policy this service should have a health endpoint; want me to implement
+it and push that PR?" — never a silent mutation: enforcement is
+suggested, the PR is pushed only on the user's yes (and PRs land on
+branches, never straight to main). The rule catalog is hub-distributable
+(rides the same policy pull as everything else).
+
 ## Sequencing
 
 Phase 1 (post-W144 cut-over): hub policy distribution + spoke pull (the
