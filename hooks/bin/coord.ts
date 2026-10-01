@@ -630,7 +630,10 @@ if (cmd === "emit") {
 		const key = rest[1];
 		let value = rest[2];
 		const txt = arg("--text");
-		if (txt !== undefined) value = txt;
+		// arg() returns null BOTH when absent and when bare — null, not
+		// undefined, is the "no --text" signal (hotfix 2026-10-01: the prior
+		// `!== undefined` check null-ed every positional fact set)
+		if (txt != null) value = txt;
 		// a flag-shaped value was the fact-set corruption bug (2026-09-30):
 		// `fact set k --text "…"` swallowed "--text" as the value and the real
 		// text vanished into an ignored positional — three A/B findings lost
