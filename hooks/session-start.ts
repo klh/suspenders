@@ -6,7 +6,12 @@
 // session context. CLAUDE_FLEET_BOOTSTRAP=0 opts out entirely.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { openGovernorDb, projectIdentity, CAPABILITIES, sweepStaleSessions } from "./lib/govdb.ts";
+import {
+	openGovernorDb,
+	projectIdentity,
+	CAPABILITIES,
+	sweepStaleSessions,
+} from "./lib/govdb.ts";
 
 type In = { session_id?: string; source?: string; transcript_path?: string };
 
@@ -26,7 +31,9 @@ const now = Date.now();
 // W30, 2026-09-26: the owner's id showed on lanes they never ran). Same
 // discriminator as the governor's laneId — register the subagent as its own
 // session row and hand it a lane id for claims, checkpoints, and emits.
-const laneMatch = (input.transcript_path ?? "").match(/\/subagents\/([^/]+?)(?:\.jsonl)?\/?$/);
+const laneMatch = (input.transcript_path ?? "").match(
+	/\/subagents\/([^/]+?)(?:\.jsonl)?\/?$/,
+);
 const isSubagent = !!laneMatch;
 const lane = laneMatch ? `${sid}#${laneMatch[1]}` : sid;
 
@@ -39,7 +46,11 @@ function pname(p: string): string {
 // share the layout) — resolve there first; fall back to the pre-namespacing
 // ~/.claude/bin location for old installs.
 const cli = (name: string): string => {
-	for (const p of [join(import.meta.dir, "bin", name), `${process.env.HOME}/.claude/bin/${name}`]) if (existsSync(p)) return p;
+	for (const p of [
+		join(import.meta.dir, "bin", name),
+		`${process.env.HOME}/.claude/bin/${name}`,
+	])
+		if (existsSync(p)) return p;
 	return `${process.env.HOME}/.claude/bin/${name}`;
 };
 const WORK = cli("work.ts");
@@ -61,17 +72,37 @@ const RULES =
 	"milestone (work done --sha / capsule) so preemption stays possible. " +
 	"Decisions: a decision held only in your context is invisible to the " +
 	"fleet and the owner — emit it (coord emit NEED_DECISION --to " +
-	"<coordinator-or-own-sid> --note \"question + options\" --as <sid>) " +
+	'<coordinator-or-own-sid> --note "question + options" --as <sid>) ' +
 	"the moment you hold one; the fleet board surfaces it for the human.";
 
 // top-level sessions are full agent runtimes — advertise the complete
 // capability set so capability-gated work stays takeable by them (lanes
 // inherit their caps from the parent via coord bootstrap --parent)
 const CAPS = CAPABILITIES.join(",");
+// actor attribution: stamp the settings default_actor (config-over-code —
+// suspenders-board.json) into every bootstrapped session, never clobbering
+// an explicit actor
+const actorDefault = (() => {
+	try {
+		return (
+			JSON.parse(
+				readFileSync(
+					join(
+						process.env.HOME ?? "",
+						".claude/local-llm/suspenders-board.json",
+					),
+					"utf8",
+				),
+			).default_actor ?? null
+		);
+	} catch {
+		return null;
+	}
+})();
 const UPSERT =
-	"INSERT INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, transcript_path) " +
-	"VALUES (?, ?, 'worker', ?, NULL, ?, ?, 'RUNNING', ?, ?) " +
-	"ON CONFLICT(sid) DO UPDATE SET project = excluded.project, parent_sid = excluded.parent_sid, hb = excluded.hb, state = 'RUNNING', capabilities = COALESCE(excluded.capabilities, sessions.capabilities), transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path)";
+	"INSERT INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, transcript_path, actor) " +
+	"VALUES (?, ?, 'worker', ?, NULL, ?, ?, 'RUNNING', ?, ?, ?) " +
+	"ON CONFLICT(sid) DO UPDATE SET project = excluded.project, parent_sid = excluded.parent_sid, hb = excluded.hb, state = 'RUNNING', capabilities = COALESCE(excluded.capabilities, sessions.capabilities), transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path), actor = CASE WHEN sessions.actor IS NULL OR sessions.actor = '' THEN excluded.actor ELSE sessions.actor END";
 
 const DEAD_SQL =
 	"SELECT s.sid FROM sessions s WHERE s.project = ? AND s.state = 'CLOSED' " +
@@ -84,12 +115,28 @@ const OWNED_SQL =
 	"AND state NOT IN ('DONE','SUPERSEDED','FAILED') ORDER BY id";
 
 const db = openGovernorDb();
-db.query(UPSERT).run(lane, project, isSubagent ? sid : null, now, now, CAPS, input.transcript_path ?? null);
-const out = [isSubagent ? `SUBAGENT LANE ${lane.slice(0, 24)}  project=${pname(project)}` : `SESSION ${sid.slice(0, 8)}  project=${pname(project)}`];
+db.query(UPSERT).run(
+	lane,
+	project,
+	isSubagent ? sid : null,
+	now,
+	now,
+	CAPS,
+	input.transcript_path ?? null,
+	actorDefault,
+);
+const out = [
+	isSubagent
+		? `SUBAGENT LANE ${lane.slice(0, 24)}  project=${pname(project)}`
+		: `SESSION ${sid.slice(0, 8)}  project=${pname(project)}`,
+];
 
 // automagic hygiene: every bootstrap sweeps stale sessions fleet-wide
 const sweptN = sweepStaleSessions(db);
-if (sweptN) out.push(`SWEPT ${sweptN} stale session(s) — hb-stale + transcript-dead (coordinator/waiting kept)`);
+if (sweptN)
+	out.push(
+		`SWEPT ${sweptN} stale session(s) — hb-stale + transcript-dead (coordinator/waiting kept)`,
+	);
 if (isSubagent) {
 	out.push(
 		`You share the parent's session id — claim and checkpoint as the lane id instead: ` +
@@ -101,44 +148,82 @@ if (isSubagent) {
 // ownership. 0 closed owners → fresh start; 1 → deterministic rebind;
 // >1 → escalate, never guess. Subagent lanes never rebind: they are not
 // continuations of anything.
-const dead = src === "resume" && !isSubagent ? (db.query(DEAD_SQL).all(project) as { sid: string }[]) : [];
+const dead =
+	src === "resume" && !isSubagent
+		? (db.query(DEAD_SQL).all(project) as { sid: string }[])
+		: [];
 if (dead.length === 1 && dead[0].sid !== sid) {
-	const p = Bun.spawnSync(["bun", COORD, "resume-session", "--as", sid, "--from", dead[0].sid], {
-		stdout: "pipe",
-	});
+	const p = Bun.spawnSync(
+		["bun", COORD, "resume-session", "--as", sid, "--from", dead[0].sid],
+		{
+			stdout: "pipe",
+		},
+	);
 	out.push(`REBIND ${new TextDecoder().decode(p.stdout).trim()}`);
 } else if (dead.length > 1) {
 	const ids = dead.map((d) => d.sid.slice(0, 8)).join(", ");
 	out.push(`LINEAGE AMBIGUOUS: ${ids} — resolve with coord resume-session`);
 }
 
-const mine = db.query(OWNED_SQL).all(project, lane) as { id: string; title: string; state: string }[];
-const readyN = (db.query("SELECT COUNT(*) AS n FROM work_items WHERE project = ? AND state = 'READY'").get(project) as { n: number }).n;
-const cur = db.query("SELECT event_id FROM cursors WHERE sid = ?").get(lane) as { event_id: number } | null;
-const inbox = (db.query("SELECT COUNT(*) AS n FROM events WHERE target = ? AND id > ?").get(lane, cur?.event_id ?? 0) as { n: number }).n;
-const head = (db.query("SELECT value FROM facts WHERE key = 'integration.head'").get() as { value: string } | null)?.value;
+const mine = db.query(OWNED_SQL).all(project, lane) as {
+	id: string;
+	title: string;
+	state: string;
+}[];
+const readyN = (
+	db
+		.query(
+			"SELECT COUNT(*) AS n FROM work_items WHERE project = ? AND state = 'READY'",
+		)
+		.get(project) as { n: number }
+).n;
+const cur = db
+	.query("SELECT event_id FROM cursors WHERE sid = ?")
+	.get(lane) as { event_id: number } | null;
+const inbox = (
+	db
+		.query("SELECT COUNT(*) AS n FROM events WHERE target = ? AND id > ?")
+		.get(lane, cur?.event_id ?? 0) as { n: number }
+).n;
+const head = (
+	db.query("SELECT value FROM facts WHERE key = 'integration.head'").get() as {
+		value: string;
+	} | null
+)?.value;
 
 if (mine.length || inbox > 0 || readyN > 0 || head) {
-	const owned = mine.map((w) => `${w.id}[${w.state}] ${w.title.slice(0, 40)}`).join(", ");
-	out.push(`OWNED ${mine.length}${owned ? `: ${owned}` : ""}  READY ${readyN}  INBOX ${inbox}${head ? `  head=${head.slice(0, 7)}` : ""}`);
+	const owned = mine
+		.map((w) => `${w.id}[${w.state}] ${w.title.slice(0, 40)}`)
+		.join(", ");
+	out.push(
+		`OWNED ${mine.length}${owned ? `: ${owned}` : ""}  READY ${readyN}  INBOX ${inbox}${head ? `  head=${head.slice(0, 7)}` : ""}`,
+	);
 	out.push(RULES);
 }
 
 // fleet notices: inject unseen `coord broadcast` notes — each session sees
 // each notice exactly once (per-session watermark in facts)
 {
-	const bl = db.query("SELECT value FROM facts WHERE key = 'broadcast.latest'").get() as { value: string } | null;
+	const bl = db
+		.query("SELECT value FROM facts WHERE key = 'broadcast.latest'")
+		.get() as { value: string } | null;
 	if (bl) {
 		try {
-			const b = JSON.parse(bl.value) as { id: string; ts: number; note: string };
-			const seen = db.query("SELECT value FROM facts WHERE key = ?").get(`broadcast.seen.${sid}`) as { value: string } | null;
+			const b = JSON.parse(bl.value) as {
+				id: string;
+				ts: number;
+				note: string;
+			};
+			const seen = db
+				.query("SELECT value FROM facts WHERE key = ?")
+				.get(`broadcast.seen.${sid}`) as { value: string } | null;
 			if (b.ts > Number(seen?.value ?? 0)) {
-				out.push(`FLEET NOTICE (${new Date(b.ts).toISOString().slice(0, 16).replace("T", " ")} UTC): ${b.note}`);
-				db.query("INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts").run(
-					`broadcast.seen.${sid}`,
-					String(b.ts),
-					now,
+				out.push(
+					`FLEET NOTICE (${new Date(b.ts).toISOString().slice(0, 16).replace("T", " ")} UTC): ${b.note}`,
 				);
+				db.query(
+					"INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts",
+				).run(`broadcast.seen.${sid}`, String(b.ts), now);
 			}
 		} catch {}
 	}
@@ -149,16 +234,29 @@ if (mine.length || inbox > 0 || readyN > 0 || head) {
 // pull-only knowledge never gets pulled. Values are truncated; the full note
 // is one coord fact get away.
 {
-	const wm = db.query("SELECT value FROM facts WHERE key = ?").get(`lesson.seen.${sid}`) as { value: string } | null;
+	const wm = db
+		.query("SELECT value FROM facts WHERE key = ?")
+		.get(`lesson.seen.${sid}`) as { value: string } | null;
 	const rows = db
-		.query("SELECT key, value, ts FROM facts WHERE key LIKE 'lesson.%' AND key NOT LIKE 'lesson.seen.%' AND ts > ? ORDER BY ts LIMIT 5")
-		.all(Number(wm?.value ?? 0)) as { key: string; value: string; ts: number }[];
+		.query(
+			"SELECT key, value, ts FROM facts WHERE key LIKE 'lesson.%' AND key NOT LIKE 'lesson.seen.%' AND ts > ? ORDER BY ts LIMIT 5",
+		)
+		.all(Number(wm?.value ?? 0)) as {
+		key: string;
+		value: string;
+		ts: number;
+	}[];
 	if (rows.length) {
 		for (const r of rows) {
-			const v = r.value.length > 200 ? `${r.value.slice(0, 200)}… (coord fact get ${r.key})` : r.value;
+			const v =
+				r.value.length > 200
+					? `${r.value.slice(0, 200)}… (coord fact get ${r.key})`
+					: r.value;
 			out.push(`LESSON ${r.key.slice("lesson.".length)}: ${v}`);
 		}
-		db.query("INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts").run(
+		db.query(
+			"INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts",
+		).run(
 			`lesson.seen.${sid}`,
 			String(Math.max(...rows.map((r) => r.ts))),
 			now,
@@ -169,13 +267,27 @@ if (mine.length || inbox > 0 || readyN > 0 || head) {
 // legacy-ledger notice: known operational-ledger names, unmarked = old habit
 // may still treat them as live. One terse line, first match only. Deterministic
 // filename check only — no content classification, no auto-migration.
-const LEDGERS = ["MASTER-TASK-LEDGER.md", "TODO.md", "TASKS.md", "BACKLOG.md", "PROGRESS.md", "STATUS.md", "ROADMAP.md"];
+const LEDGERS = [
+	"MASTER-TASK-LEDGER.md",
+	"TODO.md",
+	"TASKS.md",
+	"BACKLOG.md",
+	"PROGRESS.md",
+	"STATUS.md",
+	"ROADMAP.md",
+];
 outer: for (const dir of [".", "docs", "docs/design"]) {
 	for (const name of LEDGERS) {
 		const p = `${process.cwd()}/${dir === "." ? "" : `${dir}/`}${name}`;
 		try {
-			if (!existsSync(p) || readFileSync(p, "utf8").includes("HISTORICAL / DESIGN RECORD")) continue;
-			out.push(`LEGACY LEDGER ${dir === "." ? "" : `${dir}/`}${name} — operational state belongs in the Work Graph (register items, add the HISTORICAL banner); never append progress there`);
+			if (
+				!existsSync(p) ||
+				readFileSync(p, "utf8").includes("HISTORICAL / DESIGN RECORD")
+			)
+				continue;
+			out.push(
+				`LEGACY LEDGER ${dir === "." ? "" : `${dir}/`}${name} — operational state belongs in the Work Graph (register items, add the HISTORICAL banner); never append progress there`,
+			);
 			break outer;
 		} catch {}
 	}
