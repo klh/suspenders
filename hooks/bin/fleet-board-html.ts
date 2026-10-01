@@ -1886,7 +1886,14 @@ window.addEventListener('hashchange', function(){
   var h = (location.hash || '').replace(/^#/, '');
   if (TABS[h]) setTab(h, true);
   applyHashFilter(); // #filter= deep-link; any other hash (incl. plain tabs) clears it
+  applyHashTask();
 });
+// #task=<id>[&proj=<p>] deep-link — open the task drawer straight from a URL
+// (lane reports, notifications, terminal links all land here)
+function applyHashTask(){
+  var m = (location.hash || '').match(/^#task=([^&]+)(?:&proj=([^&]*))?/);
+  if (m && openTask) openTask(decodeURIComponent(m[1]), m[2] ? decodeURIComponent(m[2]) : null, null);
+}
 byId('hashChipBar').addEventListener('click', function(e){
   var b = e.target.closest && e.target.closest('.hfclear');
   if (!b) return;
@@ -2108,6 +2115,7 @@ pollExecutors(); // belt targets for the dispatch dropdown (page-load, not polle
 if (!location.hash) history.replaceState(null, '', '#decisions');
 setTab(TABS[location.hash.slice(1)] ? location.hash.slice(1) : 'decisions', true);
 applyHashFilter(); // honor #filter=<text> on first paint (deep-link from the statusline)
+applyHashTask(); // honor #task=<id> on first paint (lane reports, terminal links)
 tick();
 renderAll();
 </script></body></html>`);
