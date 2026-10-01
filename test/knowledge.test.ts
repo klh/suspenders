@@ -100,6 +100,18 @@ const MODEL_REF_TEXT =
 	"Model-declared source refs are honored verbatim by the mechanical gate.";
 writeFileSync(join(REPO, MODEL_REF_REL), MODEL_REF_TEXT);
 
+// W100 fixture: the doc an enqueue-declared ref points at (hashed at ENQUEUE
+// time by the producer, never the payload) — content never mutated by tests
+const W100_REF_REL = "docs/w100-ref.md";
+const W100_REF_TEXT =
+	"W100 fixture: enqueue-time hashing captures the FILE at enqueue, never the payload.";
+writeFileSync(join(REPO, W100_REF_REL), W100_REF_TEXT);
+
+// W100 drift-cycle doc: enqueued, verified fresh, then overwritten — its own
+// file so no other test's row is disturbed by the mutation
+const W100_DRIFT_REL = "docs/w100-drift.md";
+writeFileSync(join(REPO, W100_DRIFT_REL), "W100 drift fixture: content v1.");
+
 // the distill LLM stub: /v1/models names the model; /v1/chat/completions
 // returns a canned distillation so no real model is needed. W103: the stub
 // reads the payload and returns substitution-themed items for the W103 runs.
@@ -116,11 +128,13 @@ const stub = Bun.serve({
 			const text = body?.messages?.map((m) => m.content ?? "").join(" ") ?? "";
 			const items = text.includes("w112-")
 				? w112Items(text)
-				: text.includes("w103-substitution")
-					? w103Items()
-					: text.includes("w103-curate-bait")
-						? baitItem()
-						: distillArr(u.searchParams.get("echo") ?? "");
+				: text.includes("w100-")
+					? w100Items(text)
+					: text.includes("w103-substitution")
+						? w103Items()
+						: text.includes("w103-curate-bait")
+							? baitItem()
+							: distillArr(u.searchParams.get("echo") ?? "");
 			return Response.json({
 				choices: [{ message: { content: JSON.stringify(items) } }],
 			});
@@ -200,6 +214,26 @@ function baitItem(): unknown[] {
 			area: "gates",
 			origin_kind: "lesson",
 			origin_system: null,
+		},
+	];
+}
+
+// W100 items (payload discriminator: "w100-"): one row per unique marker so
+// the near-dup gate never merges the probes; facts carry NO path-like tokens
+// (so the gate's codeOrigin fallback lands) and each carries 5 unique filler
+// tokens (so pairwise term overlap stays under the 0.6 near-dup threshold)
+function w100Items(text: string): unknown[] {
+	const marker = /w100-[a-z]+/.exec(text)?.[0] ?? "w100-x";
+	return [
+		{
+			topic: `w100 probe ${marker}`,
+			fact: `Provenance ${marker}: ${marker}-fq ${marker}-qz ${marker}-mx ${marker}-jw ${marker}-kz.`,
+			confidence: 0.9,
+			domain: "suspenders",
+			area: "gates",
+			origin_kind: "lesson",
+			origin_system: null,
+			source_ref: null,
 		},
 	];
 }
@@ -580,6 +614,22 @@ describe("W103 knowledge-api faces", () => {
 			};
 			expect(c.checked).toBeGreaterThanOrEqual(3);
 			expect(c.flagged.some((f) => f.topic === "curate bait row")).toBe(true);
+			// W100: /enqueue hashes the source_ref FILE on the producer side
+			const e = (await fetch(`http://127.0.0.1:${PORT}/enqueue`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					source: "w100 api enqueue",
+					payload: "w100-api: api-face probe",
+					source_ref: "docs/w100-ref.md",
+				}),
+			}).then((r) => r.json())) as { queued: number };
+			expect(e.queued).toBeGreaterThan(0);
+			const apiq = q<{ source_ref: string | null; source_hash: string | null }>(
+				`SELECT source_ref, source_hash FROM knowledge_queue WHERE id = ${e.queued}`,
+			)[0];
+			expect(apiq.source_ref).toBe(W100_REF_REL);
+			expect(apiq.source_hash).toBe(sha256Hex(W100_REF_TEXT));
 		} finally {
 			proc.kill();
 		}
@@ -660,5 +710,90 @@ describe("W112 pointer rows through the worker", () => {
 		const rows = rowByTopic("w112 absent path honest");
 		expect(rows.length).toBe(1);
 		expect(rows[0].source_ref).toBeNull();
+	});
+});
+
+// ─── W100 enqueue-time source hashing ───
+
+import { normalizeSourceRef } from "../hooks/lib/knowledge-ports.ts";
+
+describe("W100 normalizeSourceRef", () => {
+	test("strips explanatory suffixes, keeps the leading path", () => {
+		expect(normalizeSourceRef("hooks/lib/govdb.ts projectIdentity()")).toBe(
+			"hooks/lib/govdb.ts",
+		);
+		expect(normalizeSourceRef("hooks/bin/work.ts shaOnMain (W60)")).toBe(
+			"hooks/bin/work.ts",
+		);
+		expect(
+			normalizeSourceRef("hooks/bin/fleet-loop.ts + docs/fleet-loop.md"),
+		).toBe("hooks/bin/fleet-loop.ts");
+		expect(normalizeSourceRef("docs/x.md — why it matters")).toBe("docs/x.md");
+		expect(normalizeSourceRef("docs/x.md—attached")).toBe("docs/x.md");
+		expect(normalizeSourceRef("docs/plain.md")).toBe("docs/plain.md");
+		expect(normalizeSourceRef("  docs/spaced.md  ")).toBe("docs/spaced.md");
+	});
+});
+
+describe("W100 enqueue-time source hashing", () => {
+	const enq = (marker: string, codeOrigin: string) =>
+		run([
+			"knowledge-enqueue",
+			"--source",
+			"w100 verify",
+			"--payload",
+			`${marker}: probe`,
+			"--code-origin",
+			codeOrigin,
+		]);
+	const rowByTopic = (topic: string) =>
+		q<{ source_ref: string | null; source_hash: string | null }>(
+			`SELECT source_ref, source_hash FROM knowledge WHERE topic = '${topic}'`,
+		);
+
+	test("resolvable ref: file hash rides the queue into the row (not the payload)", async () => {
+		expect(
+			enq("w100-resolvable", "docs/w100-ref.md — prose suffix (why)").code,
+		).toBe(0);
+		const w = await runWorker({ ...INGEST_ENV, KNOWLEDGE_DOCS_ROOT: REPO });
+		expect(w.err).toBe("");
+		expect(w.out).toContain("1 written, 0 skipped");
+		// queue pass-through: normalized ref + the FILE's hash at enqueue time
+		const qr = q<{
+			source_ref: string | null;
+			source_hash: string | null;
+		}>(
+			"SELECT source_ref, source_hash FROM knowledge_queue WHERE source = 'w100 verify' ORDER BY id DESC LIMIT 1",
+		)[0];
+		expect(qr.source_ref).toBe(W100_REF_REL); // suffix normalized out
+		expect(qr.source_hash).toBe(sha256Hex(W100_REF_TEXT));
+		const row = rowByTopic("w100 probe w100-resolvable")[0];
+		expect(row.source_ref).toBe(W100_REF_REL);
+		expect(row.source_hash).toBe(sha256Hex(W100_REF_TEXT));
+	});
+
+	test("missing ref: row lands with a NULL hash (no doomed value)", async () => {
+		expect(enq("w100-missing", "docs/absent-w100.md").code).toBe(0);
+		const w = await runWorker({ ...INGEST_ENV, KNOWLEDGE_DOCS_ROOT: REPO });
+		expect(w.out).toContain("1 written, 0 skipped");
+		const row = rowByTopic("w100 probe w100-missing")[0];
+		expect(row.source_ref).toBe("docs/absent-w100.md");
+		expect(row.source_hash).toBeNull();
+	});
+
+	test("verify flags DRIFT only when the file content actually changed", async () => {
+		expect(enq("w100-drift", "docs/w100-drift.md").code).toBe(0);
+		const w = await runWorker({ ...INGEST_ENV, KNOWLEDGE_DOCS_ROOT: REPO });
+		expect(w.out).toContain("1 written, 0 skipped");
+		// fresh: stored hash matches the live file
+		const before = run(["knowledge-verify"]);
+		expect(before.out).toContain("source unchanged");
+		// live-file mutation AFTER index → real drift, not by-construction
+		writeFileSync(
+			join(REPO, W100_DRIFT_REL),
+			"W100 drift fixture: content v2 — changed after index.",
+		);
+		const after = run(["knowledge-verify"]);
+		expect(after.out).toContain("DRIFT");
 	});
 });

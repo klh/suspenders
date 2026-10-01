@@ -14,7 +14,7 @@ import {
 // POST /curate flags single-file-derivable rows for human review.
 //   run: bun hooks/bin/knowledge-api.ts [--port 7795]
 //   POST /search   {query, limit?, domain?, area?, origin_kind?, origin_system?}
-//   POST /enqueue  {source, payload, domain?, area?, code_origin?, origin_sid?}
+//   POST /enqueue  {source, payload, domain?, area?, code_origin?, origin_sid?, source_ref?}
 //   POST /curate   {repo?, by?} — substitution-curation flags, rows stay
 //   POST /promote  {id}
 //   POST /retire   {id, superseded_by?}
@@ -83,6 +83,10 @@ Bun.serve({
 						area: str(body.area),
 						codeOrigin: str(body.code_origin),
 						originSid: str(body.origin_sid),
+						// W100: the producer's declared ref — hashed HERE (API has repo
+						// access) and passed through the queue into the final row.
+						sourceRef: str(body.source_ref),
+						docsRoot: API_ROOT,
 					}),
 				});
 			if (req.method === "POST" && path === "/promote") {

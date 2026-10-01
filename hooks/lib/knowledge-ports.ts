@@ -41,8 +41,16 @@ export interface KnowledgeJob {
 	attempts: number;
 	domain: string | null;
 	area: string | null;
+	// W100: the producer-declared provenance (normalized at enqueue) — claim()
+	// surfaces it INSTEAD of the raw code_origin hint so the substitution
+	// gate's fallback writes a resolvable ref, not "path — explanation" prose.
 	codeOrigin: string | null;
 	originSid: string | null;
+	sourceRef: string | null;
+	// W100: enqueue-time sha256 of the source_ref FILE (producer had repo
+	// access; the distiller only sees the payload) — never the payload hash.
+	// "" when the producer stored NULL (ref unresolvable there); upsert()
+	// lands "" as NULL so the trust marker stays honest.
 	sourceHash: string;
 }
 
@@ -55,7 +63,9 @@ export interface KnowledgeUpsert {
 	originKind: string | null;
 	originSystem: string | null;
 	sourceRef: string | null;
-	sourceHash: string;
+	// W100: the enqueue-time FILE hash from the queue (claim() maps NULL to
+	// ""). upsert() lands ""/NULL as a NULL row hash — never a doomed value.
+	sourceHash: string | null;
 	originSid: string | null;
 	supersedesId: number | null;
 }
@@ -160,7 +170,7 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 	async claim(id: number): Promise<KnowledgeJob | null> {
 		const row = this.db
 			.query(
-				"SELECT source, payload, attempts, domain, area, code_origin, origin_sid FROM knowledge_queue WHERE id = ? AND state = 'queued'",
+				"SELECT source, payload, attempts, domain, area, code_origin, origin_sid, source_ref, source_hash FROM knowledge_queue WHERE id = ? AND state = 'queued'",
 			)
 			.get(id) as
 			| {
@@ -171,6 +181,8 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 					area: string | null;
 					code_origin: string | null;
 					origin_sid: string | null;
+					source_ref: string | null;
+					source_hash: string | null;
 			  }
 			| undefined;
 		if (!row) return null;
@@ -186,9 +198,16 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 			attempts: row.attempts + 1,
 			domain: row.domain,
 			area: row.area,
-			codeOrigin: row.code_origin,
+			// W100: the enqueue-normalized ref IS the fallback provenance — the
+			// substitution gate writes it verbatim when nothing better resolves,
+			// so rows carry "path" not "path — explanation".
+			codeOrigin: row.source_ref ?? row.code_origin,
 			originSid: row.origin_sid,
-			sourceHash: createHash("sha256").update(row.payload).digest("hex"),
+			sourceRef: row.source_ref,
+			// W100: the enqueue-time FILE hash passes through verbatim; "" means
+			// the producer stored NULL (unresolvable at enqueue) — upsert() turns
+			// that into a NULL row hash so /verify never chases a doomed value.
+			sourceHash: row.source_hash ?? "",
 		};
 	}
 
@@ -403,7 +422,9 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 					? row.supersedesId
 					: null,
 				row.sourceRef,
-				row.sourceHash,
+				// W100: "" (unhashable at enqueue) lands as NULL — /verify only ever
+				// compares against a hash the producer actually took of the file.
+				row.sourceHash || null,
 				now,
 				now,
 			);
@@ -693,12 +714,27 @@ export async function enqueueKnowledge(job: {
 	area?: string | null;
 	codeOrigin?: string | null;
 	originSid?: string | null;
+	// W100: declared provenance ref — explanatory suffixes are normalized out
+	// and the named FILE is hashed at ENQUEUE time (the producer has repo
+	// access; the distiller only sees the payload). Defaults to codeOrigin.
+	sourceRef?: string | null;
+	// repo root the ref resolves against — default KNOWLEDGE_DOCS_ROOT (W103),
+	// then KNOWLEDGE_REPO_ROOT, then the producer's cwd
+	docsRoot?: string;
 }): Promise<number> {
+	// W100: hash the declared source FILE here — the producer has repo access;
+	// the distiller never sees the filesystem.
+	const ref = normalizeSourceRef(job.sourceRef || job.codeOrigin || "");
+	const root =
+		job.docsRoot ??
+		process.env.KNOWLEDGE_DOCS_ROOT ??
+		process.env.KNOWLEDGE_REPO_ROOT ??
+		process.cwd();
 	const db = openGovernorDb();
 	try {
 		const r = db
 			.query(
-				"INSERT INTO knowledge_queue (ts, source, payload, state, attempts, domain, area, code_origin, origin_sid) VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?)",
+				"INSERT INTO knowledge_queue (ts, source, payload, state, attempts, domain, area, code_origin, origin_sid, source_ref, source_hash) VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)",
 			)
 			.run(
 				Date.now(),
@@ -708,9 +744,31 @@ export async function enqueueKnowledge(job: {
 				job.area ?? null,
 				job.codeOrigin ?? null,
 				job.originSid ?? null,
+				ref || null,
+				ref ? fileHash(root, ref) : null,
 			);
 		return Number(r.lastInsertRowid);
 	} finally {
 		db.close();
+	}
+}
+
+// W100: normalize the explanatory suffixes off a declared ref — the trust
+// layer (trustOf, coord knowledge-verify) resolves only the leading path, so
+// the queue stores that path itself: "hooks/bin/work.ts take (W60)" →
+// "hooks/bin/work.ts", "docs/x.md — why it matters" → "docs/x.md".
+export function normalizeSourceRef(ref: string): string {
+	return (ref.trim().split(/\s+/)[0] ?? "").replace(/[—–].*$/, "");
+}
+
+// sha256 of the file a ref names under root — same utf8 bytes trustOf and
+// coord knowledge-verify hash. Unresolvable → null (honest unverified).
+function fileHash(root: string, ref: string): string | null {
+	try {
+		return createHash("sha256")
+			.update(readFileSync(join(root, ref), "utf8"))
+			.digest("hex");
+	} catch {
+		return null;
 	}
 }

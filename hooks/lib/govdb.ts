@@ -491,7 +491,7 @@ export function openGovernorDb(): Database {
 				"CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN DELETE FROM facts_fts WHERE rowid = OLD.rowid; INSERT INTO facts_fts (rowid, value, key) VALUES (NEW.rowid, NEW.value, NEW.key); END",
 			);
 			db.run(
-				"CREATE TABLE IF NOT EXISTS knowledge_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, result_key TEXT, domain TEXT, area TEXT, code_origin TEXT, started_at INTEGER, origin_sid TEXT)",
+				"CREATE TABLE IF NOT EXISTS knowledge_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, result_key TEXT, domain TEXT, area TEXT, code_origin TEXT, started_at INTEGER, origin_sid TEXT, source_ref TEXT, source_hash TEXT)",
 			);
 			db.run(
 				"INSERT INTO facts_fts (rowid, value, key) SELECT rowid, value, key FROM facts WHERE value IS NOT NULL",
@@ -573,6 +573,14 @@ export function openGovernorDb(): Database {
 	).map((c) => c.name);
 	if (kqCols.length && !kqCols.includes("origin_sid"))
 		db.run("ALTER TABLE knowledge_queue ADD COLUMN origin_sid TEXT");
+	// W100: enqueue-time provenance — the declared source_ref (normalized) and
+	// the sha256 of the FILE it names at enqueue time (producer has repo
+	// access), passed through claim() into the final row. NULL hash = the ref
+	// did not resolve for the producer — honest, never a doomed value.
+	if (kqCols.length && !kqCols.includes("source_ref"))
+		db.run("ALTER TABLE knowledge_queue ADD COLUMN source_ref TEXT");
+	if (kqCols.length && !kqCols.includes("source_hash"))
+		db.run("ALTER TABLE knowledge_queue ADD COLUMN source_hash TEXT");
 	// one column table drives all 15 triggers so the images can never drift
 	// from the schemas they mirror. Locks are the highest-churn rows in the
 	// fleet (a renew per file edit), so lock rows are op-only (before/after
