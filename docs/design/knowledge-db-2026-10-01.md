@@ -236,23 +236,13 @@ only knowledge-layer code allowed to open the DB file. Phase 2:
    statement sweep asserting no `knowledge` DML/DDL rides the control-plane
    store.
 
-## What phase 2 must implement (checklist)
+## What phase 2 must implement
 
-- [ ] `openKnowledgeDb()` with the chosen pragmas (table above) and the
-      busy_timeout-before-WAL ordering
-- [ ] `makeStore()` binds it; delete the direct `openGovernorDb()` binding
-- [ ] v6→v7 migration in openGovernorDb (one transaction, crash-safe retry,
-      page_size before first kb write)
-- [ ] backup agent step: checkpoint + copy knowledge.db (+ -wal); pre-migration
-      VACUUM INTO backup
-- [ ] worker: `optimize` after each job that wrote rows (log the cost)
-- [ ] tests: fixture v6 db with rows → v7 postconditions (schema present,
-      user_version 7, row counts equal, FTS hit round-trip); makeStore binds
-      knowledge.db; knowledge.db page_size == 8192 + WAL; post-migration
-      governor open is idempotent (uv stays 7, no re-migration);
-      control-plane store rejects knowledge statements
-- [ ] board/API unchanged: search responses byte-identical (same rank
-      function, same snippets)
+Tracked on the work graph as **W166** (owner law: the graph is the single
+ledger for todos and work — docs record design, never task lists). The
+phase-2 scope: openKnowledgeDb pragmas, makeStore rebinding, the v6→v7
+migration, backup-agent step, worker optimize, the full test matrix, and
+byte-identical search responses — full detail in the W166 registration.
 
 ## Sources
 
