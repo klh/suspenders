@@ -4,8 +4,8 @@ Lane: w130-buildbase (RESEARCH — this doc is the only artifact, no code).
 Mission: find the best OSS to build the enterprise router on — path of least
 resistance to keys/teams/quotas/SSO-ready/audit, license-clean for building
 OUR license layer on top. Companions W128 (adopt-vs-build) and W131
-(belt-native sketch) had not landed facts when this was written (coord fact
-list checked twice, 2026-10-01).
+(belt-native sketch) had not landed facts when this was written (no w128/
+w131 entries in coord facts, verified via the coord CLI 2026-10-01).
 
 Method: each candidate's LICENSE file fetched raw from its repo (T1), repo
 metadata (stars / last push / latest release / archived flag) pulled from the
@@ -306,5 +306,5 @@ Feature and governance claims:
 - Portkey CLA: none found in a quick pass, not exhaustively checked.
 - Supply-chain posture (dependency audits) of one-api/new-api beyond CVE
   listings: not done.
-- W128/W131 facts: not landed at write time (checked twice); §5 is the
-  rule to apply, not a comparison already made.
+- W128/W131 facts: not landed at write time (verified via coord fact list,
+  2026-10-01); §5 is the rule to apply, not a comparison already made.
