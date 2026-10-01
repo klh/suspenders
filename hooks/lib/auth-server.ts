@@ -144,7 +144,7 @@ async function handleRevoke(
 	const sel = (await req.json().catch(() => ({}))) as RevokeBody;
 	if (!sel.jti && !sel.actor && !sel.team)
 		return bad("one of jti, actor, or team is required");
-	const out = revoke(store, sel, "api:/auth/revoke");
+	const out = revoke(store, sel, "api:/auth/revoke", auth.claims.sub);
 	return Response.json({
 		...out,
 		agent_next_steps: "Revoked tokens fail verification immediately.",

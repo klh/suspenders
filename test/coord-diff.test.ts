@@ -84,7 +84,7 @@ db.close();
 ).seq as number;
 
 describe("v5 migration — deltas table + row-image triggers", () => {
-	test("user_version 10 (v10 W166 knowledge split rode on top), deltas table, 36 deltas triggers, bus tables untracked", () => {
+	test("user_version 10 (v10 W166 knowledge split rode on top), deltas table, 39 deltas triggers, bus tables untracked", () => {
 		expect(
 			(
 				sql<{ user_version: number }>(
@@ -98,7 +98,7 @@ describe("v5 migration — deltas table + row-image triggers", () => {
 					"SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'deltas_%'",
 				)[0] as { n: number }
 			).n,
-		).toBe(36);
+		).toBe(39);
 		expect(
 			sql(
 				"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'deltas_events_%'",

@@ -3,7 +3,14 @@
 // sibling modules and the route modules import them.
 
 import { json } from "./helpers.ts";
-import { formToPatch, valuesToPatch, policyBaseline } from "./console-view.ts";
+import {
+	formToPatch,
+	valuesToPatch,
+	policyBaseline,
+	consoleMe,
+} from "./console-view.ts";
+import { db } from "./context.ts";
+import { adminAudit } from "../lib/admin-audit.ts";
 import { scrub } from "../lib/servicemon.ts";
 import {
 	ConfigError,
@@ -17,7 +24,11 @@ import {
 	atomicWrite,
 } from "../lib/board-config.ts";
 import type { BoardSettings } from "../lib/board-config.ts";
-import { ConsoleMe, Feature, previewPage } from "../bin/console-html.ts";
+import {
+	type ConsoleMe,
+	type Feature,
+	previewPage,
+} from "../bin/console-html.ts";
 
 export const htmlHdr = (): Record<string, string> => ({
 	"content-type": "text/html; charset=utf-8",
@@ -106,12 +117,13 @@ export const policyPreview = (
 // APPLY — the confirm step. feature + base64 values + preview mtime from the
 // confirm form; VALIDATE FIRST (a bad config surfaces its parse error, not a
 // guard conflict), then the mtime guard, then the atomic write.
-export const settingsApply = (f: URLSearchParams): Response => {
-	const feat = f.get("feature") ?? "";
-	const mtime = Number(f.get("mtime") ?? "0");
-	const values = Buffer.from(f.get("values") ?? "", "base64").toString("utf8");
-	if (feat !== "belt" && feat !== "buckle" && feat !== "suspenders")
-		return json({ ok: false, error: "unknown feature" }, 400);
+// the mutation proper — throws on bad config or a mtime-guard conflict;
+// settingsApply wraps it with the W174 admin-audit record
+const applySettingsMutation = (
+	feat: string,
+	values: string,
+	mtime: number,
+): Response => {
 	if (feat === "suspenders") {
 		const patch = formToBoardSettings(
 			JSON.parse(values) as Record<string, string>,
@@ -131,4 +143,38 @@ export const settingsApply = (f: URLSearchParams): Response => {
 		status: 303,
 		headers: { location: "/console/settings" },
 	});
+};
+
+export const settingsApply = (f: URLSearchParams): Response => {
+	const feat = f.get("feature") ?? "";
+	const mtime = Number(f.get("mtime") ?? "0");
+	const values = Buffer.from(f.get("values") ?? "", "base64").toString("utf8");
+	if (feat !== "belt" && feat !== "buckle" && feat !== "suspenders")
+		return json({ ok: false, error: "unknown feature" }, 400);
+	// W174: an apply is an admin mutation — who/when lands in admin_audit,
+	// failures included (the error is the trail's business; routes-console
+	// renders the error page, this records it).
+	const target =
+		feat === "suspenders" ? boardSettingsPath() : scrub(policyWritePath());
+	const action = feat === "suspenders" ? "settings.apply" : "policy.apply";
+	let resp: Response;
+	try {
+		resp = applySettingsMutation(feat, values, mtime);
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		adminAudit(db, {
+			actor: consoleMe().actor,
+			action,
+			target,
+			detail: `error: ${msg}`.slice(0, 2000),
+		});
+		throw e;
+	}
+	adminAudit(db, {
+		actor: consoleMe().actor,
+		action,
+		target,
+		detail: values.slice(0, 2000),
+	});
+	return resp;
 };

@@ -17,6 +17,7 @@ import type {
 	PolicyGatewayParsed,
 	ResolvedPolicy,
 } from "../lib/board-config.ts";
+import type { AdminAuditRow } from "../lib/admin-audit.ts";
 import { scrub } from "../lib/servicemon.ts";
 
 export interface ConsoleMe {
@@ -385,6 +386,14 @@ export const settingsFormPage = (
 	);
 };
 
+export interface SettingsIndexArgs {
+	pol: PolicyCur | null;
+	set: BoardSettingsState;
+	me?: ConsoleMe;
+	// W174: recent admin actions — settings/policy applies + key revocations
+	audit: AdminAuditRow[];
+}
+
 export const settingsIndexPage = (a: SettingsIndexArgs): string => {
 	const pol = a.pol;
 	const polCard = pol
@@ -409,13 +418,33 @@ export const settingsIndexPage = (a: SettingsIndexArgs): string => {
 			? `<div class="errbox">current file does not parse: ${esc(s.error)}</div>`
 			: `<div class="knobs"><span class="kchip">STATUS_REFRESH_S: <b>${s.settings.status_refresh_s ?? "default (5s)"}</b></span><span class="kchip">harvest TTL: <b>${s.settings.harvest_ttl_s ? `${s.settings.harvest_ttl_s}s` : "default (300s)"}</b></span><span class="kchip">default actor: <b>${s.settings.default_actor ? esc(s.settings.default_actor) : "unset"}</b></span></div>`) +
 		`</div>`;
+	// W174: the who/when trail — settings/policy applies + key revocations,
+	// newest first, block-mode chips (no new CSS; palette classes only)
+	const auditCard =
+		a.audit.length > 0
+			? `<div class="panel"><h2>admin audit</h2>${a.audit
+					.map((r) => {
+						const when = new Date(r.ts)
+							.toISOString()
+							.replace("T", " ")
+							.slice(0, 19);
+						const detail = r.detail
+							? ` · <span class="dimpl">${esc(r.detail)}</span>`
+							: "";
+						return `<div class="kchip" style="display:block;margin:3px 0"><b>${esc(r.action)}</b> · ${esc(r.actor ?? "unknown")} · <span class="mono">${when}</span> · ${esc(r.target ?? "")}${detail}</div>`;
+					})
+					.join(
+						"",
+					)}<p class="cfoot">settings applies, policy edits, key revocations — archived to NDJSON + aged out at 365d by coord gc</p></div>`
+			: `<div class="panel"><h2>admin audit</h2><p class="dimpl">no admin actions recorded yet — settings/policy applies and key revocations land here</p></div>`;
 	return consolePage(
 		"SETTINGS",
 		"settings",
 		`<style>${PAGE_CSS}</style><p class="dimpl">One entry per feature, each with its real config surface. Writes are config-over-code: YAML/JSON in known paths, never code. Every write previews a diff and needs an explicit confirm; invalid config is rejected with the parser's error.</p>` +
 			polCard +
 			`<div class="panel"><h2>edit</h2><div class="btnrow"><a class="btn2" href="/console/settings/belt">belt · budgets</a> <a class="btn2" href="/console/settings/buckle">buckle · ladder + cooldowns</a> <a class="btn2" href="/console/settings/suspenders">suspenders · board</a></div></div>` +
-			setCard,
+			setCard +
+			auditCard,
 		a.me,
 	);
 };

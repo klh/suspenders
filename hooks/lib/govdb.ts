@@ -819,6 +819,11 @@ export function openGovernorDb(): Database {
 			pk: "$.id",
 			cols: ["id", "ts", "actor", "event", "jti", "via"],
 		},
+		{
+			tbl: "admin_audit",
+			pk: "$.id",
+			cols: ["id", "ts", "actor", "action", "target", "detail"],
+		},
 	];
 	// v7 — usage analytics (W127): sessions.actor/tags give Copilot-style
 	// per-user/license drill-down (actor = user or license id; tags = JSON
@@ -897,6 +902,14 @@ export function openGovernorDb(): Database {
 	db.run(
 		"CREATE TABLE IF NOT EXISTS auth_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT, event TEXT NOT NULL, jti TEXT, via TEXT)",
 	);
+	// admin_audit (W174): the who/when trail for admin mutations the deltas
+	// log alone cannot attribute — console settings applies, policy edits,
+	// key revocations. actor = the human/lane that DROVE the action (the
+	// JWT sub on /auth/revoke, the console actor on settings applies).
+	db.run(
+		"CREATE TABLE IF NOT EXISTS admin_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT, action TEXT NOT NULL, target TEXT, detail TEXT)",
+	);
+	db.run("CREATE INDEX IF NOT EXISTS admin_audit_ts ON admin_audit(ts)");
 	if (uv < 8) db.run("PRAGMA user_version = 8");
 	// the trigger loop runs AFTER the last CREATE (W132 moved it below the v8
 	// block): a trigger references its table at creation time, so on a fresh

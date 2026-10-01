@@ -15,6 +15,7 @@ import {
 	realpathSync,
 } from "./shared.ts";
 import type { Database } from "./shared.ts";
+import { archiveAndPrune, pruneArchiveFiles } from "../lib/retention.ts";
 
 export async function cmdFact(rest: string[]): Promise<void> {
 	const sub = rest[0];
@@ -217,12 +218,82 @@ export async function cmdKb(rest: string[]): Promise<void> {
 	} else die('usage: kb stats | kb list | kb search "<query words>"');
 }
 
-export async function cmdGc(rest: string[]): Promise<void> {
+export async function cmdGc(_rest: string[]): Promise<void> {
 	// retention: events + closed sessions + their cursors age out; terminal
 	// work items are the ledger and are NEVER auto-deleted
 	const days = Number(arg("--days") ?? 30);
 	const cut = Date.now() - days * 86_400_000;
-	const e = db.query("DELETE FROM events WHERE ts < ?").run(cut).changes;
+	// W174 retention: events age out with archive-before-delete (lib/retention
+	// .ts) — the NDJSON lines under ~/.cache/claude-governor/archive/ keep
+	// everything gc deletes; route_audit/auth_events/usage_rollup/admin_audit
+	// were previously unbounded (governor bloat).
+	const e = pruneSafe({
+		table: "events",
+		tsCol: "ts",
+		cut,
+		cols: ["id", "ts", "source", "kind", "scope", "payload", "target"],
+	});
+	const auditDays = Number(arg("--audit-days") ?? 90);
+	const usageDays = Number(arg("--usage-days") ?? 180);
+	const ms = (d: number): number => d * 86_400_000;
+	// archive failure must never kill gc — skip that prune (rows survive to
+	// the next pass); archive-before-delete is the contract
+	function pruneSafe(spec: Parameters<typeof archiveAndPrune>[1]): number {
+		try {
+			return archiveAndPrune(db, spec);
+		} catch (e) {
+			console.error(
+				`gc: ${spec.table} archive failed — prune skipped: ${e instanceof Error ? e.message : String(e)}`,
+			);
+			return 0;
+		}
+	}
+	const ra = pruneSafe({
+		table: "route_audit",
+		tsCol: "ts",
+		cut: Date.now() - ms(auditDays),
+		cols: [
+			"rid",
+			"ts",
+			"actor",
+			"dialect",
+			"hint",
+			"candidates",
+			"resolved_target",
+			"decision",
+			"latency_class",
+			"error_code",
+		],
+	});
+	const ae = pruneSafe({
+		table: "auth_events",
+		tsCol: "ts",
+		cut: Date.now() - ms(usageDays),
+		cols: ["id", "ts", "actor", "event", "jti", "via"],
+	});
+	const ur = pruneSafe({
+		table: "usage_rollup",
+		tsCol: "hour_bucket",
+		cut: Date.now() - ms(usageDays),
+		cols: [
+			"hour_bucket",
+			"actor",
+			"model",
+			"model_group",
+			"in_tok",
+			"out_tok",
+			"cache_r",
+			"cache_c",
+			"requests",
+		],
+	});
+	const aa = pruneSafe({
+		table: "admin_audit",
+		tsCol: "ts",
+		cut: Date.now() - ms(365),
+		cols: ["id", "ts", "actor", "action", "target", "detail"],
+	});
+	const af = pruneArchiveFiles(365);
 	const s = db
 		.query("DELETE FROM sessions WHERE state = 'CLOSED' AND hb < ?")
 		.run(cut).changes;
@@ -250,5 +321,8 @@ export async function cmdGc(rest: string[]): Promise<void> {
 	const d = pruneDeltas(db as Database, days * 86_400_000);
 	console.log(
 		`gc: ${e} events, ${s} closed sessions, ${sw} stale RUNNING sessions swept, ${lk} expired locks, ${c} stale cursors, ${f} lane facts, ${x} consults expired, ${cd} consult threads pruned, ${d} deltas (>${days}d; work ledger untouched)`,
+	);
+	console.log(
+		`gc: archived → ${ra} route_audit (>${auditDays}d), ${ae} auth_events, ${ur} usage_rollup (>${usageDays}d), ${aa} admin_audit (365d); ${af} stale archive files; NDJSON in ~/.cache/claude-governor/archive/`,
 	);
 }

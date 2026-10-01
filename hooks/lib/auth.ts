@@ -40,6 +40,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { GovernorStore } from "./govdb.ts";
+import { adminAudit } from "./admin-audit.ts";
 
 export const LOCAL_ISSUER = "buckle";
 const AUDIENCE = "buckle";
@@ -442,6 +443,7 @@ export function revoke(
 	store: GovernorStore,
 	sel: RevokeSelector,
 	via = "api",
+	by?: string,
 ): { changes: number; selector: RevokeSelector } {
 	const now = Date.now();
 	if (!sel.jti && !sel.actor && !sel.team)
@@ -462,14 +464,22 @@ export function revoke(
 				.query(`${upd} team = ? AND revoked_at IS NULL`)
 				.run(now, sel.team).changes;
 		const kind = sel.jti ? "jti" : sel.actor ? "actor" : "team";
+		// W174: the who — auth_events records the SUBJECT (revoked tokens'
+		// owner); admin_audit records the DRIVER. Both, so either lens answers.
 		authEvent(
 			store,
 			now,
 			sel.actor ?? null,
 			"revoked",
 			sel.jti ?? null,
-			`${via}: ${kind}=${sel.jti ?? sel.actor ?? sel.team ?? ""}`,
+			`${via}: ${kind}=${sel.jti ?? sel.actor ?? sel.team ?? ""} by=${by ?? "unknown"}`,
 		);
+		adminAudit(store, {
+			actor: by ?? null,
+			action: "keys.revoke",
+			target: `${kind}=${sel.jti ?? sel.actor ?? sel.team ?? ""}`,
+			detail: `${changes} token row(s) revoked via ${via}`,
+		});
 		return { changes, selector: sel };
 	});
 }

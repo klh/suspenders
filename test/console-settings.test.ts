@@ -307,4 +307,23 @@ describe("console routes (real board, temp config)", () => {
 		expect(st.settings.status_refresh_s).toBe(9);
 		expect(st.settings.harvest_ttl_s).toBe(120);
 	});
+
+	test("W174: applies land in the admin audit trail", async () => {
+		const d = (await (await fetch(`${BASE}/api/console/audit`)).json()) as {
+			ok: boolean;
+			audit: Record<string, unknown>[];
+		};
+		expect(d.ok).toBe(true);
+		const actions = d.audit.map((r) => String(r.action));
+		// the earlier round-trip tests applied policy + suspenders settings,
+		// and the invalid-apply test wrote a failure record
+		expect(actions).toContain("settings.apply");
+		expect(actions).toContain("policy.apply");
+		expect(
+			d.audit.some((r) => String(r.detail ?? "").startsWith("error:")),
+		).toBe(true);
+		const page = await (await fetch(`${BASE}/console/settings`)).text();
+		expect(page).toContain("admin audit");
+		expect(page).toContain("settings.apply");
+	});
 });

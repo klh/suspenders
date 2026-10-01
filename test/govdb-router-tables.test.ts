@@ -139,7 +139,7 @@ describe("v8 migration shape", () => {
 		d.close();
 	});
 
-	test("deltas triggers cover every table: 12 × 3 = 36, bus tables still untracked", () => {
+	test("deltas triggers cover every table: 13 × 3 = 39, bus tables still untracked", () => {
 		const d = new Database(DB);
 		const n = (
 			d
@@ -148,7 +148,7 @@ describe("v8 migration shape", () => {
 				)
 				.get() as { n: number }
 		).n;
-		expect(n).toBe(36);
+		expect(n).toBe(39);
 		const bus = d
 			.query(
 				"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'deltas_events_%'",
@@ -172,7 +172,7 @@ describe("v8 migration shape", () => {
 				.get() as { n: number }
 		).n;
 		expect(uv).toBe(10);
-		expect(n).toBe(36);
+		expect(n).toBe(39);
 		const legacy = d
 			.query(
 				"SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%_legacy_%'",

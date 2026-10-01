@@ -1,9 +1,9 @@
 // hooks/board/routes-console.ts — W147 console: /console /console/belt /console/local /api/console/me /console/settings(+preview/apply) (W157 route module).
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
-import { BELT_REPO } from "./context.ts";
+import { BELT_REPO, db } from "./context.ts";
 import { json, writeGuard } from "./helpers.ts";
-import { board } from "./data.ts";
+import { recentAdminAudit } from "../lib/admin-audit.ts";
 import { consoleMe, gatherBeltView, gatherLocalView } from "./console-view.ts";
 import {
 	htmlHdr,
@@ -23,7 +23,7 @@ import type { PolicyGatewayParsed } from "../lib/board-config.ts";
 import {
 	beltPage,
 	localPage,
-	Feature,
+	type Feature,
 	previewPage,
 	settingsFormPage,
 	settingsIndexPage,
@@ -53,8 +53,7 @@ export async function handleConsole(
 		});
 	if (url.pathname === "/api/console/me") {
 		// avatar dropdown data: board host's latest actor (unassigned until
-		// coord bootstrap --actor stamps it) + tags + distinct known actors
-		// + the settings-file default for the demo select
+		// coord bootstrap --actor bootstrap... see console-view's consoleMe
 		const m = consoleMe();
 		return json({
 			ok: true,
@@ -63,6 +62,15 @@ export async function handleConsole(
 			actors: m.actors,
 			default_actor: m.defaultActor,
 		});
+	}
+	if (url.pathname === "/api/console/audit") {
+		// W174: the admin-action trail as JSON — settings/policy applies and
+		// key revocations, newest first; ?limit= clamps to 1..200
+		const limit = Math.min(
+			200,
+			Math.max(1, Number(url.searchParams.get("limit") ?? 25) || 25),
+		);
+		return json({ ok: true, audit: recentAdminAudit(db, limit) });
 	}
 	if (url.pathname === "/console/settings") {
 		const pol = resolvePolicy({ beltRepo: BELT_REPO });
@@ -87,6 +95,7 @@ export async function handleConsole(
 					: null,
 				set: readBoardSettings(),
 				me: consoleMe(),
+				audit: recentAdminAudit(db, 25),
 			}),
 			{
 				headers: {

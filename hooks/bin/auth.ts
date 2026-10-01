@@ -87,7 +87,12 @@ function cmdRevoke(): number {
 		console.error("revoke needs --jti, --actor, or --team");
 		return 2;
 	}
-	const out = revoke(openStore(), sel, "cli:auth.ts");
+	const out = revoke(
+		openStore(),
+		sel,
+		"cli:auth.ts",
+		`cli:${process.env.USER ?? "unknown"}`,
+	);
 	console.log(
 		`revoked ${out.changes} token row(s) (${sel.jti ? `jti=${sel.jti}` : sel.actor ? `actor=${sel.actor}` : `team=${sel.team}`})`,
 	);
