@@ -1,0 +1,15 @@
+# routing-policy.yaml — installer stub for ~/.claude/local-llm/ (never
+# clobbered once present: operators edit the runtime copy). Mirrors the belt
+# committed default. Ladder (owner directives 2026-10-01):
+#   glm-5.3-flash → local-swarm (:4000 anthropic shim over the local swarm)
+#   → gpt-5.2 → claude-sonnet-5. NEVER flashx.
+# Belt emits this as litellm router_settings; buckle resolves THIS file by
+# default (BUCKLE_POLICY/BELT_POLICY env beats it).
+version: 1
+
+gateway:
+  num_retries: 1
+  allowed_fails: 3
+  cooldown_time: 30
+  fallbacks:
+    glm-5.3-flash: [local-swarm, gpt-5.2, claude-sonnet-5]

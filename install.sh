@@ -3,11 +3,47 @@
 # optionally: --wire merges the hook registrations into ~/.claude/settings.json
 # (per-event concat, never clobbers), --with-launchd installs the macOS agents.
 # Idempotent: re-running just refreshes the files.
-#   ./install.sh [--wire] [--with-launchd]
+#   ./install.sh [--wire] [--with-launchd] [--dry-run] [--skip-models] [--no-llm]
+# Default (owner law 2026-10-01): ALWAYS sets up the local-llm swarm and
+# downloads the smallest-fit models (BELT_TIER=minimal residents).
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${SUSPENDERS_PREFIX:-$HOME/.claude/hooks/suspenders}"
+
+# flags (order-independent) — replaces the old positional $1/$2 checks
+WIRE=0 WITH_LAUNCHD=0 DRY_RUN=0 SKIP_MODELS=0 NO_LLM=0
+for arg in "$@"; do
+  case "$arg" in
+    --wire) WIRE=1 ;;
+    --with-launchd) WITH_LAUNCHD=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --skip-models) SKIP_MODELS=1 ;;
+    --no-llm) NO_LLM=1 ;;
+    *) echo "unknown flag: $arg"; exit 2 ;;
+  esac
+done
+
+LLM_HOME="$HOME/.claude/local-llm"
+KIT_DIR="$REPO_DIR/hooks/local-llm"
+
+# --dry-run: print the plan, touch nothing (bun read-only for the tier list)
+if [[ $DRY_RUN -eq 1 ]]; then
+  echo "dry-run — would:"
+  echo "  install harness → $PREFIX (+ bun install)"
+  echo "  local-llm baseline → $LLM_HOME:"
+  echo "    kit: swarm.ts (serve supervisor), spawner.ts, router-shim.ts,"
+  echo "         registry.ts, belt.env + routing-policy.yaml stubs"
+  echo "    registry/belt.env/routing-policy.yaml: only when absent"
+  echo "    swarm.ts: refreshed when the copy lacks serve (revival fix)"
+  echo "    models (BELT_TIER=minimal residents, resumable download):"
+  BELT_TIER=minimal LOCAL_LLM_HOME="$KIT_DIR" bun -e '
+const { residentSet } = await import(process.env.LOCAL_LLM_HOME + "/registry.ts");
+for (const s of residentSet()) console.log("      " + s.model + " → :" + s.port);
+' 2>/dev/null || echo "      (bun import failed — kit registry unreadable)"
+  echo "    launchd: com.suspenders.local-llm (swarm.ts serve, KeepAlive)"
+  exit 0
+fi
 
 command -v bun >/dev/null || { echo "suspenders needs bun — https://bun.sh first"; exit 1; }
 
@@ -20,9 +56,69 @@ cp "$REPO_DIR/package.json" "$REPO_DIR/bun.lock" "$PREFIX/"
 (cd "$PREFIX" && bun install) # shell-quote, for the bash gate
 echo "→ harness in place"
 
+# ─── local-llm baseline (owner law 2026-10-01) ───
+# Installing suspenders ALWAYS installs the local-llm swarm — smallest models
+# that fit the bill (registry BELT_TIER=minimal residents). The kit lands in
+# $LLM_HOME; copies never clobber the runtime home (it is the live fleet's
+# possibly-customized source of truth). --no-llm skips for CI/containers.
+if [[ $NO_LLM -eq 0 ]]; then
+  mkdir -p "$LLM_HOME"
+  for f in registry.ts spawner.ts router-shim.ts; do
+    if [ -f "$LLM_HOME/$f" ]; then
+      echo "= $LLM_HOME/$f kept (runtime copy is source of truth)"
+    else
+      cp "$KIT_DIR/$f" "$LLM_HOME/$f"
+      echo "+ $LLM_HOME/$f"
+    fi
+  done
+  # swarm.ts is the one kit file that MAY refresh a present copy: an older
+  # installed swarm.ts lacks the serve supervisor, and a serve-less swarm.ts
+  # under launchd KeepAlive is exactly the busy-loop flaw this fixes.
+  if [ ! -f "$LLM_HOME/swarm.ts" ] || ! grep -q 'case "serve"' "$LLM_HOME/swarm.ts" 2>/dev/null; then
+    cp "$KIT_DIR/swarm.ts" "$LLM_HOME/swarm.ts"
+    echo "+ $LLM_HOME/swarm.ts (serve supervisor)"
+  else
+    echo "= $LLM_HOME/swarm.ts kept (serve already present)"
+  fi
+  # config stubs — belt.env + routing-policy.yaml, only when absent
+  for f in belt.env routing-policy.yaml; do
+    if [ -f "$LLM_HOME/$f" ]; then
+      echo "= $LLM_HOME/$f kept (operator-owned runtime copy)"
+    else
+      cp "$KIT_DIR/$f" "$LLM_HOME/$f"
+      echo "+ $LLM_HOME/$f (stub — fill/verify at activation)"
+    fi
+  done
+  # smallest-fit models: derived FROM the registry (same source of truth the
+  # swarm reads) — BELT_TIER=minimal residents. huggingface_hub snapshot_
+  # download resumes partial downloads; --skip-models skips for offline boxes.
+  if [[ $SKIP_MODELS -eq 0 ]]; then
+    MLX_PYTHON="$HOME/.local/share/uv/tools/mlx-lm/bin/python"
+    if [ ! -x "$MLX_PYTHON" ] && command -v uv >/dev/null 2>&1; then
+      uv tool install mlx-lm >/dev/null 2>&1 || true
+    fi
+    if [ -x "$MLX_PYTHON" ]; then
+      MODELS="$(BELT_TIER=minimal LOCAL_LLM_HOME="$LLM_HOME" bun -e '
+const { residentSet } = await import(process.env.LOCAL_LLM_HOME + "/registry.ts");
+process.stdout.write(residentSet().map((s) => s.model).join("\n"));
+')"
+      printf '%s\n' "$MODELS" | while IFS= read -r model; do
+        [ -z "$model" ] && continue
+        echo "→ downloading $model (resumes if partial)"
+        "$MLX_PYTHON" -c 'from huggingface_hub import snapshot_download; import sys; snapshot_download(sys.argv[1])' "$model" \
+          || echo "  ✗ $model failed — re-run install to resume"
+      done
+    else
+      echo "→ mlx-lm missing — skipping model download (re-run install to fetch)"
+    fi
+  else
+    echo "→ --skip-models: skipping model download (offline install)"
+  fi
+fi
+
 # --wire: merge the example hooks block into ~/.claude/settings.json — per-event
 # array concat, existing entries untouched; paths rewritten to the real prefix
-if [[ "${1:-}" == "--wire" || "${2:-}" == "--wire" ]]; then
+if [[ $WIRE -eq 1 ]]; then
   SETTINGS="$HOME/.claude/settings.json"
   [ -f "$SETTINGS" ] || echo "{}" >"$SETTINGS"
   SUSPENDERS_EXAMPLE="$REPO_DIR/settings.example.json" SUSPENDERS_PREFIX="$PREFIX" bun -e '
@@ -44,7 +140,7 @@ if [[ "${1:-}" == "--wire" || "${2:-}" == "--wire" ]]; then
 fi
 
 # --with-launchd: template-substitute and load the macOS agents
-if [[ "${1:-}" == "--with-launchd" || "${2:-}" == "--with-launchd" ]]; then
+if [[ $WITH_LAUNCHD -eq 1 ]]; then
   if [[ "$(uname)" != "Darwin" ]]; then
     echo "→ --with-launchd skipped (not macOS)"
   else
@@ -90,6 +186,9 @@ echo "  bun $PREFIX/bin/fleet-board.ts        # live fleet board (+ decision for
 echo "  bun $PREFIX/bin/work.ts ready         # what the fleet can pick up"
 echo "  bun $PREFIX/bin/monitor.ts            # control-plane health"
 echo "env knobs: SUSPENDERS_LLM_URL / SUSPENDERS_LLM_MODEL / SUSPENDERS_LLM_KEY (advice worker)"
+echo "local-llm: $LLM_HOME (swarm serve supervisor; BELT_TIER=minimal residents + :4000 router)"
+echo "  bun $LLM_HOME/swarm.ts status   # swarm health"
+echo "  bun $LLM_HOME/swarm.ts serve    # resident supervisor (launchd label com.suspenders.local-llm)"
 
 # ─── release notify: the distributed changelog (2026-09-30) ───
 # every deploy announces the live version on the coord bus; every session
