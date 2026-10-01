@@ -27,7 +27,7 @@ export interface ConsoleMe {
 }
 
 // ─── shared chrome ────────────────────────────────────────────────────────
-const esc = (s: string): string =>
+export const esc = (s: string): string =>
 	s
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
