@@ -14,8 +14,13 @@ import {
 	statSync,
 } from "node:fs";
 import { resolve } from "node:path";
+import { migrateIdentitySplit, openIdentityDb } from "./identity-db.ts";
 
 const REG = `${process.env.HOME}/.cache/claude-governor`;
+// W156: the identity-db module takes REG as a PARAMETER (migrateIdentitySplit
+// (db, REG), openIdentityDb(REG)) — the temp-HOME test-isolation pattern
+// (?query cache-bust) re-evaluates THIS binding per govdb instance, and the
+// split must inherit exactly that binding, never a shared module-load one.
 
 // one project identity for the whole control plane: realpath of the repo's
 // COMMON git dir — every worktree of one repo shares one Work Graph, and
@@ -738,32 +743,9 @@ export function openGovernorDb(): Database {
 		// W132 router governance tables — deltas coverage is the audit win:
 		// adding entries here is the whole mechanism (v8 block below creates
 		// the tables these triggers mirror).
-		{
-			tbl: "api_keys",
-			pk: "$.key_id",
-			cols: [
-				"key_id",
-				"key_hash",
-				"jti",
-				"name",
-				"team",
-				"actor",
-				"token_type",
-				"parent_key_id",
-				"scopes",
-				"rpm_limit",
-				"tpm_limit",
-				"expires_at",
-				"rotated_at",
-				"revoked_at",
-				"created_at",
-			],
-		},
-		{
-			tbl: "teams",
-			pk: "$.team_id",
-			cols: ["team_id", "name", "department", "created_at"],
-		},
+		// W156: api_keys/teams/auth_events left deltaTables with the identity
+		// split — their triggers died with the moved tables, and identity's
+		// audit trail is auth_events, resident in identity.db itself.
 		{
 			tbl: "route_audit",
 			pk: "$.rid",
@@ -814,11 +796,6 @@ export function openGovernorDb(): Database {
 			pk: "$.key_id || '/' || $.window",
 			cols: ["key_id", "window", "used_rpm", "used_tpm", "window_start"],
 		},
-		{
-			tbl: "auth_events",
-			pk: "$.id",
-			cols: ["id", "ts", "actor", "event", "jti", "via"],
-		},
 	];
 	// v7 — usage analytics (W127): sessions.actor/tags give Copilot-style
 	// per-user/license drill-down (actor = user or license id; tags = JSON
@@ -854,16 +831,9 @@ export function openGovernorDb(): Database {
 	// revocation is per-token (revoked_at) and per-actor (every row of the
 	// actor) — both plain UPDATEs the deltas triggers already see.
 	// auth_events: the issued|refreshed|rotated|revoked|rejected ledger.
-	db.run(
-		"CREATE TABLE IF NOT EXISTS api_keys (key_id TEXT PRIMARY KEY, key_hash TEXT NOT NULL, jti TEXT, name TEXT, team TEXT, actor TEXT, token_type TEXT NOT NULL DEFAULT 'access', parent_key_id TEXT, scopes TEXT, rpm_limit INTEGER, tpm_limit INTEGER, expires_at INTEGER, rotated_at INTEGER, revoked_at INTEGER, created_at INTEGER NOT NULL)",
-	);
-	db.run(
-		"CREATE UNIQUE INDEX IF NOT EXISTS api_keys_hash ON api_keys(key_hash)",
-	); // auth = one hash lookup
-	db.run("CREATE UNIQUE INDEX IF NOT EXISTS api_keys_jti ON api_keys(jti)"); // denylist checks
-	db.run(
-		"CREATE TABLE IF NOT EXISTS teams (team_id TEXT PRIMARY KEY, name TEXT, department TEXT, created_at INTEGER NOT NULL)",
-	);
+	// api_keys/teams/auth_events are NOT created here anymore — W156 moved the
+	// identity plane to identity.db (v11, hooks/lib/identity-db.ts): hub-plane
+	// data out of the spoke-plane file. The schemas live in IDENTITY_DDL.
 	// route_audit (W136 §6): one row per request — INSERTed at dispatch
 	// (target already known), UPDATEd in place with the outcome joined by
 	// rid; the deltas insert+update trigger pair captures both writes.
@@ -893,9 +863,6 @@ export function openGovernorDb(): Database {
 	// rolled window restarts the count honestly.
 	db.run(
 		"CREATE TABLE IF NOT EXISTS budget_state (key_id TEXT NOT NULL, window TEXT NOT NULL, used_rpm INTEGER NOT NULL DEFAULT 0, used_tpm INTEGER NOT NULL DEFAULT 0, window_start INTEGER NOT NULL, PRIMARY KEY (key_id, window))",
-	);
-	db.run(
-		"CREATE TABLE IF NOT EXISTS auth_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT, event TEXT NOT NULL, jti TEXT, via TEXT)",
 	);
 	if (uv < 8) db.run("PRAGMA user_version = 8");
 	// the trigger loop runs AFTER the last CREATE (W132 moved it below the v8
@@ -938,6 +905,10 @@ export function openGovernorDb(): Database {
 	}
 	// v10 (W166) — knowledge.db split; see migrateKnowledgeSplit above.
 	if (uv < 10) migrateKnowledgeSplit(db);
+	// v11 (W156) — identity.db split; see migrateIdentitySplit (identity-db.ts):
+	// the v8 identity tables leave governor.db per the federation doc's
+	// Identity plane separation (hub-plane data out of the spoke-plane file).
+	if (uv < 11) migrateIdentitySplit(db, REG);
 	migrateJSON(db);
 	return db;
 }
@@ -1030,6 +1001,7 @@ export class HttpGovernorStore implements GovernorStore {
 	constructor(
 		private base: string,
 		private token: string | null,
+		private path = "/rpc",
 	) {
 		// eager probe: a dead server fails AT OPEN — work.ts's mirror fallback
 		// and coord's module-top open both expect today's throw timing
@@ -1048,7 +1020,7 @@ export class HttpGovernorStore implements GovernorStore {
 			"10",
 			"-X",
 			"POST",
-			`${this.base}/rpc`,
+			`${this.base}${this.path}`,
 			"-H",
 			"content-type: application/json",
 		];
@@ -1130,9 +1102,34 @@ export function openStore(): GovernorStore {
 	return d;
 }
 
-function storeUrlFile(): string | null {
+// W156 identity port — the store-port pattern on identity.db (federation doc:
+// openIdentity(), served beside /rpc on :7794). Same resolver chain as
+// openStore(): IDENTITY_STORE_URL → ${REG}/identity.url → in-process; the
+// token header is the store server's ONE loopback token (GOVERNOR_STORE_TOKEN)
+// since both planes ride the same listener. `local` = transcript-derived
+// behavior exclusion, same meaning as GovernorStore.local.
+export type IdentityStore = GovernorStore;
+
+export function openIdentity(): IdentityStore {
+	const raw = (
+		process.env.IDENTITY_STORE_URL ??
+		storeUrlFile("identity.url") ??
+		""
+	).trim();
+	if (raw && raw !== "local")
+		return new HttpGovernorStore(
+			raw.replace(/\/+$/, ""),
+			process.env.GOVERNOR_STORE_TOKEN ?? null,
+			"/identity",
+		);
+	const d = openIdentityDb(REG) as unknown as IdentityStore;
+	d.local = true;
+	return d;
+}
+
+function storeUrlFile(name = "store.url"): string | null {
 	try {
-		return readFileSync(`${REG}/store.url`, "utf8") || null;
+		return readFileSync(`${REG}/${name}`, "utf8") || null;
 	} catch {
 		return null;
 	}

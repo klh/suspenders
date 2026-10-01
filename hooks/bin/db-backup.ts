@@ -102,6 +102,39 @@ if (existsSync(KB)) {
 		);
 }
 
+// ---- W156: identity.db rides along, same shape as knowledge.db — the
+// identity plane's independent backup/retention is the split's rationale.
+const IDB = join(HOME, ".cache", "claude-governor", "identity.db");
+if (existsSync(IDB)) {
+	const idbc = new Database(IDB);
+	const ick = idbc.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as {
+		busy: number;
+	};
+	idbc.close();
+	const iout = join(DEST, `identity-${stamp}.db`);
+	copyFileSync(IDB, iout);
+	const iwal = `${IDB}-wal`;
+	if (existsSync(iwal)) copyFileSync(iwal, `${iout}-wal`);
+	const icheck = new Database(iout, { readonly: true });
+	const iint =
+		(
+			icheck.query("PRAGMA integrity_check").get() as
+				| { integrity_check?: string }
+				| undefined
+		)?.integrity_check ?? "missing";
+	const irows = (
+		icheck.query("SELECT COUNT(*) AS n FROM api_keys").get() as { n: number }
+	).n;
+	icheck.close();
+	console.log(
+		`db-backup: ${iout} (checkpoint busy=${ick?.busy ?? "?"}, integrity ${iint}, ${irows} api_keys rows)`,
+	);
+	if (iint !== "ok")
+		console.error(
+			`db-backup: identity SNAPSHOT FAILED INTEGRITY — investigate`,
+		);
+}
+
 // ---- GFS rotation: generation slots in days, newest per slot wins ----
 type Snap = { ts: number; file: string; ageD: number };
 const snaps: Snap[] = readdirSync(DEST)

@@ -12,10 +12,10 @@
 // access token carry the x-auth-renew header.
 import type { AuthFailure } from "./auth.ts";
 import { issueTokens, rotateRefresh, revoke, verifyJwt } from "./auth.ts";
-import type { GovernorStore } from "./govdb.ts";
+import type { IdentityStore } from "./govdb.ts";
 
 export interface AuthServerOpts {
-	store: GovernorStore;
+	store: IdentityStore;
 }
 
 export function authFailureResponse(r: AuthFailure): Response {
@@ -66,7 +66,7 @@ function validateIssueBody(body: IssueBody): Response | null {
 }
 async function handleToken(
 	req: Request,
-	store: GovernorStore,
+	store: IdentityStore,
 ): Promise<Response> {
 	const auth = await verifyJwt(req, "write_auth", { store });
 	if (!auth.ok) return authFailureResponse(auth);
@@ -108,7 +108,7 @@ async function handleToken(
 }
 async function handleRefresh(
 	req: Request,
-	store: GovernorStore,
+	store: IdentityStore,
 ): Promise<Response> {
 	const body = (await req.json().catch(() => ({}))) as {
 		refresh_token?: string;
@@ -137,7 +137,7 @@ interface RevokeBody {
 
 async function handleRevoke(
 	req: Request,
-	store: GovernorStore,
+	store: IdentityStore,
 ): Promise<Response> {
 	const auth = await verifyJwt(req, "write_auth", { store });
 	if (!auth.ok) return authFailureResponse(auth);
@@ -153,7 +153,7 @@ async function handleRevoke(
 
 async function handleWhoami(
 	req: Request,
-	store: GovernorStore,
+	store: IdentityStore,
 ): Promise<Response> {
 	const auth = await verifyJwt(req, undefined, { store });
 	if (!auth.ok) return authFailureResponse(auth);

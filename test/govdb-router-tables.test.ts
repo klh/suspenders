@@ -3,13 +3,14 @@
 // zero per-table wiring (the audit trail IS the deltas log), and honor the
 // two write contracts the router leans on: aid_rollup UPSERT-ADD (W137 §6 —
 // flushers add, never overwrite) and budget_state upsert-add flush (W135 —
-// a retried batch never loses counts). api_keys carries the token mechanics
-// (access|refresh, parent_key_id rotation chain, jti denylist, NULL
-// expires_at = forever) and stores HASHES only. Temp-HOME isolation per the
-// govdb-migration recipe: the ?query import busts bun's shared module cache
-// so this file's govdb instance binds the temp HOME, never the real
-// governor.db. HOME is restored right after import — REG is captured at
-// module load, so later imports in other files rebind to the real HOME.
+// a retried batch never loses counts). W156: the identity tables (api_keys/
+// teams/auth_events) live in identity.db (v11) — no longer here, no deltas
+// triggers (identity's audit trail is auth_events, resident in identity.db).
+// Temp-HOME isolation per the govdb-migration recipe: the ?query import
+// busts bun's shared module cache so this file's govdb instance binds the
+// temp HOME, never the real governor.db. HOME is restored right after
+// import — REG is captured at module load, so later imports in other files
+// rebind to the real HOME.
 import { describe, test, expect, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
@@ -25,6 +26,7 @@ const { openGovernorDb } = await import(
 process.env.HOME = REAL_HOME;
 
 const DB = `${HOME}/.cache/claude-governor/governor.db`;
+const IDENTITY_DB = `${HOME}/.cache/claude-governor/identity.db`;
 
 function freshDb(): Database {
 	mkdirSync(dirname(DB), { recursive: true });
@@ -36,24 +38,6 @@ function freshDb(): Database {
 afterAll(() => rmSync(HOME, { recursive: true, force: true }));
 
 const NEW_TABLES: Record<string, string[]> = {
-	api_keys: [
-		"key_id",
-		"key_hash",
-		"jti",
-		"name",
-		"team",
-		"actor",
-		"token_type",
-		"parent_key_id",
-		"scopes",
-		"rpm_limit",
-		"tpm_limit",
-		"expires_at",
-		"rotated_at",
-		"revoked_at",
-		"created_at",
-	],
-	teams: ["team_id", "name", "department", "created_at"],
 	route_audit: [
 		"rid",
 		"ts",
@@ -88,7 +72,6 @@ const NEW_TABLES: Record<string, string[]> = {
 		"requests",
 	],
 	budget_state: ["key_id", "window", "used_rpm", "used_tpm", "window_start"],
-	auth_events: ["id", "ts", "actor", "event", "jti", "via"],
 };
 
 const DML = {
@@ -121,7 +104,7 @@ const DOC_AID_ROLLUP_SQL = `CREATE TABLE IF NOT EXISTS aid_rollup (
 );`;
 
 describe("v8 migration shape", () => {
-	test("user_version 10 (v10 W166 knowledge split rode on top), all seven router tables present with the designed columns", () => {
+	test("user_version 11 (W156 identity split rode on top of v10), four router tables here, identity gone to identity.db", () => {
 		const db = freshDb();
 		db.close();
 		openGovernorDb();
@@ -129,17 +112,35 @@ describe("v8 migration shape", () => {
 		const uv = (
 			d.query("PRAGMA user_version").get() as { user_version: number }
 		).user_version;
-		expect(uv).toBe(10);
+		expect(uv).toBe(11);
 		for (const [tbl, cols] of Object.entries(NEW_TABLES)) {
 			const have = (
 				d.query(`PRAGMA table_info(${tbl})`).all() as { name: string }[]
 			).map((c) => c.name);
 			expect(have).toEqual(cols);
 		}
+		const gone = d
+			.query(
+				"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'teams', 'api_keys', 'auth_events', 'ceilings')",
+			)
+			.all();
+		expect(gone).toEqual([]);
 		d.close();
+		const idb = new Database(IDENTITY_DB);
+		const idbTables = (
+			idb
+				.query("SELECT name FROM sqlite_master WHERE type = 'table'")
+				.all() as {
+				name: string;
+			}[]
+		).map((r) => r.name);
+		expect(idbTables).toEqual(
+			expect.arrayContaining(["api_keys", "auth_events", "teams"]),
+		);
+		idb.close();
 	});
 
-	test("deltas triggers cover every table: 12 × 3 = 36, bus tables still untracked", () => {
+	test("deltas triggers cover every governor table: 9 × 3 = 27 (identity left with the split), bus tables still untracked", () => {
 		const d = new Database(DB);
 		const n = (
 			d
@@ -148,7 +149,7 @@ describe("v8 migration shape", () => {
 				)
 				.get() as { n: number }
 		).n;
-		expect(n).toBe(36);
+		expect(n).toBe(27);
 		const bus = d
 			.query(
 				"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'deltas_events_%'",
@@ -171,8 +172,8 @@ describe("v8 migration shape", () => {
 				)
 				.get() as { n: number }
 		).n;
-		expect(uv).toBe(10);
-		expect(n).toBe(36);
+		expect(uv).toBe(11);
+		expect(n).toBe(27);
 		const legacy = d
 			.query(
 				"SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%_legacy_%'",
@@ -182,8 +183,8 @@ describe("v8 migration shape", () => {
 		d.close();
 	});
 
-	test("api_keys integrity: hash required, key_id PK, jti unique, no raw-key column", () => {
-		const db = openGovernorDb();
+	test("api_keys integrity rides identity.db: hash required, key_id PK, jti unique, no raw-key column", () => {
+		const db = new Database(IDENTITY_DB);
 		// key_hash NOT NULL — a key without a hash is unauthenticatable
 		expect(() =>
 			db
@@ -214,21 +215,37 @@ describe("v8 migration shape", () => {
 		).toThrow();
 		// the column set is exactly the designed one — nothing that could hold
 		// a raw secret
-		const d = new Database(DB);
 		const cols = (
-			d.query("PRAGMA table_info(api_keys)").all() as { name: string }[]
+			db.query("PRAGMA table_info(api_keys)").all() as { name: string }[]
 		).map((c) => c.name);
-		d.close();
-		expect(cols).toEqual(NEW_TABLES.api_keys);
+		db.close();
+		expect(cols).toEqual([
+			"key_id",
+			"key_hash",
+			"jti",
+			"name",
+			"team",
+			"actor",
+			"token_type",
+			"parent_key_id",
+			"scopes",
+			"rpm_limit",
+			"tpm_limit",
+			"expires_at",
+			"rotated_at",
+			"revoked_at",
+			"created_at",
+		]);
 	});
 });
 
 describe("deltas coverage — the audit win is the existing loop", () => {
-	test("api_keys: insert, rotation chain, per-token and per-actor revocation", () => {
+	test("api_keys writes ride identity.db and never reach governor deltas (W156)", () => {
 		const db = freshDb();
 		db.close();
-		const db2 = openGovernorDb();
-		const w = db2.query.bind(db2);
+		openGovernorDb();
+		const idb = new Database(IDENTITY_DB);
+		const w = idb.query.bind(idb);
 		const now = Date.now();
 		// owner's forever pair: access + refresh, expires_at NULL = forever
 		w(
@@ -248,53 +265,17 @@ describe("deltas coverage — the audit win is the existing loop", () => {
 		w(
 			"UPDATE api_keys SET revoked_at = ? WHERE actor = 'klh' AND revoked_at IS NULL",
 		).run(now + 3);
-		const rows = db2
-			.query(
-				"SELECT op, pk, before, after FROM deltas WHERE tbl = 'api_keys' ORDER BY seq",
-			)
-			.all() as {
-			op: string;
-			pk: string;
-			before: string | null;
-			after: string | null;
-		}[];
-		expect(rows.map((r) => r.op)).toEqual([
-			"insert",
-			"insert",
-			"insert",
-			"update",
-			"update",
-			"update",
-			"update",
-		]);
-		// the per-actor revocation UPDATE fires per-row in scan order — assert
-		// as a multiset so the test doesn't pin SQLite's internal scan order
-		expect([...rows.map((r) => r.pk)].sort()).toEqual([
-			"k-acc",
-			"k-acc",
-			"k-ref1",
-			"k-ref1",
-			"k-ref1",
-			"k-ref2",
-			"k-ref2",
-		]);
-		expect(rows.slice(0, 3).map((r) => r.pk)).toEqual([
-			"k-acc",
-			"k-ref1",
-			"k-ref2",
-		]);
-		const ins = rows[0];
-		expect(ins.before).toBeNull();
-		expect(JSON.parse(ins.after ?? "{}").expires_at).toBeNull(); // forever
-		const rot = rows.find((r) => r.pk === "k-ref1" && r.op === "update");
-		expect(JSON.parse(rot?.before ?? "{}").rotated_at).toBeNull();
-		expect(JSON.parse(rot?.after ?? "{}").rotated_at).toBe(now + 2);
-		const rev = rows.find(
-			(r) => r.pk === "k-acc" && r.op === "update",
-		) as (typeof rows)[number];
-		expect(JSON.parse(rev.before ?? "{}").revoked_at).toBeNull();
-		expect(JSON.parse(rev.after ?? "{}").revoked_at).toBe(now + 3);
-		db2.close();
+		const gov = new Database(DB);
+		const n = (
+			gov
+				.query(
+					"SELECT COUNT(*) AS n FROM deltas WHERE tbl IN ('api_keys', 'teams', 'auth_events')",
+				)
+				.get() as { n: number }
+		).n;
+		expect(n).toBe(0);
+		gov.close();
+		idb.close();
 	});
 
 	test("route_audit: decision INSERT + outcome UPDATE by rid = two delta rows", () => {
@@ -334,7 +315,7 @@ describe("deltas coverage — the audit win is the existing loop", () => {
 		db2.close();
 	});
 
-	test("aid_events and auth_events: event rows land with pk = id, full images", () => {
+	test("aid_events: event rows land with pk = id, full images (auth_events moved to identity.db, W156)", () => {
 		const db = freshDb();
 		db.close();
 		const db2 = openGovernorDb();
@@ -344,16 +325,11 @@ describe("deltas coverage — the audit win is the existing loop", () => {
 				"INSERT INTO aid_events (ts, sid, work_item, aid, packet_id, tokens_injected, est_tok_saved) VALUES (?, 'w137-aids', 'W137', 'preseed', '9f3a21', 612, NULL)",
 			)
 			.run(now);
-		db2
-			.query(
-				"INSERT INTO auth_events (ts, actor, event, jti, via) VALUES (?, 'klh', 'issued', 'jti-acc', '/key/generate')",
-			)
-			.run(now);
 		// est_tok_saved NULL at event time — the W137 honesty rule
 		const ev = db2.query("SELECT id FROM aid_events").get() as { id: number };
 		const rows = db2
 			.query(
-				"SELECT tbl, op, pk, before, after FROM deltas WHERE tbl IN ('aid_events', 'auth_events') ORDER BY seq",
+				"SELECT tbl, op, pk, before, after FROM deltas WHERE tbl = 'aid_events' ORDER BY seq",
 			)
 			.all() as {
 			tbl: string;
@@ -362,35 +338,12 @@ describe("deltas coverage — the audit win is the existing loop", () => {
 			before: string | null;
 			after: string | null;
 		}[];
-		expect(rows.map((r) => [r.tbl, r.op])).toEqual([
-			["aid_events", "insert"],
-			["auth_events", "insert"],
-		]);
+		expect(rows.map((r) => [r.tbl, r.op])).toEqual([["aid_events", "insert"]]);
 		expect(rows[0].pk).toBe(String(ev.id));
 		expect(rows[0].before).toBeNull();
 		const afterEv = JSON.parse(rows[0].after ?? "{}");
 		expect(afterEv.est_tok_saved).toBeNull();
 		expect(afterEv.tokens_injected).toBe(612);
-		expect(rows[1].pk).toBe("1");
-		expect(JSON.parse(rows[1].after ?? "{}").event).toBe("issued");
-		db2.close();
-	});
-
-	test("teams: insert lands with composite-free pk and department for the /usage filter", () => {
-		const db = freshDb();
-		db.close();
-		const db2 = openGovernorDb();
-		db2
-			.query(
-				"INSERT INTO teams (team_id, name, department, created_at) VALUES ('platform', 'Platform', 'Infrastructure', 1)",
-			)
-			.run();
-		const row = db2
-			.query("SELECT op, pk, after FROM deltas WHERE tbl = 'teams'")
-			.get() as { op: string; pk: string; after: string };
-		expect(row.op).toBe("insert");
-		expect(row.pk).toBe("platform");
-		expect(JSON.parse(row.after).department).toBe("Infrastructure");
 		db2.close();
 	});
 });

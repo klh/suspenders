@@ -66,7 +66,9 @@ const auth = await import("../hooks/lib/auth.ts");
 const govdb = await import("../hooks/lib/govdb.ts");
 const client = await import("../hooks/lib/auth-client.ts");
 
-const store = new govdb.HttpGovernorStore(URL0, null); // the canonical db
+// W156: the canonical db rides the identity path — auth lib writes land in
+// identity.db via /identity, the same statement protocol one path over.
+const store = new govdb.HttpGovernorStore(URL0, null, "/identity");
 const req = (
 	tok: string | null,
 ): { headers: { get(n: string): string | null } } => ({

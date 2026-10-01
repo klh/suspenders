@@ -16,7 +16,7 @@
 // output shows fingerprints only.
 import { fingerprint, issueTokens, revoke } from "../lib/auth.ts";
 import { saveTokenFiles } from "../lib/auth-client.ts";
-import { openStore } from "../lib/govdb.ts";
+import { openIdentity } from "../lib/govdb.ts";
 
 const get = (flag: string): string | undefined => {
 	const i = process.argv.indexOf(flag);
@@ -51,7 +51,7 @@ function cmdIssue(): number {
 		.filter(Boolean);
 	const aTtl = days("--access-ttl-days");
 	const rTtl = days("--refresh-ttl-days");
-	const pair = issueTokens(openStore(), {
+	const pair = issueTokens(openIdentity(), {
 		actor,
 		team: get("--team") ?? null,
 		token_class: cls as "app-role" | "delegated",
@@ -87,7 +87,7 @@ function cmdRevoke(): number {
 		console.error("revoke needs --jti, --actor, or --team");
 		return 2;
 	}
-	const out = revoke(openStore(), sel, "cli:auth.ts");
+	const out = revoke(openIdentity(), sel, "cli:auth.ts");
 	console.log(
 		`revoked ${out.changes} token row(s) (${sel.jti ? `jti=${sel.jti}` : sel.actor ? `actor=${sel.actor}` : `team=${sel.team}`})`,
 	);
@@ -95,7 +95,7 @@ function cmdRevoke(): number {
 }
 
 function cmdList(): number {
-	const store = openStore();
+	const store = openIdentity();
 	const actor = get("--actor");
 	const where = actor ? "WHERE actor = ?" : "";
 	const rows = store
