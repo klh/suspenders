@@ -10,10 +10,12 @@
 //   (defaults: $HOME, ~/Library/Application Support/governor-backups)
 import { Database } from "bun:sqlite";
 import {
+	chmodSync,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
+	rmSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -102,6 +104,31 @@ if (existsSync(KB)) {
 		);
 }
 
+// ---- W178: the hub identity secrets ride along — signing key, rotation ring
+// and issued token files, 0600 into identity-<stamp>/ (dir 0700). governor.db
+// snapshots already carry api_keys/auth_events; without THESE files a restore
+// means whole-fleet re-enrollment. Two generations kept — restoring yesterday's
+// key beats re-minting every lane's trust after a same-day loss.
+const ID_SRC =
+	process.env.BUCKLE_SECRETS_HOME ?? join(HOME, ".claude", "local-llm");
+const idDir = join(DEST, `identity-${stamp}`);
+const idFiles = existsSync(ID_SRC)
+	? readdirSync(ID_SRC).filter((f) =>
+			/^buckle-(jwt\.key|jwt-ring\.json|[\w.-]+\.token|[\w.-]+\.refresh)$/.test(
+				f,
+			),
+		)
+	: [];
+if (idFiles.length) {
+	mkdirSync(idDir, { recursive: true, mode: 0o700 });
+	chmodSync(idDir, 0o700);
+	for (const f of idFiles) {
+		copyFileSync(join(ID_SRC, f), join(idDir, f));
+		chmodSync(join(idDir, f), 0o600);
+	}
+	console.log(`db-backup: ${idDir} (${idFiles.length} identity file(s), 0600)`);
+}
+
 // ---- GFS rotation: generation slots in days, newest per slot wins ----
 type Snap = { ts: number; file: string; ageD: number };
 const snaps: Snap[] = readdirSync(DEST)
@@ -158,6 +185,12 @@ for (const s of ksnaps) {
 		removed++;
 	}
 }
+// W178 — identity generations: newest TWO survive (yesterday's key is the
+// fallback when today's backup captured a just-corrupted key).
+const idDirs = readdirSync(DEST)
+	.filter((f) => /^identity-\d+$/.test(f))
+	.sort((a, b) => Number(b.slice(9)) - Number(a.slice(9)));
+for (const d of idDirs.slice(2)) rmSync(join(DEST, d), { recursive: true });
 writeFileSync(join(DEST, "last-backup.txt"), `${stamp}\n`);
 if (removed)
 	console.log(

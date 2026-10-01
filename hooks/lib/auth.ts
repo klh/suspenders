@@ -704,7 +704,7 @@ function parseJwt(token: string):
 }
 async function checkSignature(
 	entry: IssuerConfig,
-	nowS: number,
+	nowMs: number,
 	j: {
 		ok: true;
 		header: JwtHeader;
@@ -734,7 +734,6 @@ async function checkSignature(
 	// ring-aware (W178): current key first, then retired keys inside their
 	// grace window — a token signed by a since-rotated key keeps verifying
 	// until retire_at, then 401s and clients self-heal via /auth/refresh
-	const nowMs = nowS * 1000;
 	const candidates = [currentSigningKey()];
 	for (const k of loadKeyRing())
 		if (k.retire_at !== null && k.retire_at > nowMs)
@@ -796,7 +795,8 @@ export async function verifyJwt(
 	requiredScope?: string | string[],
 	opts: VerifyOpts = {},
 ): Promise<AuthResult> {
-	const nowS = Math.floor((opts.now ?? Date.now)() / 1000);
+	const nowMs = (opts.now ?? Date.now)(); // ms — the ring grace check wants ms
+	const nowS = Math.floor(nowMs / 1000);
 	const b = parseBearer(req);
 	if (!b.ok) return b;
 	const j = parseJwt(b.token);
@@ -814,7 +814,12 @@ export async function verifyJwt(
 			"issuer_not_allowed",
 			`issuer not in allowlist: ${String(j.claims.iss ?? "?")}`,
 		);
-	const sigFail = await checkSignature(entry, nowS, j, opts.fetchImpl ?? fetch);
+	const sigFail = await checkSignature(
+		entry,
+		nowMs,
+		j,
+		opts.fetchImpl ?? fetch,
+	);
 	if (sigFail) return sigFail;
 	const expFail = checkExpiry(j.claims, nowS);
 	if (expFail)

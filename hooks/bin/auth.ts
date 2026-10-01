@@ -14,7 +14,13 @@
 // Raw tokens NEVER print to stdout unless --show is passed; --save BASE
 // writes ~/.claude/local-llm/buckle-<BASE>.token + .refresh (mode 600) and
 // output shows fingerprints only.
-import { fingerprint, issueTokens, revoke } from "../lib/auth.ts";
+import {
+	fingerprint,
+	issueTokens,
+	loadKeyRing,
+	revoke,
+	rotateSigningKey,
+} from "../lib/auth.ts";
 import { saveTokenFiles } from "../lib/auth-client.ts";
 import { openStore } from "../lib/govdb.ts";
 
@@ -27,7 +33,9 @@ const USAGE = `usage:
   auth.ts issue --actor A --class app-role|delegated [--team T] [--scopes s1,s2] [--name N] [--access-ttl-days N] [--refresh-ttl-days N] [--save BASE] [--show]
   auth.ts revoke --jti J | --actor A | --team T
   auth.ts list [--actor A]
-  auth.ts whoami --url URL --token-file BASE`;
+  auth.ts whoami --url URL --token-file BASE
+  auth.ts rotate-key [--grace-hours N]   (0 = emergency kill, default 24)
+  auth.ts keyring                        (signing keys: CURRENT / grace / dead)`;
 const days = (flag: string): number | null | undefined => {
 	const v = get(flag);
 	if (v === undefined) return undefined; // flag absent
@@ -159,12 +167,54 @@ async function cmdWhoami(): Promise<number> {
 	return r.ok ? 0 : 1;
 }
 
+function cmdKeyring(): number {
+	const ring = loadKeyRing();
+	if (!ring.length) {
+		console.log(
+			"no ring yet (legacy single-key deployment) — run `auth.ts rotate-key` to create one",
+		);
+		return 0;
+	}
+	console.log(["kid", "created", "state"].join("\t"));
+	for (const k of ring) {
+		const state =
+			k.retire_at === null
+				? "CURRENT"
+				: k.retire_at > Date.now()
+					? `grace until ${new Date(k.retire_at).toISOString()}`
+					: "dead";
+		console.log(
+			[k.kid, new Date(k.created_at).toISOString(), state].join("\t"),
+		);
+	}
+	return 0;
+}
+
+function cmdRotateKey(): number {
+	const h = Number(get("--grace-hours") ?? "24");
+	if (!Number.isFinite(h) || h < 0) {
+		console.error("--grace-hours must be a number >= 0");
+		return 2;
+	}
+	const out = rotateSigningKey(h * 3_600_000);
+	console.log(`signing key rotated: new ${out.kid}`);
+	if (out.retired_kid) console.log(`  retired ${out.retired_kid}`);
+	console.log(
+		out.graceUntil === null
+			? "  grace 0 (emergency): every old access token is dead now — clients re-auth via /auth/refresh"
+			: `  old key in grace until ${new Date(out.graceUntil).toISOString()} — old tokens verify till then, then clients self-heal via /auth/refresh`,
+	);
+	return 0;
+}
+
 const cmd = process.argv[2];
 const commands: Record<string, () => number | Promise<number>> = {
 	issue: cmdIssue,
 	revoke: cmdRevoke,
 	list: cmdList,
 	whoami: cmdWhoami,
+	keyring: cmdKeyring,
+	"rotate-key": cmdRotateKey,
 };
 const fn = cmd ? commands[cmd] : undefined;
 if (!fn) {
