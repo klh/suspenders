@@ -32,6 +32,28 @@ export interface UsageReport {
 		byModel: (Sum & { model: string; group: ModelGroup })[];
 	}[];
 	rate: { tokPerSec: number; hourBucket: number };
+	// W142 aid ROI seam: present only when aid events exist in the window
+	// (omit honestly otherwise). `join` is the contract join —
+	// aid_events(sid) ⋈ sessions(sid→actor) ⋈ usage_rollup(actor, hour).
+	aids?: {
+		rollup: Array<{
+			aid: string;
+			domain: string;
+			injected: number;
+			skipped: number;
+			tok_injected: number;
+		}>;
+		join: Array<{
+			aid: string;
+			sid: string | null;
+			work_item: string | null;
+			actor: string;
+			hour_bucket: number;
+			tokens_injected: number;
+			in_tok: number;
+			out_tok: number;
+		}>;
+	};
 }
 
 const SUMS =
@@ -148,6 +170,7 @@ export function buildUsageReport(
 		tokPerSec: last ? Math.round((num(last.o) / 3600) * 100) / 100 : 0,
 		hourBucket: last ? num(last.h) : to,
 	};
+	const aids = aidSection(db, from, to);
 	return {
 		days,
 		fromBucket: from,
@@ -157,5 +180,42 @@ export function buildUsageReport(
 		byHour,
 		actors,
 		rate,
+		...(aids ? { aids } : {}),
 	};
+}
+
+/** W142: aid ROI section — the contract join aid_events(sid) ⋈
+ *  sessions(sid→actor) ⋈ usage_rollup(actor, hour), plus the hourly aid
+ *  rollup. Omitted honestly when no aid events exist in the window. */
+function aidSection(
+	db: Database,
+	from: number,
+	to: number,
+): UsageReport["aids"] | null {
+	try {
+		const rollup = db
+			.query(
+				`SELECT aid, domain, SUM(injected) AS injected, SUM(skipped) AS skipped,
+				SUM(tok_injected) AS tok_injected
+				FROM aid_rollup WHERE hour_bucket >= ? AND hour_bucket <= ?
+				GROUP BY aid, domain ORDER BY tok_injected DESC`,
+			)
+			.all(from, to) as Array<Record<string, unknown>>;
+		const join = db
+			.query(
+				`SELECT ae.aid, ae.sid, ae.work_item, s.actor,
+				(ae.ts / 3600000) * 3600000 AS hour_bucket,
+				ae.tokens_injected, ur.in_tok, ur.out_tok
+				FROM aid_events ae
+				JOIN sessions s ON s.sid = ae.sid
+				JOIN usage_rollup ur
+					ON ur.actor = s.actor AND ur.hour_bucket = (ae.ts / 3600000) * 3600000
+				WHERE (ae.ts / 3600000) * 3600000 >= ? AND (ae.ts / 3600000) * 3600000 <= ?`,
+			)
+			.all(from, to) as Array<Record<string, unknown>>;
+		if (rollup.length === 0 && join.length === 0) return null;
+		return { rollup, join };
+	} catch {
+		return null; // db without the aid tables → omit honestly
+	}
 }

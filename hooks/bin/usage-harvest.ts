@@ -12,6 +12,7 @@ import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { openGovernorDb } from "../lib/govdb.ts";
 import { readBoardSettings } from "../lib/board-config.ts";
+import { harvestAids } from "./aid-harvest.ts";
 
 // routing-doctrine classes (belt routing-policy.yaml ladder: flash → local →
 // cloud full models); the raw model string is kept alongside the group.
@@ -263,6 +264,13 @@ export function maybeHarvest(
 		db.query(
 			"INSERT INTO facts (key, value, source, ts) VALUES ('usage.harvestAt', ?, 'usage-harvest', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts",
 		).run(String(Date.now()), Date.now());
+		// W142: aid metering rides the same TTL gate (fire-and-forget — the
+		// report built this tick may lag one cycle; aids are garnish).
+		void harvestAids(db).catch((e: unknown) =>
+			console.error(
+				`[aid-harvest] soft: ${e instanceof Error ? e.message : e}`,
+			),
+		);
 		return s;
 	} catch (e) {
 		console.error(
