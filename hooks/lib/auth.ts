@@ -95,10 +95,102 @@ export function loadSigningKey(): Buffer {
 	return key;
 }
 
-// test seam: drop the module-level key cache (fresh key file per test HOME)
+let cachedRing: { path: string; ring: RingKey[] } | null = null;
+
+// test seam: drop the module-level key caches (fresh key file per test HOME)
 export function resetAuthCache(): void {
 	cachedKey = null;
+	cachedRing = null;
 }
+
+// ─── signing-key ring (W178 rotation + grace) ────────────────────────────────
+// buckle-jwt-ring.json (0600, secrets home) is the JWKS analog for the HS256
+// local issuer: retired keys stay loadable through a grace window so rotation
+// never breaks live tokens. The legacy buckle-jwt.key file remains the on-disk
+// home of the CURRENT material — rotation rewrites it, so pre-ring readers
+// (an unrestarted server) adopt the new key too.
+export interface RingKey {
+	kid: string;
+	material: string; // hex
+	created_at: number; // ms
+	retire_at: number | null; // ms; null = the current signing key
+}
+
+const ringFile = (): string => join(secretsHome(), "buckle-jwt-ring.json");
+
+export function loadKeyRing(): RingKey[] {
+	const path = ringFile();
+	if (cachedRing?.path === path) return cachedRing.ring;
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+			keys: RingKey[];
+		};
+		cachedRing = { path, ring: parsed.keys };
+		return parsed.keys;
+	} catch {
+		return []; // no ring yet — legacy single-key deployment
+	}
+}
+
+function writeKeyRing(ring: RingKey[]): void {
+	const path = ringFile();
+	mkdirSync(secretsHome(), { recursive: true, mode: 0o700 });
+	writeFileSync(path, `${JSON.stringify({ keys: ring }, null, "\t")}\n`, {
+		mode: 0o600,
+	});
+	cachedRing = { path, ring };
+}
+
+// the key we sign with: the ring's live entry, else the legacy key file
+export function currentSigningKey(): Buffer {
+	const live = loadKeyRing().filter((k) => k.retire_at === null);
+	if (live.length)
+		return Buffer.from(
+			live.reduce((a, b) => (b.created_at > a.created_at ? b : a)).material,
+			"hex",
+		);
+	return loadSigningKey();
+}
+
+// rotate: mint a new key, retire the old at now + graceMs (rehearsed W178 —
+// JWKS overlap convention). graceMs 0 = emergency kill: every token signed by
+// the old key fails signature at once. Refresh tokens are opaque (not signed)
+// and rotation-proof — clients self-heal via /auth/refresh.
+export function rotateSigningKey(graceMs = 86_400_000): {
+	kid: string;
+	retired_kid: string | null;
+	graceUntil: number | null;
+} {
+	const now = Date.now();
+	const prev = loadKeyRing();
+	const live = prev.filter((k) => k.retire_at === null);
+	const ring = prev.map((k) =>
+		k.retire_at === null ? { ...k, retire_at: now + graceMs } : k,
+	);
+	let adoptedKid: string | null = null;
+	if (!prev.length) {
+		adoptedKid = `adopted-${randomBytes(4).toString("hex")}`;
+		ring.unshift({
+			kid: adoptedKid,
+			material: currentSigningKey().toString("hex"),
+			created_at: now,
+			retire_at: now + graceMs,
+		});
+	}
+	const kid = `k${now.toString(36)}-${randomBytes(4).toString("hex")}`;
+	const material = randomBytes(32).toString("hex");
+	ring.push({ kid, material, created_at: now, retire_at: null });
+	// rewrite the legacy file with the new material — pre-ring readers adopt it
+	writeFileSync(jwtKeyFile(), `${material}\n`, { mode: 0o600 });
+	cachedKey = null; // next sign/verify reads the new material from disk
+	writeKeyRing(ring);
+	return {
+		kid,
+		retired_kid: live.at(-1)?.kid ?? adoptedKid,
+		graceUntil: graceMs > 0 ? now + graceMs : null,
+	};
+}
+
 // ─── JWT mechanics (HS256) ───────────────────────────────────────────────────
 
 const enc = (o: unknown): string =>
@@ -612,6 +704,7 @@ function parseJwt(token: string):
 }
 async function checkSignature(
 	entry: IssuerConfig,
+	nowS: number,
 	j: {
 		ok: true;
 		header: JwtHeader;
@@ -638,12 +731,19 @@ async function checkSignature(
 	}
 	if (j.header.alg !== "HS256")
 		return fail(401, "bad_algorithm", "local issuer requires HS256");
-	const expect = b64url(
-		createHmac("sha256", loadSigningKey()).update(j.data).digest(),
-	);
-	return safeEq(expect, j.sig.toString("base64url"))
-		? null
-		: fail(401, "bad_signature", "signature verification failed");
+	// ring-aware (W178): current key first, then retired keys inside their
+	// grace window — a token signed by a since-rotated key keeps verifying
+	// until retire_at, then 401s and clients self-heal via /auth/refresh
+	const nowMs = nowS * 1000;
+	const candidates = [currentSigningKey()];
+	for (const k of loadKeyRing())
+		if (k.retire_at !== null && k.retire_at > nowMs)
+			candidates.push(Buffer.from(k.material, "hex"));
+	for (const key of candidates) {
+		const expect = b64url(createHmac("sha256", key).update(j.data).digest());
+		if (safeEq(expect, j.sig.toString("base64url"))) return null;
+	}
+	return fail(401, "bad_signature", "signature verification failed");
 }
 function checkExpiry(claims: JwtClaims, nowS: number): AuthFailure | null {
 	if (claims.exp != null && claims.exp < nowS)
@@ -714,7 +814,7 @@ export async function verifyJwt(
 			"issuer_not_allowed",
 			`issuer not in allowlist: ${String(j.claims.iss ?? "?")}`,
 		);
-	const sigFail = await checkSignature(entry, j, opts.fetchImpl ?? fetch);
+	const sigFail = await checkSignature(entry, nowS, j, opts.fetchImpl ?? fetch);
 	if (sigFail) return sigFail;
 	const expFail = checkExpiry(j.claims, nowS);
 	if (expFail)
