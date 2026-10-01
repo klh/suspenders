@@ -146,6 +146,26 @@ suggested, the PR is pushed only on the user's yes (and PRs land on
 branches, never straight to main). The rule catalog is hub-distributable
 (rides the same policy pull as everything else).
 
+## Capability split (owner law: no auth code on user machines)
+
+Local (spoke) variants of the services do NOT carry the centralized
+capabilities — auth issuance, identity administration, key custody all
+live hub-side only. A spoke machine ships: routing (laws, candidates,
+ladder), adapters, aids/metering, the pull client, and its services bind
+loopback with NO auth middleware — local trust is the loopback itself;
+toward the hub it PRESENTS the enrollment token as a client credential
+and never verifies anyone.
+
+**Staying "in sync" without the capabilities**: both variants share the
+same grammar, protocol shapes, and manifest versions (the policy pull
+carries capability flags), so a spoke and the hub agree on everything
+except the hub-only surfaces — a spoke never expects
+`/federation/*`-adjacent admin or auth endpoints, and the hub never
+assumes a spoke can authenticate third parties. The single-machine dev
+case (this box, hub==spoke) is the one exception and runs the full
+profile. Installer consequence: spoke installs exclude the identity/auth
+modules entirely (W165); W156's identity plane is hub-profile.
+
 ## Sequencing
 
 Phase 1 (post-W144 cut-over): hub policy distribution + spoke pull (the
