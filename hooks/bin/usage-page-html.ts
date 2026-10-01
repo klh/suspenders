@@ -142,6 +142,13 @@ function filterHtml(
 		"dept",
 		["", ...depts].map((v) => chip(v, dept, "dept")).join(""),
 	);
+	// W179.1: the billing export rides the same filter state as the
+	// dashboard — one click, current window/team/dept preserved.
+	const csvParams = new URLSearchParams();
+	csvParams.set("days", String(days));
+	if (team) csvParams.set("team", team);
+	if (dept) csvParams.set("dept", dept);
+	const csv = `<a class="ufilter" href="/api/usage/export.csv?${csvParams.toString()}" download>export csv</a>`;
 	const active = [
 		team ? `team=${team}` : "",
 		dept ? `dept=${dept}` : "",
@@ -152,7 +159,7 @@ function filterHtml(
 	return `<div class="ufilters">${group(
 		"window",
 		tLinks,
-	)}${teamChips}${deptChips}${labels}</div>`;
+	)}${teamChips}${deptChips}${group("export", csv)}${labels}</div>`;
 }
 
 // ─── per-actor drill-down table (the report arrives pre-filtered) ─────────

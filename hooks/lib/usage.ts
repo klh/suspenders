@@ -86,6 +86,43 @@ const zeroGroups = (): Record<ModelGroup, number> => ({
 	other: 0,
 });
 
+/** W179.1: actor → raw tags JSON, last session stamp wins. One source of
+ *  truth for attribution — the report builder and the CSV export (lib/
+ *  usage-export.ts) read the same map. */
+export function actorTagsMap(db: Database): Map<string, string> {
+	const tagsOf = new Map<string, string>();
+	for (const r of db
+		.query(
+			"SELECT actor, tags FROM sessions WHERE actor IS NOT NULL ORDER BY started_at",
+		)
+		.all() as { actor: string; tags: string | null }[])
+		tagsOf.set(r.actor, r.tags ?? "");
+	return tagsOf;
+}
+
+/** W179.1: team/dept server-side filter → actor allowlist. Empty string
+ *  filters disable; an active filter matching nothing returns [] (callers
+ *  emit honest zeros, never an unfiltered scan). */
+export function actorAllowlist(
+	tagsOf: Map<string, string>,
+	team: string,
+	dept: string,
+): string[] {
+	if (!team && !dept) return [];
+	const allow: string[] = [];
+	for (const [a, raw] of tagsOf) {
+		let tg: Record<string, unknown> | null = null;
+		try {
+			tg = JSON.parse(raw) as Record<string, unknown>;
+		} catch {
+			tg = null;
+		}
+		if ((!team || tg?.team === team) && (!dept || tg?.department === dept))
+			allow.push(a);
+	}
+	return allow;
+}
+
 export function buildUsageReport(
 	db: Database,
 	opts: {
@@ -103,33 +140,14 @@ export function buildUsageReport(
 	const to = Math.floor(now / 3_600_000) * 3_600_000;
 	const win = "hour_bucket >= ? AND hour_bucket <= ?";
 	// W152: actor tags ride sessions (actor → latest stamp). A team/dept
-	// filter resolves its actor allowlist through this same map, so EVERY
-	// series below is filtered server-side — the chips cut the whole
-	// dashboard, not just the actor table.
-	const tagsOf = new Map<string, string>();
-	for (const r of db
-		.query(
-			"SELECT actor, tags FROM sessions WHERE actor IS NOT NULL ORDER BY started_at",
-		)
-		.all() as { actor: string; tags: string | null }[])
-		tagsOf.set(r.actor, r.tags ?? "");
+	// filter resolves its actor allowlist through the same map (W179.1:
+	// shared helpers, one attribution source), so EVERY series below is
+	// filtered server-side — the chips cut the whole dashboard, not just
+	// the actor table.
+	const tagsOf = actorTagsMap(db);
 	const wantTeam = opts.team ?? "";
 	const wantDept = opts.dept ?? "";
-	const allow: string[] = [];
-	for (const [a, raw] of tagsOf) {
-		if (!wantTeam && !wantDept) break;
-		let tg: Record<string, unknown> | null = null;
-		try {
-			tg = JSON.parse(raw) as Record<string, unknown>;
-		} catch {
-			tg = null;
-		}
-		if (
-			(!wantTeam || tg?.team === wantTeam) &&
-			(!wantDept || tg?.department === wantDept)
-		)
-			allow.push(a);
-	}
+	const allow = actorAllowlist(tagsOf, wantTeam, wantDept);
 	const inFrag =
 		allow.length > 0
 			? ` AND actor IN (${allow.map(() => "?").join(",")})`
