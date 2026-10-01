@@ -34,8 +34,13 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { Database } from "bun:sqlite";
-import { openGovernorDb, projectIdentity, CAPABILITIES } from "../lib/govdb.ts";
+import {
+	openStore,
+	openMemoryStore,
+	projectIdentity,
+	CAPABILITIES,
+	type GovernorStore,
+} from "../lib/govdb.ts";
 
 const die = (m: string): never => {
 	console.error(`work: ${m}`);
@@ -210,13 +215,13 @@ const { pos, flag } = parseArgs(spec);
 // partition counts as unreachable for readers: items are never deleted, so
 // zero rows means this machine's DB has never seen this project's graph
 // (fresh clone / worktree on a new machine — the beads use case).
-let handle: Database | undefined;
-function db(): Database {
+let handle: GovernorStore | undefined;
+function db(): GovernorStore {
 	if (handle) return handle;
 	const isRead = READ_CMDS.has(cmd);
-	let d: Database;
+	let d: GovernorStore;
 	try {
-		d = openGovernorDb();
+		d = openStore();
 	} catch (e) {
 		if (isRead) {
 			const m = mirrorOrNull();
@@ -339,10 +344,10 @@ function readMirror(): { items: Item[]; meta: Record<string, unknown> } | null {
 
 // rebuild the project graph in an in-memory SQLite shaped like the real one, so
 // read handlers run their normal SQL UNCHANGED against the mirror copy
-function mirrorDb(): Database | null {
+function mirrorDb(): GovernorStore | null {
 	const m = readMirror();
 	if (!m) return null;
-	const d = new Database(":memory:");
+	const d = openMemoryStore();
 	d.run(
 		"CREATE TABLE work_items (project TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT, state TEXT NOT NULL DEFAULT 'READY', priority INTEGER NOT NULL DEFAULT 0, owner_sid TEXT, created_by TEXT, scope TEXT, why_parallel TEXT, result_sha TEXT, required INTEGER NOT NULL DEFAULT 1, requires TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (project, id))",
 	);

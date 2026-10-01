@@ -22,13 +22,14 @@ import type { Database } from "bun:sqlite";
 import { readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import {
-	openGovernorDb,
+	openStore,
 	projectIdentity,
 	CAPABILITIES,
 	workTiming,
 	pruneDeltas,
 	tokenUsage,
 	sweepStaleSessions,
+	type GovernorStore,
 } from "../lib/govdb.ts";
 import {
 	makeStore,
@@ -63,7 +64,10 @@ const die = (m: string): never => {
 	process.exit(2);
 };
 
-const db: Database = openGovernorDb();
+// W92: the CLI binds to the store PORT, never the file — in-process SQLite by
+// default (byte-identical output), HTTP when GOVERNOR_STORE_URL/store.url is
+// set. The Database casts below (sweeps, metrics) mark host-local I/O.
+const db: GovernorStore = openStore();
 const [cmd, ...rest] = process.argv.slice(2);
 // --help anywhere wins before any parsing that could create state
 if (rest.includes("--help") || rest.includes("-h")) {
@@ -706,7 +710,9 @@ if (cmd === "emit") {
 						.get(parentSid) as { capabilities: string | null } | null
 				)?.capabilities ?? null;
 	}
-	sweepStaleSessions(db);
+	// liveness sweeps read THIS host's transcript tree — a remote lane's view
+	// would close live sessions it cannot see; sweeping stays a host concern
+	if (db.local) sweepStaleSessions(db as Database);
 	db.query(
 		"INSERT INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities) VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?) ON CONFLICT(sid) DO UPDATE SET project = excluded.project, role = excluded.role, hb = excluded.hb, capabilities = COALESCE(excluded.capabilities, sessions.capabilities)",
 	).run(
@@ -849,7 +855,7 @@ if (cmd === "emit") {
 		`  runs: ${runs.reduce((a, r) => a + r.n, 0)}${runs.length ? ` (${runs.map((r) => `${r.n} ${r.role}`).join(", ")})` : ""}`,
 	);
 	// per-item wall/agent time — the W15 derivation, straight off the bus
-	const timing = workTiming(db, project, now).filter(
+	const timing = workTiming(db as Database, project, now).filter(
 		(t) => t.lastEvent >= cut || (!t.done && !t.failed),
 	);
 	const doneItems = timing.filter((t) => t.done && t.firstClaim > 0); // lane work: claimed → done (auto-rollups excluded)
@@ -869,7 +875,7 @@ if (cmd === "emit") {
 	// W24 — usage per task: windowed transcript tokens per item. Approximation —
 	// attribution is by claim-window overlap in time, not causality (a session
 	// working several items serially shares its transcript across windows).
-	const tokens = tokenUsage(db, project, now);
+	const tokens = tokenUsage(db as Database, project, now);
 	const shown = [...timing].sort((a, b) => b.wallMs - a.wallMs).slice(0, 8);
 	const fmtTok = (n: number): string =>
 		n >= 1e6
@@ -1792,11 +1798,11 @@ if (cmd === "emit") {
 			"DELETE FROM consults WHERE state IN ('ANSWERED','DECLINED','EXPIRED') AND answered_at < ? AND answered_at IS NOT NULL",
 		)
 		.run(cut).changes;
-	const sw = sweepStaleSessions(db);
+	const sw = db.local ? sweepStaleSessions(db as Database) : 0;
 	const lk = db
 		.query("DELETE FROM locks WHERE ts < ?")
 		.run(Date.now() - 15 * 60_000).changes;
-	const d = pruneDeltas(db, days * 86_400_000);
+	const d = pruneDeltas(db as Database, days * 86_400_000);
 	console.log(
 		`gc: ${e} events, ${s} closed sessions, ${sw} stale RUNNING sessions swept, ${lk} expired locks, ${c} stale cursors, ${f} lane facts, ${x} consults expired, ${cd} consult threads pruned, ${d} deltas (>${days}d; work ledger untouched)`,
 	);

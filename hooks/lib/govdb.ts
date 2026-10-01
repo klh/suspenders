@@ -662,6 +662,169 @@ export function openGovernorDb(): Database {
 	return db;
 }
 
+// ─── W92 store port ──────────────────────────────────────────────────────────
+// The control-plane seam: consumers bind to GovernorStore, never to the DB
+// file. Local is the special case of distributed (owner doctrine): the DEFAULT
+// binding is the in-process SQLite Database (today's behavior, byte-identical
+// output) and the SAME interface rides HTTP (bin/store-server.ts, loopback)
+// for lanes on other machines. Address chain: env GOVERNOR_STORE_URL →
+// ${REG}/store.url (coordinator-written one-liner) → in-process; the
+// .local/mDNS legs land with cross-machine activation. Statement-shaped on
+// purpose: a binding executes the exact SQL the CLIs run today — that is what
+// keeps CLI output byte-compatible and makes the port a pure transport swap.
+// Liveness sweeps (sweepStaleSessions) and token metrics (tokenUsage) read
+// THIS host's ~/.claude/projects transcripts, so they stay Database-typed and
+// sweep-taking verbs (coord bootstrap, coord gc) sweep only on db.local.
+export interface StoreResult {
+	changes: number;
+	lastInsertRowid: number;
+}
+
+// the port's unit of exchange — bun:sqlite statements satisfy this structurally
+export interface GovernorStatement {
+	get(...params: unknown[]): unknown;
+	all(...params: unknown[]): unknown[];
+	run(...params: unknown[]): StoreResult;
+}
+
+export interface GovernorStore {
+	// false on the HTTP binding: this process sees the local transcript tree,
+	// so transcript-derived behavior (liveness sweeps) must not run remotely
+	local: boolean;
+	query(sql: string): GovernorStatement;
+	run(sql: string, ...params: unknown[]): StoreResult;
+	transaction<T>(fn: () => T): () => T;
+	close(): void;
+}
+
+// HTTP binding: the same interface against bin/store-server.ts — sync by
+// design (the CLIs are sync programs; one statement = one curl round trip).
+// transaction(fn) holds a server-side BEGIN IMMEDIATE for the body's duration
+// (client-tagged txid, serialized, idle-timeout rolled back), so work
+// add/done/split and resume-session run unchanged on a remote lane.
+export class HttpGovernorStore implements GovernorStore {
+	readonly local = false;
+
+	constructor(
+		private base: string,
+		private token: string | null,
+	) {
+		// eager probe: a dead server fails AT OPEN — work.ts's mirror fallback
+		// and coord's module-top open both expect today's throw timing
+		this.query("SELECT 1").get();
+	}
+
+	private rpc(
+		mode: "get" | "all" | "run" | "tx",
+		sql: string,
+		params: unknown[],
+	): { row?: unknown; rows?: unknown[] } & Partial<StoreResult> {
+		const args = [
+			"curl",
+			"-sSf",
+			"--max-time",
+			"10",
+			"-X",
+			"POST",
+			`${this.base}/rpc`,
+			"-H",
+			"content-type: application/json",
+		];
+		if (this.token) args.push("-H", `x-governor-token: ${this.token}`);
+		args.push(
+			"--data-binary",
+			JSON.stringify({ mode, sql, params, txid: this.txid }),
+		);
+		const r = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+		if (r.exitCode !== 0)
+			throw new Error(
+				`governor store ${this.base} unreachable (curl exit ${r.exitCode})`,
+			);
+		const out = JSON.parse(new TextDecoder().decode(r.stdout));
+		// server-side refusals ride a 200 body ({err}) — curl -f cannot see them
+		if (out.err) throw new Error(`governor store: ${out.err}`);
+		return out;
+	}
+
+	query(sql: string): GovernorStatement {
+		return {
+			get: (...params) => this.rpc("get", sql, params).row,
+			all: (...params) => this.rpc("all", sql, params).rows ?? [],
+			run: (...params) =>
+				this.rpc("run", sql, params) as unknown as StoreResult,
+		};
+	}
+
+	run(sql: string, ...params: unknown[]): StoreResult {
+		return this.rpc("run", sql, params) as unknown as StoreResult;
+	}
+
+	// bun:sqlite shape: transaction(fn) returns the callable that runs it. Over
+	// HTTP the body's statements are TAGGED with a client txid; the server holds
+	// BEGIN IMMEDIATE on its tx connection for the body's duration (serialized,
+	// idle-timeout rolled back). A failed body rolls back before the throw.
+	transaction<T>(fn: () => T): () => T {
+		return () => {
+			const id = crypto.randomUUID();
+			this.txid = id; // begin CARRIES the txid — the server stamps it verbatim
+			try {
+				this.rpc("tx", "begin", []);
+			} catch (e) {
+				this.txid = null;
+				throw e;
+			}
+			let out: T;
+			try {
+				out = fn();
+			} catch (e) {
+				try {
+					this.rpc("tx", "rollback", []); // txid still set — must match
+				} catch {}
+				this.txid = null;
+				throw e;
+			}
+			this.rpc("tx", "commit", []);
+			this.txid = null;
+			return out;
+		};
+	}
+
+	close(): void {}
+}
+
+// binding resolver: GOVERNOR_STORE_URL wins, then ${REG}/store.url, else the
+// in-process SQLite Database. GOVERNOR_STORE_URL=local forces in-process
+// (tests, emergencies). The cast is the ONE place Database becomes the port —
+// bun's Database already has the statement shape, only the type differs.
+export function openStore(): GovernorStore {
+	const raw = (process.env.GOVERNOR_STORE_URL ?? storeUrlFile() ?? "").trim();
+	if (raw && raw !== "local")
+		return new HttpGovernorStore(
+			raw.replace(/\/+$/, ""),
+			process.env.GOVERNOR_STORE_TOKEN ?? null,
+		);
+	const d = openGovernorDb() as unknown as GovernorStore;
+	d.local = true;
+	return d;
+}
+
+function storeUrlFile(): string | null {
+	try {
+		return readFileSync(`${REG}/store.url`, "utf8") || null;
+	} catch {
+		return null;
+	}
+}
+
+// in-memory store for work.ts's mirror fallback — the port surface with zero
+// file involvement (was a bare `new Database(":memory:")` in work.ts, which
+// is a consumer and must not own a Database import)
+export function openMemoryStore(): GovernorStore {
+	const d = new Database(":memory:") as unknown as GovernorStore;
+	d.local = true;
+	return d;
+}
+
 // W33 retention: the delta log is a ring, not an archive — coord gc trims it
 // on the same window as events. Returns rows removed.
 export function pruneDeltas(db: Database, olderThanMs: number): number {

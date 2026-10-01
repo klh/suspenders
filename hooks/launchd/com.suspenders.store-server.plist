@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.suspenders.store-server</string>
+  <key>ProgramArguments</key><array>
+    <string>__BUN__</string>
+    <string>__PREFIX__/bin/store-server.ts</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <!-- W92 control-plane store port: loopback-only governor.db API on :7794.
+       DELIVERED, NOT INSTALLED — activation is a coordinator/owner step:
+       launchctl bootstrap gui/$UID <plist>, then write the resolved
+       http://127.0.0.1:7794 one-liner to ~/.cache/claude-governor/store.url
+       (or export GOVERNOR_STORE_URL per machine). Remote machines bind via
+       GOVERNOR_STORE_URL pointing at this host (env→config chain legs:
+       env→store.url now, .local/mDNS later). -->
+  <key>EnvironmentVariables</key><dict>
+    <key>GOVERNOR_STORE_PORT</key><string>7794</string>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/suspenders-store-server.log</string>
+  <key>StandardErrorPath</key><string>/tmp/suspenders-store-server.log</string>
+</dict></plist>
