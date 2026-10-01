@@ -10,6 +10,8 @@
 // fills, 4px-rounded data-ends, recessive grid, native <title> hovers, and
 // the table itself is the accessible table view.
 import { GROUPS, type UsageReport } from "../lib/usage.ts";
+// W147: every page wears the console shell — topbar + avatar dropdown JS
+import { TOPBAR_JS, topbar } from "./console-html.ts";
 
 // validated dark categorical slots, fixed order = GROUPS (never cycled —
 // color follows the entity: flash is always blue, full always orange, …)
@@ -288,5 +290,5 @@ export function usagePage(
 	const hours = `<div class="upanel"><h2>WHEN THE FLEET WORKS · HOUR OF DAY (LOCAL)</h2>${hourSvg(r.byHour)}</div>`;
 	const tbl = `<div class="upanel"><h2>ACTORS</h2><table class="uacts"><thead><tr><th>actor</th><th style="width:38%">tokens by model group</th><th class="unum">total</th><th class="unum">req</th></tr></thead><tbody>${actorRows(r, team)}</tbody></table></div>`;
 	const back = `<div class="uback"><a href="/">&larr; fleet board</a><span class="uwin">${r.days}d window · buckets UTC-hourly · charts read usage_rollup</span></div>`;
-	return `<!doctype html><html><head><meta charset="utf-8"><title>FLEET USAGE</title><style>body{background:#141413;color:#e8e6e1;font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;margin:0;padding:16px 20px 28px;}a{color:#d8900f}.utitle{font-size:14px;letter-spacing:.08em;margin:0 0 10px;color:#e8e6e1}${U_CSS}</style></head><body>${back}${head}${timeline}${hours}${tbl}</body></html>`;
+	return `<!doctype html><html><head><meta charset="utf-8"><title>FLEET USAGE</title><style>body{background:#141413;color:#e8e6e1;font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;margin:0;padding:0 20px 28px;}a{color:#d8900f}.utitle{font-size:14px;letter-spacing:.08em;margin:14px 0 10px;color:#e8e6e1}${U_CSS}</style></head><body>${topbar("suspenders")}<main style="max-width:760px;margin:0 auto"><script>${TOPBAR_JS}</script>${back}${head}${timeline}${hours}${tbl}</main></body></html>`;
 }

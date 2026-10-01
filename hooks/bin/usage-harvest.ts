@@ -11,6 +11,7 @@ import type { Database } from "bun:sqlite";
 import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { openGovernorDb } from "../lib/govdb.ts";
+import { readBoardSettings } from "../lib/board-config.ts";
 
 // routing-doctrine classes (belt routing-policy.yaml ladder: flash → local →
 // cloud full models); the raw model string is kept alongside the group.
@@ -239,10 +240,16 @@ export function harvestUsage(
 
 // board-API entry: harvest at most once per TTL; concurrent/reentrant calls
 // (same process or overlapping board requests) fold into the running one.
+// W147: the default TTL rides the console settings file (~/.claude/local-llm/
+// suspenders-board.json harvest_ttl_s) — config-over-code, 300s when unset.
 let inFlight = false;
+const defaultTtlMs = (): number => {
+	const s = readBoardSettings().settings.harvest_ttl_s;
+	return s && s >= 1 ? s * 1000 : 5 * 60_000;
+};
 export function maybeHarvest(
 	db: Database,
-	ttlMs = 5 * 60_000,
+	ttlMs = defaultTtlMs(),
 ): HarvestStats | null {
 	const row = db
 		.query("SELECT value FROM facts WHERE key = 'usage.harvestAt'")

@@ -18,6 +18,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { YAML } from "bun";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 import { isDecisionKind, openGovernorDb, tokenUsage } from "../lib/govdb.ts";
@@ -26,6 +27,35 @@ import { buildUsageReport } from "../lib/usage.ts";
 import { usagePage } from "./usage-page-html.ts";
 import { scrub, servicemon } from "../lib/servicemon.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
+import {
+	type BoardSettings,
+	ConfigError,
+	parsePolicy,
+	patchPolicyText,
+	policyWritePath,
+	readBoardSettings,
+	resolvePolicy,
+	type PolicyPatch,
+	applyBoardSettings,
+	formToBoardSettings,
+	boardSettingsPath,
+	diffLines,
+	atomicWrite,
+	type PolicyGatewayParsed,
+} from "../lib/board-config.ts";
+import {
+	beltPage,
+	type ConsoleMe,
+	localPage,
+	type BeltView,
+	type Feature,
+	type HealthProbe,
+	type LocalService,
+	type UpstreamGroup,
+	previewPage,
+	settingsFormPage,
+	settingsIndexPage,
+} from "./console-html.ts";
 import { HTML } from "./fleet-board-html.ts";
 
 // sibling CLIs resolve relative to this file — the board is relocatable
@@ -285,6 +315,11 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - GET /api/executors  dispatch targets for the READY-card dropdown: claude, codex, then belt's live openai endpoints as llm:<machine>:<model or port> (belt's registry at the resolveBelt chain + CLI fallback, cached 60s; failed probes included; each entry carries its model id and a local/remote locality marker — W105)
 - GET /api/diff       per-item branch diff for the drawer: repo + branch suspenders/<id> (worktree.ts naming), base = merge-base with main (fallback master); JSON {ok,id,branch,base,stat,diff}, patch tail-capped at 200KB
 - GET /api/tail       live lane tail for the drawer: the owning lane's .fleet/lane-<sid>.log (last 32KB) + transcript recent lines; JSON {ok,id,sid,log,transcript,recent}
+- GET /console        redirect to /console/belt (the klh console shell: belt | suspenders | local menu + settings gear + actor avatar)
+- GET /console/belt   gateway view (read-only): resolved routing-policy.yaml (ladder, budgets), buckle upstreams pool, :4101/:4100 servicemon health, belt API reachability
+- GET /console/local  Caddy-served .local services from the klh-local registry (static view)
+- GET /console/settings   settings hub — one entry per feature (belt budgets, buckle ladder+cooldowns, suspenders board knobs); every write previews a diff + confirms
+- GET /api/console/me avatar data: {ok, actor, tags, actors[], default_actor} — board host's latest session actor, "unassigned" until coord bootstrap --actor stamps one
 - GET /llms.txt       this file
 
 ## Write endpoints (human at the board; origin/host guarded)
@@ -298,6 +333,8 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - POST /api/ship      one-click ship for a work item's suspenders/<id> branch: live-lane + owner-liveness + merge-ladder guards, then the repo's .fleet/ship.json ladder runs detached via fleet-loop ship (409 without a configured ladder, on demo, while a lane lives, or while a daemon merge ladder is mid-flight)
 - POST /api/orchestrate            LLM proposes a plan item + parallel children from a goal (project, goal required; read-only — nothing registers, 502 when no parseable plan comes back)
 - POST /api/orchestrate/register   register a proposed plan as a plan-gated work split through the work CLI (project, title, children required; children 2..8; the plan item is the split parent — the AGENTS.md add-plan-then-split flow)
+- POST /console/settings/preview   settings diff preview (origin/host guarded; form-encoded feature+values; invalid config = rejected with the parser's error, nothing written)
+- POST /console/settings/apply     settings apply (origin/host guarded; feature + values JSON + preview mtime; mtime guard rejects concurrent edits; atomic tmp+rename write to the allowlisted config path only)
 
 ## Advice LLM
 
@@ -2083,7 +2120,326 @@ const sm = servicemon({
 	service: "fleet-board",
 	port: PORT,
 	onMetrics: feedTokens,
+	// W147: suspenders-board.json beats the env at board start (the file IS
+	// the config-over-code surface the settings page writes)
+	refreshS: readBoardSettings().settings.status_refresh_s,
 });
+
+// ─── W147 console: data gathering for the console pages ───────────────────
+const consoleMe = (): ConsoleMe => {
+	const row = db
+		.query(
+			"SELECT actor, tags FROM sessions WHERE actor IS NOT NULL ORDER BY started_at DESC, hb DESC LIMIT 1",
+		)
+		.get() as { actor: string; tags: string | null } | null;
+	const actors = (
+		db
+			.query(
+				"SELECT DISTINCT actor FROM sessions WHERE actor IS NOT NULL ORDER BY actor",
+			)
+			.all() as { actor: string }[]
+	).map((r) => r.actor);
+	let tags: Record<string, string> = {};
+	try {
+		tags = row?.tags ? (JSON.parse(row.tags) as Record<string, string>) : {};
+	} catch {}
+	return {
+		actor: row?.actor ?? "unassigned",
+		tags,
+		actors,
+		defaultActor: readBoardSettings().settings.default_actor ?? "",
+	};
+};
+
+const healthProbe = async (
+	name: string,
+	port: number,
+): Promise<HealthProbe> => {
+	try {
+		const r = await fetch(`http://127.0.0.1:${port}/status`, {
+			signal: AbortSignal.timeout(1500),
+		});
+		if (!r.ok) return { name, port, up: false, detail: `HTTP ${r.status}` };
+		const j = (await r.json()) as {
+			uptime_s?: number;
+			requests?: { total?: number };
+		};
+		return {
+			name,
+			port,
+			up: true,
+			detail: `uptime ${Math.round(j.uptime_s ?? 0)}s · ${j.requests?.total ?? 0} req`,
+		};
+	} catch (e) {
+		return {
+			name,
+			port,
+			up: false,
+			detail: e instanceof Error ? e.message.slice(0, 80) : "unreachable",
+		};
+	}
+};
+
+// buckle upstreams.yaml (read-only display): group name == wire id; an empty
+// group is DORMANT — in the ladder but resolving to zero deployments.
+interface UpstreamsDoc {
+	groups?: Record<string, unknown>;
+}
+
+const readUpstreams = (): UpstreamGroup[] | null => {
+	const p = `${process.env.BUCKLE_REPO ?? "/Volumes/Sensitive/github/klh/buckle"}/upstreams.yaml`;
+	try {
+		const doc = YAML.parse(readFileSync(p, "utf8")) as UpstreamsDoc;
+		if (!doc || typeof doc !== "object" || !doc.groups) return null;
+		return Object.entries(doc.groups).map(([name, tiers]) => ({
+			name,
+			tiers: Array.isArray(tiers) ? tiers.length : 0,
+			dormant: !Array.isArray(tiers) || tiers.length === 0,
+		}));
+	} catch {
+		return null;
+	}
+};
+
+const gatherBeltView = async (): Promise<BeltView> => {
+	const pol = resolvePolicy({ beltRepo: BELT_REPO });
+	let gateway: PolicyGatewayParsed | null = null;
+	let policyError: string | null = null;
+	if (pol) {
+		try {
+			gateway = parsePolicy(pol.text);
+		} catch (e) {
+			policyError =
+				e instanceof ConfigError
+					? e.message
+					: e instanceof Error
+						? e.message
+						: String(e);
+		}
+	}
+	const belt = await resolveBelt();
+	const health = await Promise.all([
+		healthProbe("buckle", 4101),
+		healthProbe("belt gateway", 4100),
+	]);
+	return {
+		policy: pol,
+		gateway,
+		policyError,
+		beltApi: belt ? { url: belt.url, via: belt.via } : null,
+		health,
+		groups: readUpstreams(),
+	};
+};
+
+const gatherLocalView = (): LocalView => {
+	const regPath =
+		process.env.KLH_LOCAL_REGISTRY ??
+		`${process.env.HOME}/.local/state/klh-local/registry.json`;
+	try {
+		const doc = JSON.parse(readFileSync(regPath, "utf8")) as {
+			name?: string;
+			port?: number;
+			created_at?: string;
+		}[];
+		const services: LocalService[] = Array.isArray(doc)
+			? doc
+					.filter((s) => s && typeof s.name === "string")
+					.map((s) => ({
+						name: String(s.name),
+						port: Number(s.port ?? 0),
+						created: String(s.created_at ?? ""),
+					}))
+			: [];
+		return { services, regPath, error: null };
+	} catch (e) {
+		return {
+			services: [],
+			regPath,
+			error: e instanceof Error ? e.message : String(e),
+		};
+	}
+};
+
+// form → PolicyPatch. Belt edits the budgets; buckle edits the ladder
+// (tiers on/off + order) and the cooldown TTL. Empty = leave unchanged.
+const formToPatch = (feature: Feature, f: URLSearchParams): PolicyPatch => {
+	const num = (k: string): number | undefined => {
+		const v = (f.get(k) ?? "").trim();
+		if (v === "") return undefined;
+		const n = Number(v);
+		return Number.isFinite(n) ? n : Number.NaN;
+	};
+	if (feature === "belt")
+		return {
+			num_retries: num("num_retries"),
+			allowed_fails: num("allowed_fails"),
+			cooldown_time: num("cooldown_time"),
+		};
+	const ladder: NonNullable<PolicyPatch["ladder"]> = { model: "", tiers: [] };
+	for (const [k, v] of f.entries()) {
+		if (!k.startsWith("ladder_")) continue;
+		ladder.model = k.slice(7);
+		ladder.tiers = (v ?? "")
+			.split(",")
+			.map((t) => t.trim())
+			.filter(Boolean);
+	}
+	return {
+		ladder: ladder.model ? ladder : undefined,
+		cooldown_time: num("cooldown_time"),
+	};
+};
+
+// values JSON (the preview page's hidden field) → validated patch or throw
+const valuesToPatch = (raw: string): PolicyPatch => {
+	const v = JSON.parse(raw) as Record<string, unknown>;
+	const out: PolicyPatch = {};
+	for (const k of ["num_retries", "allowed_fails", "cooldown_time"] as const) {
+		const n = v[k];
+		if (n === undefined || n === null || n === "") continue;
+		if (typeof n !== "number" || !Number.isInteger(n) || n < 0)
+			throw new ConfigError(`gateway.${k}: must be an integer >= 0`);
+		out[k] = n;
+	}
+	if (v.ladder !== undefined && v.ladder !== null) {
+		if (typeof v.ladder !== "object")
+			throw new ConfigError("ladder: bad value");
+		const l = v.ladder as { model?: unknown; tiers?: unknown };
+		if (typeof l.model !== "string" || !Array.isArray(l.tiers))
+			throw new ConfigError("ladder: bad value");
+		out.ladder = { model: l.model, tiers: l.tiers.map((t) => String(t)) };
+	}
+	return out;
+};
+
+// The text the settings flow reads and rewrites: the env/runtime write path
+// when it exists, else the resolved chain text (the new runtime file will be
+// seeded from exactly this). One baseline for preview AND apply — the diff
+// the operator confirms is the diff that lands.
+const policyBaseline = (): { text: string; mtimeMs: number } => {
+	const wp = policyWritePath();
+	if (existsSync(wp)) {
+		const st = statSync(wp);
+		return { text: readFileSync(wp, "utf8"), mtimeMs: st.mtimeMs };
+	}
+	const pol = resolvePolicy({ beltRepo: BELT_REPO });
+	return { text: pol?.text ?? "version: 1\ngateway: {}\n", mtimeMs: 0 };
+};
+
+const htmlHdr = (): Record<string, string> => ({
+	"content-type": "text/html; charset=utf-8",
+	"cache-control": "no-store",
+});
+
+// suspenders settings preview: validate the form patch, diff JSON-to-JSON
+const suspPreview = (f: URLSearchParams, me: ConsoleMe): Response => {
+	const bad = (msg: string): Response => {
+		const ea = {
+			feature: "suspenders" as const,
+			diff: [] as string[],
+			valuesJson: "",
+			mtimeMs: "0",
+			target: readBoardSettings().path,
+			error: msg,
+		};
+		return new Response(previewPage(ea, me), { headers: htmlHdr() });
+	};
+	try {
+		const p = formToBoardSettings({
+			status_refresh_s: f.get("status_refresh_s") ?? "",
+			harvest_ttl_s: f.get("harvest_ttl_s") ?? "",
+			default_actor: f.get("default_actor") ?? "",
+		});
+		return suspPreviewOk(p, me);
+	} catch (e) {
+		return bad(e instanceof Error ? e.message : String(e));
+	}
+};
+
+// the OK path: merge patch over current settings, diff, render confirm page
+const suspPreviewOk = (p: BoardSettings, me: ConsoleMe): Response => {
+	const cur = readBoardSettings();
+	const merged = { ...cur.settings, ...p };
+	for (const k of Object.keys(merged) as (keyof BoardSettings)[])
+		if (merged[k] === undefined) delete merged[k];
+	const curText = cur.exists
+		? `${JSON.stringify(cur.settings, null, "\t")}\n`
+		: "{}\n";
+	const nextText = `${JSON.stringify(merged, null, "\t")}\n`;
+	const a = {
+		feature: "suspenders" as const,
+		diff: diffLines(curText, nextText),
+		valuesJson: JSON.stringify(p),
+		mtimeMs: String(cur.mtimeMs),
+		target: cur.path,
+	};
+	return new Response(previewPage(a, me), { headers: htmlHdr() });
+};
+
+// belt/buckle policy preview: line-patch the baseline, validate, diff
+const policyPreview = (
+	feat: Feature,
+	f: URLSearchParams,
+	me: ConsoleMe,
+): Response => {
+	const bad = (msg: string): Response => {
+		const ea = {
+			feature: feat,
+			diff: [] as string[],
+			valuesJson: "",
+			mtimeMs: "0",
+			target: scrub(policyWritePath()),
+			error: msg,
+		};
+		return new Response(previewPage(ea, me), { headers: htmlHdr() });
+	};
+	const base = policyBaseline();
+	const patch = formToPatch(feat, f);
+	try {
+		const next = patchPolicyText(base.text, patch);
+		const a = {
+			feature: feat,
+			diff: diffLines(base.text, next),
+			valuesJson: JSON.stringify(patch),
+			mtimeMs: String(base.mtimeMs),
+			target: scrub(policyWritePath()),
+		};
+		return new Response(previewPage(a, me), { headers: htmlHdr() });
+	} catch (e) {
+		return bad(e instanceof Error ? e.message : String(e));
+	}
+};
+
+// APPLY — the confirm step. feature + base64 values + preview mtime from the
+// confirm form; VALIDATE FIRST (a bad config surfaces its parse error, not a
+// guard conflict), then the mtime guard, then the atomic write.
+const settingsApply = (f: URLSearchParams): Response => {
+	const feat = f.get("feature") ?? "";
+	const mtime = Number(f.get("mtime") ?? "0");
+	const values = Buffer.from(f.get("values") ?? "", "base64").toString("utf8");
+	if (feat !== "belt" && feat !== "buckle" && feat !== "suspenders")
+		return json({ ok: false, error: "unknown feature" }, 400);
+	if (feat === "suspenders") {
+		const patch = formToBoardSettings(
+			JSON.parse(values) as Record<string, string>,
+		);
+		applyBoardSettings(boardSettingsPath(), patch, mtime);
+	} else {
+		const patch = valuesToPatch(values);
+		const base = policyBaseline();
+		if (Math.abs(base.mtimeMs - mtime) > 1)
+			throw new ConfigError(
+				"config changed since the preview — review the fresh diff and confirm again",
+			);
+		const next = patchPolicyText(base.text, patch);
+		atomicWrite(policyWritePath(), next);
+	}
+	return new Response(null, {
+		status: 303,
+		headers: { location: "/console/settings" },
+	});
+};
 
 const base = {
 	port: PORT,
@@ -2985,6 +3341,140 @@ const base = {
 				return json({ ok: false, error: "children must number 2..8" }, 400);
 			const r = orchRegister(project, title, kids);
 			return json(r.body, r.status);
+		}
+		// ── W147 console (NEW paths only; existing routes untouched) ──
+		if (url.pathname === "/console")
+			return Response.redirect(new URL("/console/belt", url).toString(), 302);
+		if (url.pathname === "/console/belt") {
+			const me = consoleMe();
+			return new Response(await beltPage(await gatherBeltView(), me), {
+				headers: {
+					"content-type": "text/html; charset=utf-8",
+					"cache-control": "no-store",
+				},
+			});
+		}
+		if (url.pathname === "/console/local")
+			return new Response(localPage(gatherLocalView(), consoleMe()), {
+				headers: {
+					"content-type": "text/html; charset=utf-8",
+					"cache-control": "no-store",
+				},
+			});
+		if (url.pathname === "/api/console/me") {
+			// avatar dropdown data: board host's latest actor (unassigned until
+			// coord bootstrap --actor stamps it) + tags + distinct known actors
+			// + the settings-file default for the demo select
+			const m = consoleMe();
+			return json({
+				ok: true,
+				actor: m.actor,
+				tags: m.tags,
+				actors: m.actors,
+				default_actor: m.defaultActor,
+			});
+		}
+		if (url.pathname === "/console/settings") {
+			const pol = resolvePolicy({ beltRepo: BELT_REPO });
+			let gw: PolicyGatewayParsed | null = null;
+			let perr: string | null = null;
+			if (pol) {
+				try {
+					gw = parsePolicy(pol.text);
+				} catch (e) {
+					perr = e instanceof ConfigError ? e.message : String(e);
+				}
+			}
+			return new Response(
+				settingsIndexPage({
+					pol: pol
+						? {
+								path: pol.path,
+								source: pol.source,
+								gateway: gw,
+								error: perr,
+							}
+						: null,
+					set: readBoardSettings(),
+					me: consoleMe(),
+				}),
+				{
+					headers: {
+						"content-type": "text/html; charset=utf-8",
+						"cache-control": "no-store",
+					},
+				},
+			);
+		}
+		if (url.pathname.startsWith("/console/settings/") && req.method === "GET") {
+			// settings form pages — one per feature with its REAL config surface
+			const f = url.pathname.slice("/console/settings/".length);
+			if (f !== "belt" && f !== "buckle" && f !== "suspenders")
+				return new Response("not found", { status: 404 });
+			const feature: Feature = f;
+			const pol = resolvePolicy({ beltRepo: BELT_REPO });
+			let gw: PolicyGatewayParsed | null = null;
+			let perr: string | null = null;
+			if (pol) {
+				try {
+					gw = parsePolicy(pol.text);
+				} catch (e) {
+					perr = e instanceof ConfigError ? e.message : String(e);
+				}
+			}
+			return new Response(
+				settingsFormPage(
+					feature,
+					{
+						gateway: gw,
+						polError: perr,
+						target:
+							feature === "suspenders"
+								? readBoardSettings().path
+								: scrub(policyWritePath()),
+						set: readBoardSettings(),
+					},
+					consoleMe(),
+				),
+				{
+					headers: {
+						"content-type": "text/html; charset=utf-8",
+						"cache-control": "no-store",
+					},
+				},
+			);
+		}
+		if (req.method === "POST" && url.pathname === "/console/settings/preview") {
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			const f = new URLSearchParams(await req.text());
+			const feat = f.get("feature") ?? "";
+			if (feat !== "belt" && feat !== "buckle" && feat !== "suspenders")
+				return json({ ok: false, error: "unknown feature" }, 400);
+			const me = consoleMe();
+			return feat === "suspenders"
+				? suspPreview(f, me)
+				: policyPreview(feat, f, me);
+		}
+		if (req.method === "POST" && url.pathname === "/console/settings/apply") {
+			const guard = writeGuard(req, url);
+			if (guard) return guard;
+			const f = new URLSearchParams(await req.text());
+			try {
+				return settingsApply(f);
+			} catch (e) {
+				const a = {
+					feature: f.get("feature") ?? "belt",
+					diff: [] as string[],
+					valuesJson: "",
+					mtimeMs: "0",
+					target: scrub(policyWritePath()),
+					error: e instanceof Error ? e.message : String(e),
+				};
+				return new Response(previewPage(a, consoleMe()), {
+					headers: htmlHdr(),
+				});
+			}
 		}
 		if (url.pathname === "/llms.txt")
 			if (url.pathname === "/llms.txt")

@@ -1,3 +1,8 @@
+// W147: the SPA board wears the same console shell as every page — the
+// topbar + avatar dropdown ship from console-html.ts (String.raw interpolates
+// ${}; only escapes are raw). Avatar data is fetched live from /api/console/me.
+import { TOPBAR_JS, topbar } from "./console-html.ts";
+
 const unesc = (s) =>
 	s
 		.split("\\u2014")
@@ -241,44 +246,8 @@ button.lanesend:disabled { opacity:.45; cursor:default; }
 #toasts { position:fixed; bottom:16px; right:16px; display:flex; flex-direction:column; gap:6px; z-index:40; max-width:min(380px, 90vw); }
 .toast { background:#221f1c; border:1px solid #af2f12; border-left-width:3px; color:#e8e6e1; padding:8px 12px; font-size:12px; border-radius:2px; box-shadow:0 2px 12px rgba(0,0,0,.5); }
 </style></head><body>
-<style>
-#klh-topbar{display:flex;gap:1.1em;align-items:center;padding:.4em 1em;border-bottom:1px solid #232326;background:rgba(10,10,12,.6);font:500 12px/1.4 -apple-system,sans-serif;letter-spacing:.02em}
-#klh-topbar .tb-brand{color:#6b6b70;text-transform:uppercase;font-size:10px;letter-spacing:.12em}
-#klh-topbar a{color:#8ab4ff;text-decoration:none}
-#klh-topbar a.down{opacity:.35}
-</style>
-<div id="klh-topbar">
-  <span class="tb-brand">klh fleet</span>
-  <a class="tb-link" data-probe="https://belt.local" data-repo="https://github.com/klh/belt" href="https://belt.local">belt</a>
-  <a class="tb-link" data-probe="https://suspenders.local" data-repo="https://github.com/klh/suspenders" href="https://suspenders.local">suspenders</a>
-  <a class="tb-link" data-probe="https://bar.local" data-repo="https://klh/local" href="https://bar.local">local</a>
-</div>
-<script>
-(function () {
-  var probe = function () {
-    var links = document.querySelectorAll("#klh-topbar .tb-link");
-    for (var i = 0; i < links.length; i++) {
-      (function (a) {
-        var url = a.getAttribute("data-probe");
-        fetch(url + "/ping", { mode: "no-cors", cache: "no-store" })
-          .then(function () {
-            a.classList.remove("direct");
-            a.classList.add("direct");
-            a.classList.remove("down");
-            a.href = url;
-          })
-          .catch(function () {
-            a.classList.remove("direct");
-            a.classList.add("down");
-            a.href = a.getAttribute("data-repo");
-          });
-      })(links[i]);
-    }
-  };
-  probe();
-  setInterval(probe, 5000);
-})();
-</script>
+${topbar("suspenders")}
+<script>${TOPBAR_JS}</script>
 
 <header>
   <span class="mark">FLEET BOARD</span>
@@ -1936,6 +1905,9 @@ byId('kanban').addEventListener('click', function(e){
     startItem(s.getAttribute('data-start'), s.getAttribute('data-startproj'), s, selEl ? selEl.value : 'claude');
     return;
   }
+  // executor pick — selecting a lane is not a card open (the click would
+  // otherwise fall through to .kcard and pop the task drawer mid-pick)
+  if (e.target.classList && e.target.classList.contains('kexecsel')) return;
   var b = e.target.closest && e.target.closest('[data-task]');
   if (b) { openTask(b.getAttribute('data-task'), b.getAttribute('data-proj'), b); return; }
   var c = e.target.closest && e.target.closest('.kcard');
