@@ -49,7 +49,7 @@ command -v bun >/dev/null || { echo "suspenders needs bun — https://bun.sh fir
 
 echo "→ installing to $PREFIX"
 mkdir -p "$PREFIX"
-for item in bin lib gates launchd rules gate.ts session-start.ts session-end.ts knowledgeworker.md; do
+for item in bin lib board-html gates launchd rules gate.ts session-start.ts session-end.ts knowledgeworker.md; do
   cp -R "$REPO_DIR/hooks/$item" "$PREFIX/"
 done
 cp "$REPO_DIR/package.json" "$REPO_DIR/bun.lock" "$PREFIX/"
