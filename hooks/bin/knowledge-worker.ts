@@ -116,6 +116,7 @@ async function processRow(rowId: number): Promise<void> {
 					sourceRef: sub.sourceRef,
 					sourceHash: sub.sourceHash,
 					originSid: job.originSid,
+					hubEligible: job.hubEligible,
 					supersedesId: it.supersedesId,
 				}),
 			);

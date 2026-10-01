@@ -52,6 +52,9 @@ export interface KnowledgeJob {
 	// "" when the producer stored NULL (ref unresolvable there); upsert()
 	// lands "" as NULL so the trust marker stays honest.
 	sourceHash: string;
+	/** W159: the queue row's settled hub_eligible (NULL = unsettled) —
+	 *  inherited by distilled rows so feed timing cannot orphan the sort. */
+	hubEligible: 0 | 1 | null;
 }
 
 export interface KnowledgeUpsert {
@@ -67,6 +70,9 @@ export interface KnowledgeUpsert {
 	// ""). upsert() lands ""/NULL as a NULL row hash — never a doomed value.
 	sourceHash: string | null;
 	originSid: string | null;
+	/** W159 provenance sort: stamp distilled rows from the queue row's
+	 *  settled flag (inheritance at distill; the settle backfills the rest). */
+	hubEligible?: 0 | 1 | null;
 	supersedesId: number | null;
 }
 
@@ -170,7 +176,7 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 	async claim(id: number): Promise<KnowledgeJob | null> {
 		const row = this.db
 			.query(
-				"SELECT source, payload, attempts, domain, area, code_origin, origin_sid, source_ref, source_hash FROM knowledge_queue WHERE id = ? AND state = 'queued'",
+				"SELECT source, payload, attempts, domain, area, code_origin, origin_sid, source_ref, source_hash, hub_eligible FROM knowledge_queue WHERE id = ? AND state = 'queued'",
 			)
 			.get(id) as
 			| {
@@ -183,6 +189,7 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 					origin_sid: string | null;
 					source_ref: string | null;
 					source_hash: string | null;
+					hub_eligible: 0 | 1 | null;
 			  }
 			| undefined;
 		if (!row) return null;
@@ -208,6 +215,7 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 			// the producer stored NULL (unresolvable at enqueue) — upsert() turns
 			// that into a NULL row hash so /verify never chases a doomed value.
 			sourceHash: row.source_hash ?? "",
+			hubEligible: row.hub_eligible,
 		};
 	}
 
@@ -396,7 +404,7 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 		const now = Date.now();
 		const ins = this.db
 			.query(
-				"INSERT INTO knowledge (ts, topic, fact, confidence, domain, area, origin_kind, origin_system, code_origin, origin_sid, contributors, duplicate_of, supersedes_id, source_ref, source_hash, source, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'knowledge-worker', 'candidate', ?, ?)",
+				"INSERT INTO knowledge (ts, topic, fact, confidence, domain, area, origin_kind, origin_system, code_origin, origin_sid, contributors, duplicate_of, supersedes_id, source_ref, source_hash, source, state, created_at, updated_at, hub_eligible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'knowledge-worker', 'candidate', ?, ?, ?)",
 			)
 			.run(
 				now,
@@ -427,6 +435,7 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 				row.sourceHash || null,
 				now,
 				now,
+				row.hubEligible ?? null,
 			);
 		return Number(ins.lastInsertRowid);
 	}

@@ -824,6 +824,33 @@ export function openGovernorDb(): Database {
 				`CREATE TRIGGER IF NOT EXISTS deltas_${tbl}_${op} AFTER ${op.toUpperCase()} ON ${tbl} BEGIN INSERT INTO deltas (ts, tbl, op, pk, before, after) VALUES (${deltaNow}, '${tbl}', '${op}', ${pk.replaceAll("$.", `${R}.`)}, ${op === "insert" ? "NULL" : deltaImg(cols, "OLD")}, ${op === "delete" ? "NULL" : deltaImg(cols, "NEW")}); END`,
 			);
 		}
+	// v9 — W159 provenance sort: sessions.data_domain carries the W154
+	// domain label (hub | private). NULL = nothing routed through yet (never
+	// assume); recorded sticky most-restrictive by the routing plane via
+	// recordSessionDomain. knowledge.hub_eligible / knowledge_queue.hub_eligible
+	// carry the settle's sort (NULL = unsettled; 1 = hub session → the
+	// hub-ward feed filters hub only; 0 = private/mixed → local shelf only).
+	// Additive columns; pre-W159 rows stay NULL = unsettled, honestly.
+	if (uv < 9) {
+		const sessCols9 = (
+			db.query("PRAGMA table_info(sessions)").all() as { name: string }[]
+		).map((c) => c.name);
+		if (!sessCols9.includes("data_domain"))
+			db.run("ALTER TABLE sessions ADD COLUMN data_domain TEXT");
+		const kqCols9 = (
+			db.query("PRAGMA table_info(knowledge_queue)").all() as {
+				name: string;
+			}[]
+		).map((c) => c.name);
+		if (!kqCols9.includes("hub_eligible"))
+			db.run("ALTER TABLE knowledge_queue ADD COLUMN hub_eligible INTEGER");
+		const knCols9 = (
+			db.query("PRAGMA table_info(knowledge)").all() as { name: string }[]
+		).map((c) => c.name);
+		if (!knCols9.includes("hub_eligible"))
+			db.run("ALTER TABLE knowledge ADD COLUMN hub_eligible INTEGER");
+		db.run("PRAGMA user_version = 9");
+	}
 	migrateJSON(db);
 	return db;
 }

@@ -84,14 +84,14 @@ db.close();
 ).seq as number;
 
 describe("v5 migration — deltas table + row-image triggers", () => {
-	test("user_version 8 (v8 router tables rode on top), deltas table, 36 deltas triggers, bus tables untracked", () => {
+	test("user_version 9 (v9 W159 provenance columns rode on top), deltas table, 36 deltas triggers, bus tables untracked", () => {
 		expect(
 			(
 				sql<{ user_version: number }>(
 					"SELECT * FROM pragma_user_version",
 				)[0] as { user_version: number }
 			).user_version,
-		).toBe(8);
+		).toBe(9);
 		expect(
 			(
 				sql<{ n: number }>(

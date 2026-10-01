@@ -29,3 +29,10 @@ export function hubModelIdsFrom(
 		}),
 	);
 }
+
+/** Most-restrictive wins (federation §2, owner law): private + anything =
+ *  private, period. The settle records a session's domain with this merge so
+ *  a session that touched both domains never writes hub-ward. */
+export function restrictiveDomain(a: DataDomain, b: DataDomain): DataDomain {
+	return a === "private" || b === "private" ? "private" : "hub";
+}
