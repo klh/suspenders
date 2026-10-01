@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-usage-"));
+const REAL_HOME = process.env.HOME;
 process.env.HOME = HOME;
 const { openGovernorDb } = await import(
 	`../hooks/lib/govdb.ts?home=${encodeURIComponent(HOME)}`
@@ -22,6 +23,9 @@ const { openGovernorDb } = await import(
 const { harvestUsage, modelGroup } = await import(
 	`../hooks/bin/usage-harvest.ts?home=${encodeURIComponent(HOME)}`
 );
+// restore: REG was already captured at govdb module load; leaving the temp
+// HOME set leaks into later-loading suites (the gate-writes interference)
+process.env.HOME = REAL_HOME;
 
 afterAll(() => {
 	rmSync(HOME, { recursive: true, force: true });
