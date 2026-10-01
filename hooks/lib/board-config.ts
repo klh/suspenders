@@ -306,6 +306,7 @@ export interface BoardSettings {
 	status_refresh_s?: number;
 	harvest_ttl_s?: number;
 	default_actor?: string;
+	default_executors?: string[];
 }
 
 export const boardSettingsPath = (home = process.env.HOME ?? ""): string =>
@@ -339,6 +340,18 @@ export function validateBoardSettings(v: unknown): BoardSettings {
 		if (typeof da !== "string" || da.length > 200)
 			throw new ConfigError("default_actor: must be a string (max 200 chars)");
 		out.default_actor = da;
+	}
+	const de = o.default_executors;
+	if (de !== undefined && de !== null) {
+		if (
+			!Array.isArray(de) ||
+			de.length > 20 ||
+			de.some((s) => typeof s !== "string" || s.length > 200 || !s)
+		)
+			throw new ConfigError(
+				"default_executors: must be an array of 1-20 non-empty strings (max 200 chars each)",
+			);
+		out.default_executors = de as string[];
 	}
 	return out;
 }

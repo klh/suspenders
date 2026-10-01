@@ -242,7 +242,9 @@ function kanbanCard(t){
   if (t.tail && t.tail.text) html += '<div class="ktail">' + esc(t.tail.text) + '</div>';
   if (startable) {
     var pick = execPick[t.project + '\u0000' + t.id] || (function(){
-      for (var di = 0; di < execOpts.length; di++) if (String(execOpts[di].value || '').indexOf('glm-5.3-flash') >= 0) return execOpts[di].value;
+      var prefs = (window.__execPrefs && window.__execPrefs.length) ? window.__execPrefs : ['glm-5.3-flash'];
+      for (var pi = 0; pi < prefs.length; pi++) for (var di = 0; di < execOpts.length; di++)
+        if (String(execOpts[di].value || '').indexOf(prefs[pi]) >= 0) return execOpts[di].value;
       return 'claude';
     })();
     var opts = '';

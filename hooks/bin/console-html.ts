@@ -111,6 +111,7 @@ const TOPBAR_JS_B = `
 if(document.getElementById('cavload')){
 fetch('/api/console/me').then(function(r){return r.json()}).then(function(d){
 if(!d||!d.ok)return;
+window.__execPrefs=(d.executor_prefs||[]);
 var head=document.createElement('div');head.className='cavhead';
 head.innerHTML='<span class="cavbig"></span><span><span class="cavname"></span><br><span class="cavsub"></span></span>';
 head.querySelector('.cavbig').textContent=(d.actor&&d.actor!=='unassigned')?d.actor.charAt(0).toUpperCase():'?';

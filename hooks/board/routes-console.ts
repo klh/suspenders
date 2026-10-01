@@ -3,7 +3,6 @@
 // entry's handler list); returns null when nothing matches.
 import { BELT_REPO } from "./context.ts";
 import { json, writeGuard } from "./helpers.ts";
-import { board } from "./data.ts";
 import { consoleMe, gatherBeltView, gatherLocalView } from "./console-view.ts";
 import {
 	htmlHdr,
@@ -23,7 +22,7 @@ import type { PolicyGatewayParsed } from "../lib/board-config.ts";
 import {
 	beltPage,
 	localPage,
-	Feature,
+	type Feature,
 	previewPage,
 	settingsFormPage,
 	settingsIndexPage,
@@ -62,6 +61,7 @@ export async function handleConsole(
 			tags: m.tags,
 			actors: m.actors,
 			default_actor: m.defaultActor,
+			executor_prefs: readBoardSettings().settings.default_executors ?? [],
 		});
 	}
 	if (url.pathname === "/console/settings") {
