@@ -23,6 +23,7 @@ import { dirname } from "node:path";
 import { isDecisionKind, openGovernorDb, tokenUsage } from "../lib/govdb.ts";
 import { maybeHarvest } from "./usage-harvest.ts";
 import { buildUsageReport } from "../lib/usage.ts";
+import { usagePage } from "./usage-page-html.ts";
 import { scrub, servicemon } from "../lib/servicemon.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "./fleet-board-html.ts";
@@ -2194,6 +2195,27 @@ const base = {
 					...llms,
 				],
 			});
+		}
+		if (url.pathname === "/usage") {
+			// W127 phase 3: the server-rendered analytics page (same data path
+			// as /api/usage: TTL-gated harvest then buildUsageReport)
+			maybeHarvest(db);
+			const d = Number(url.searchParams.get("days") ?? 28) || 28;
+			return new Response(
+				usagePage(
+					buildUsageReport(db, { days: Math.min(90, Math.max(1, d)) }),
+					{
+						days: Math.min(90, Math.max(1, d)),
+						team: url.searchParams.get("team") ?? "",
+					},
+				),
+				{
+					headers: {
+						"content-type": "text/html; charset=utf-8",
+						"cache-control": "no-store",
+					},
+				},
+			);
 		}
 		if (url.pathname === "/api/usage") {
 			// W127: Copilot-style usage analytics — TTL-gated transcript harvest
