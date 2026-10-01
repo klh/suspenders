@@ -75,3 +75,16 @@ sim-store-hub bun /src/suspenders/hooks/bin/auth.ts issue --actor w162-sim
 `token/issue` flips only with W156's identity plane (hub-issued tokens,
 bootstrap story). The check proves the admin-gated W149 surface EXISTS on
 the hub store and that key material stays hub-side in `hub-secrets`.
+
+## What this harness is (and is not)
+
+Docker here is a TEST vehicle — exercising API surfaces and measuring
+network throughput against a real hub, without costing two bare-metal
+copies of every service. It is not an always-on deployment; `down -v`
+between uses is the expected state.
+
+**Hub-down resilience is a required scenario, not an assumption**: the
+spoke keeps routing on its local ladder + last-known policy when the
+central hub is down (federation doc, degradation law). A sim check for
+it is queued — kill the hub containers mid-run and prove local routing
+continues unchanged, only hub-routed rungs fail honestly.
