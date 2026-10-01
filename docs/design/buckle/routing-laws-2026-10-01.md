@@ -550,12 +550,18 @@ source of truth for the grammar; two editors for the sources).
   secrets home, mode 600, never committed). They appear in the spoke
   menu as user-plane entries alongside — never inside — the
   hub-entitled menu.
-- **Resolution precedence**: repo dotfile > user plane policy > central
-  policy for company repos > install default. Company repos: central
-  `must` wins over user `prefer` (entitlements are ceilings, not
-  suggestions); private repos: the user's laws are sovereign, the hub is
-  not consulted unless opted in. `must` with no fit still errors honestly
-  at every layer (never silent substitution).
+- **Resolution precedence + reconciliation (owner law)**: repo dotfile >
+  user plane policy > central policy for company repos > install default.
+  DOTFILES WIN: when an agent finds a repo, (a) dotfile + no config →
+  adopt, materialize the config entry FROM the dotfile; (b) dotfile +
+  config → the dotfile wins, the config entry is updated to match it
+  (the config is a live mirror, the dotfile is the source); (c) no
+  dotfile + config → the config governs and is written as the repo's
+  effective policy; (d) neither → defaults take over. Company repos:
+  central `must` wins over user `prefer` (entitlements are ceilings,
+  not suggestions); private repos: the user's laws are sovereign, the
+  hub is not consulted unless opted in. `must` with no fit still errors
+  honestly at every layer (never silent substitution).
 
 IKEA-shaped example (owner's): IKEA repos route to the IKEA hub's OpenAI
 LLM via central policy; a private repo routes to personal glm-5.3 on
