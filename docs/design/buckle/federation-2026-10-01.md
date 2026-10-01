@@ -57,6 +57,16 @@ request path. `budget_state` (runtime counters) stays with the ledger;
 team ceilings (policy) go with identity. Migration = v9-era move of the
 five tables + lib re-binding; sequenced behind the in-flight lanes.
 
+**Signing keys are hub-only (owner law):** private/signing keys never
+exist on individual spoke machines — only the central hub holds them.
+Consequence: federation issuance is asymmetric (RS256/EdDSA) with a JWKS
+endpoint on the hub; spokes hold only the public key and validate via the
+existing W141 RP-mode seam (issuer allowlist + JWKS cache). The W149
+HS256 local key remains only for the single-machine dev case where hub
+and spoke are the same box, and even there the key moves into identity.db
+under the hub's secrets home. Rotation is a hub operation; spoke config
+never changes on rotation (JWKS fetch).
+
 ## Sequencing
 
 Phase 1 (post-W144 cut-over): hub policy distribution + spoke pull.

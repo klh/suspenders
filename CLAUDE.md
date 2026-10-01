@@ -20,3 +20,12 @@ gate catch them — recurring offenders: non-null `!` (noNonNullAssertion),
 string `+ "\n"` concat (useTemplate), comma operator, unused vars/imports,
 use-before-declaration. biome owns code formatting; prettier owns markdown
 only — never enable both on code (they deadlock).
+
+## 1500-Line Hard Limit
+
+Any .ts (or equivalent) that grows past **1500 lines MUST be decomposed**:
+split by responsibility, DRY the second duplicate, and run a codescan for
+shareable patterns (ast-grep) before adding code near the limit — one
+source of truth per pattern, helpers over copy-paste. Applies to every lane
+and every klh repo. Current offenders tracked on the graph (decomposition
+item); the on-write gate flags them.
