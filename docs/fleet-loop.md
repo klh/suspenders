@@ -57,9 +57,13 @@ process while that lane's recorded pid is alive.
 
 Each claim is stamped with an **origin** — `<hostname>:<agent>` via
 `work take --origin` — recorded on the work item and shown on board cards.
-That is the multi-machine seam: today every dispatch is this machine; when a
-second coordinator joins, items already carry who ran them, where, and on
-which backend, and the board renders it without schema changes.
+That is the multi-machine seam: `dispatch --machine <name|auto>` (W176)
+resolves the target through the machine capability registry
+(`coord machine`, docs/machines.md) and stamps that machine's name instead
+of the local hostname; without the flag every dispatch stays local.
+Results return through the delta up-feed: registry writes and remote lane
+writes land centrally via the W92 store port and tail as
+`coord diff --table machines --since <cursor>`.
 
 ### Selecting the agent backend
 

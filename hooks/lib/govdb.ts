@@ -524,6 +524,15 @@ export function openGovernorDb(): Database {
 	db.run(
 		"CREATE TABLE IF NOT EXISTS facts (key TEXT PRIMARY KEY, value TEXT, source TEXT, version INTEGER NOT NULL DEFAULT 1, ts INTEGER NOT NULL)",
 	);
+	// W176 — machine capability registry: the work graph's answer to belt's LLM
+	// registry (remotes.ts). One row per fleet machine; roles share the
+	// CAPABILITIES vocabulary (roles ⊇ work_items.requires is the routing
+	// contract), cpu/ram/gpu are the "beefy box" ranking inputs. Everything a
+	// remote machine writes lands centrally through the W92 store port, and
+	// machines ∈ deltaTables puts every mutation in the delta up-feed.
+	db.run(
+		"CREATE TABLE IF NOT EXISTS machines (name TEXT PRIMARY KEY, host TEXT NOT NULL, roles TEXT, cpu_cores INTEGER, ram_gb INTEGER, gpu TEXT, store_url TEXT, state TEXT NOT NULL DEFAULT 'active', last_hb INTEGER NOT NULL, origin_sid TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+	);
 	// v5 — row-image delta log (W33): sessions, claims, locks, facts, and
 	// work_items all mutate IN PLACE with no event trail, so "what actually
 	// changed between two points" (coord diff --since) was unreconstructable.
@@ -712,6 +721,27 @@ export function openGovernorDb(): Database {
 			tbl: "facts",
 			pk: "$.key",
 			cols: ["key", "value", "source", "version", "ts"],
+		},
+		{
+			// W176 — registry mutations join the delta up-feed: every machine's
+			// register/heartbeat/routing write is a row image any machine can
+			// tail with `coord diff --table machines --since <cursor>`.
+			tbl: "machines",
+			pk: "$.name",
+			cols: [
+				"name",
+				"host",
+				"roles",
+				"cpu_cores",
+				"ram_gb",
+				"gpu",
+				"store_url",
+				"state",
+				"last_hb",
+				"origin_sid",
+				"created_at",
+				"updated_at",
+			],
 		},
 		{
 			tbl: "work_items",

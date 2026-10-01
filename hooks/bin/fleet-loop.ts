@@ -30,7 +30,8 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
-import { openGovernorDb } from "../lib/govdb.ts";
+import { openGovernorDb, projectIdentity } from "../lib/govdb.ts";
+import { machineFresh, parseRoles, pickMachine } from "../lib/machines.ts";
 
 const argv = process.argv.slice(2);
 const MODE = argv[0];
@@ -46,6 +47,7 @@ if (
 			`          [--dispatch-cmd <template>]              optional policy script\n` +
 			`          [--agent claude|codex]                   dispatch backend (default claude)\n` +
 			`          ship --branch <branch>                   one branch through the ladder (board ship trigger)\n` +
+			`          dispatch --item Wn [--agent claude|codex] [--machine <name|auto>]\n` +
 			`          [--every 120] [--cycle-timeout 15] [--log <file>]   (watch mode)\n`,
 	);
 	process.exit(MODE ? 1 : 0);
@@ -529,6 +531,52 @@ if (MODE === "dispatch") {
 		console.error("dispatch --agent must be claude or codex");
 		process.exit(1);
 	}
+	// W176 cross-machine dispatch: --machine <name> pins the item to a
+	// registered machine (must be active + heartbeat-fresh); --machine auto
+	// routes by roles ⊇ item.requires, beefiest first. The resolved machine
+	// replaces hostname() in the origin stamp — the multi-machine seam
+	// documented in docs/fleet-loop.md.
+	const machineFlag = val("--machine");
+	let originHost = hostname();
+	if (machineFlag) {
+		const mdb = openGovernorDb();
+		if (machineFlag === "auto") {
+			const it = mdb
+				.query("SELECT requires FROM work_items WHERE id = ? AND project = ?")
+				.get(item, projectIdentity()) as { requires: string | null } | null;
+			if (!it) {
+				console.error(`dispatch --machine auto: item ${item} not found`);
+				process.exit(1);
+			}
+			const pick = pickMachine(mdb, parseRoles(it.requires), Date.now());
+			if (!pick.machine) {
+				console.error(`dispatch --machine auto: ${pick.reason}`);
+				process.exit(1);
+			}
+			originHost = pick.machine.name;
+		} else {
+			const m = mdb
+				.query("SELECT name, state, last_hb FROM machines WHERE name = ?")
+				.get(machineFlag) as {
+				name: string;
+				state: string;
+				last_hb: number;
+			} | null;
+			if (!m) {
+				console.error(
+					`dispatch --machine ${machineFlag}: not in the registry — coord machine register ${machineFlag}`,
+				);
+				process.exit(1);
+			}
+			if (m.state !== "active" || !machineFresh(m.last_hb, Date.now())) {
+				console.error(
+					`dispatch --machine ${machineFlag}: ${m.state} / hb ${m.last_hb} — refresh heartbeat or pick another`,
+				);
+				process.exit(1);
+			}
+			originHost = m.name;
+		}
+	}
 	const sid = `autow${item.replace(/^W/, "").replace(/\./g, "")}`;
 	const wt = `${REPO}/.worktrees/${item}`;
 	// live-lane guard: a running lane still owns its worktree — refuse. An
@@ -563,7 +611,7 @@ if (MODE === "dispatch") {
 		"--as",
 		sid,
 		"--origin",
-		`${hostname()}:${AGENT}`,
+		`${originHost}:${AGENT}`,
 	]);
 	if (take.code !== 0) {
 		const mine = runTool([
