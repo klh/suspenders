@@ -307,6 +307,9 @@ export interface BoardSettings {
 	harvest_ttl_s?: number;
 	default_actor?: string;
 	default_executors?: string[];
+	/** W201 executor policy: allow-list of lane executors. Absent = everything
+	 * allowed (no policy); claude/openai blocked by listing only what's in. */
+	enabled_executors?: string[];
 }
 
 export const boardSettingsPath = (home = process.env.HOME ?? ""): string =>
@@ -352,6 +355,18 @@ export function validateBoardSettings(v: unknown): BoardSettings {
 				"default_executors: must be an array of 1-20 non-empty strings (max 200 chars each)",
 			);
 		out.default_executors = de as string[];
+	}
+	const ee = o.enabled_executors;
+	if (ee !== undefined && ee !== null) {
+		if (
+			!Array.isArray(ee) ||
+			ee.length > 20 ||
+			ee.some((s) => typeof s !== "string" || s.length > 200 || !s)
+		)
+			throw new ConfigError(
+				"enabled_executors: must be an array of 1-20 non-empty strings (max 200 chars each)",
+			);
+		out.enabled_executors = ee as string[];
 	}
 	return out;
 }

@@ -27,6 +27,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { laneEnv, spawnClaude } from "./lib/lane.ts";
+import { readBoardSettings } from "../hooks/lib/board-config.ts";
 
 const argv = process.argv.slice(2);
 const val = (flag: string): string | undefined => {
@@ -42,6 +43,24 @@ const BIN = `${process.env.HOME}/.claude/hooks/suspenders/bin`;
 const FLEET = `${REPO}/.fleet`;
 const LANES_JSON = `${FLEET}/lanes.json`;
 const LOOP_LOG = `${FLEET}/loop.log`;
+
+/** Executor pick (W201 policy + W176 prefer-drives): the first entry of the
+ * user's ordered default_executors that survives the enabled_executors
+ * allow-list wins; "claude" is only reachable if the list includes it. Any
+ * non-claude executor rides the same claude CLI with ANTHROPIC_MODEL pinned
+ * — belt routes by model id, so a model name IS an executor here. */
+const execPick = (): { agent: string; model: string | null } => {
+	const s = readBoardSettings().settings;
+	const enabled = s.enabled_executors;
+	const order = [...(s.default_executors ?? []), "claude"];
+	for (const name of order) {
+		if (enabled && !enabled.includes(name)) continue;
+		return name === "claude"
+			? { agent: "claude", model: null }
+			: { agent: name, model: name };
+	}
+	return { agent: "claude", model: null }; // no policy + empty prefs = legacy
+};
 
 type Lane = {
 	sid: string;
@@ -299,6 +318,11 @@ const dispatchItem = (
 	// env + spawn recipe shared with supervise.ts via scripts/lib/lane.ts
 	const env = laneEnv({ ...process.env }, NO_BELT);
 	env.SUSPENDERS_SID = sid;
+	const pick = execPick();
+	// model pin only makes sense behind belt (belt routes by model id); with
+	// --no-belt the claude CLI talks to its own API and a foreign model id
+	// would just 404
+	if (pick.model && !NO_BELT) env.ANTHROPIC_MODEL = pick.model;
 	const bin = Bun.which("claude");
 	if (!bin) {
 		console.log("SKIP — claude binary not found on PATH");
@@ -320,7 +344,7 @@ const dispatchItem = (
 		pid: proc.pid,
 		branch,
 		worktree: wt,
-		agent: "claude",
+		agent: pick.agent,
 		host: hostname(),
 		launchedAt: Date.now(),
 	};
