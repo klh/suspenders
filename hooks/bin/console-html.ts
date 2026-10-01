@@ -550,16 +550,17 @@ export const spendPage = (a: SpendArgs, me?: ConsoleMe): string => {
 			? `<table class="ct"><thead><tr><th>day</th><th>tokens</th><th>requests</th></tr></thead><tbody>${a.byDay.map(dayRow).join("")}</tbody></table>`
 			: `<p class="dimpl">no usage rows in the window for this actor</p>`) +
 		(a.byModel.length
-			? `<div class="panel"><h2>usage by model</h2><table class="ct"><thead><tr><th>model</th><th>tokens</th><th>requests</th></tr></thead><tbody>${a.byModel.map(modelRow).join("")}</tbody></table></div>`
-			: "") +
+			? `</div><div class="panel"><h2>usage by model</h2><table class="ct"><thead><tr><th>model</th><th>tokens</th><th>requests</th></tr></thead><tbody>${a.byModel.map(modelRow).join("")}</tbody></table></div>`
+			: `</div>`) +
 		`<div class="panel"><h2>budgets (buckle keys)</h2>` +
 		(a.budgets.length
 			? `<table class="ct"><tbody>${a.budgets.map(budgetRow).join("")}</tbody></table>`
 			: `<p class="dimpl">no active buckle keys for this actor — budgets are enforced at the belt gateway (W141), provisioned via the buckle governance plane</p>`) +
-		`<div class="panel"><h2>identity ledger (last 10)</h2>` +
+		`</div><div class="panel"><h2>identity ledger (last 10)</h2>` +
 		(a.events.length
 			? `<table class="ct"><tbody>${a.events.map((e2) => `<tr><td class="dim">${new Date(e2.ts).toISOString().slice(0, 16).replace("T", " ")}</td><td>${esc(e2.event)}</td><td class="dim">${esc(e2.via ?? "")}</td></tr>`).join("")}</tbody></table>`
-			: `<p class="dimpl">no auth_events rows for this actor yet</p>`);
+			: `<p class="dimpl">no auth_events rows for this actor yet</p>`) +
+		`</div>`;
 	return consolePage(`MY SPEND · ${a.actor}`, "local", body, me);
 };
 
