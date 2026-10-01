@@ -166,6 +166,21 @@ case (this box, hub==spoke) is the one exception and runs the full
 profile. Installer consequence: spoke installs exclude the identity/auth
 modules entirely (W165); W156's identity plane is hub-profile.
 
+## Wire crypto posture (PQC, verified 2026-10-01)
+
+The .local API planes already negotiate **X25519MLKEM768** (hybrid
+classical + ML-KEM-768 key exchange — RFC 10024) via Caddy 2.11.4's
+default; verified live with OpenSSL 3.6.4 s_client on suspenders.local
+and belt.local. Loopback services (swarm, store, board, belt entry,
+buckle ports) run plain HTTP on 127.0.0.1 — no wire, no exposure, PQC
+moot there. Law going forward: **every hub↔spoke wire terminates in
+PQ-hybrid TLS** (Caddy in front, or a PQ-capable listener); a federation
+endpoint served without ML-KEM hybrid is a config bug, not an option.
+Post-quantum SIGNATURES (ML-DSA JWTs/certs) are deliberately deferred —
+JOSE/COSE ML-DSA is still draft-track; key exchange is the
+harvest-now-decrypt-later exposure and it is already covered. Symmetric
+crypto (AES-256) is unchanged (Grover-resistent at 256-bit).
+
 ## Sequencing
 
 Phase 1 (post-W144 cut-over): hub policy distribution + spoke pull (the
