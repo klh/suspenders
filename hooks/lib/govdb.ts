@@ -650,14 +650,91 @@ export function openGovernorDb(): Database {
 				"requires",
 			],
 		},
+		// W132 router governance tables — deltas coverage is the audit win:
+		// adding entries here is the whole mechanism (v8 block below creates
+		// the tables these triggers mirror).
+		{
+			tbl: "api_keys",
+			pk: "$.key_id",
+			cols: [
+				"key_id",
+				"key_hash",
+				"jti",
+				"name",
+				"team",
+				"actor",
+				"token_type",
+				"parent_key_id",
+				"scopes",
+				"rpm_limit",
+				"tpm_limit",
+				"expires_at",
+				"rotated_at",
+				"revoked_at",
+				"created_at",
+			],
+		},
+		{
+			tbl: "teams",
+			pk: "$.team_id",
+			cols: ["team_id", "name", "department", "created_at"],
+		},
+		{
+			tbl: "route_audit",
+			pk: "$.rid",
+			cols: [
+				"rid",
+				"ts",
+				"actor",
+				"dialect",
+				"hint",
+				"candidates",
+				"resolved_target",
+				"decision",
+				"latency_class",
+				"error_code",
+			],
+		},
+		{
+			tbl: "aid_events",
+			pk: "$.id",
+			cols: [
+				"id",
+				"ts",
+				"sid",
+				"work_item",
+				"aid",
+				"packet_id",
+				"tokens_injected",
+				"est_tok_saved",
+			],
+		},
+		{
+			tbl: "aid_rollup",
+			pk: "$.hour_bucket || '/' || $.aid || '/' || $.domain || '/' || $.model_group",
+			cols: [
+				"hour_bucket",
+				"aid",
+				"domain",
+				"model_group",
+				"injected",
+				"skipped",
+				"tok_injected",
+				"est_tok_saved",
+				"requests",
+			],
+		},
+		{
+			tbl: "budget_state",
+			pk: "$.key_id || '/' || $.window",
+			cols: ["key_id", "window", "used_rpm", "used_tpm", "window_start"],
+		},
+		{
+			tbl: "auth_events",
+			pk: "$.id",
+			cols: ["id", "ts", "actor", "event", "jti", "via"],
+		},
 	];
-	for (const { tbl, pk, cols } of deltaTables)
-		for (const op of ["insert", "update", "delete"] as const) {
-			const R = op === "delete" ? "OLD" : "NEW";
-			db.run(
-				`CREATE TRIGGER IF NOT EXISTS deltas_${tbl}_${op} AFTER ${op.toUpperCase()} ON ${tbl} BEGIN INSERT INTO deltas (ts, tbl, op, pk, before, after) VALUES (${deltaNow}, '${tbl}', '${op}', ${pk.replaceAll("$.", `${R}.`)}, ${op === "insert" ? "NULL" : deltaImg(cols, "OLD")}, ${op === "delete" ? "NULL" : deltaImg(cols, "NEW")}); END`,
-			);
-		}
 	// v7 — usage analytics (W127): sessions.actor/tags give Copilot-style
 	// per-user/license drill-down (actor = user or license id; tags = JSON
 	// {team, department, ...}), usage_rollup is the hourly token ledger the
@@ -676,6 +753,77 @@ export function openGovernorDb(): Database {
 		"CREATE INDEX IF NOT EXISTS usage_rollup_actor ON usage_rollup(actor, hour_bucket)",
 	);
 	if (uv < 7) db.run("PRAGMA user_version = 7");
+	// v8 — buckle router governance (W132): the tables the native router's
+	// governance layer writes to — W141 virtual keys (api_keys, teams), W136
+	// audit rows (route_audit), W137 aid metering (aid_events, aid_rollup),
+	// W135 O(1) budgets (budget_state) — declared HERE so the deltas trigger
+	// loop (below, after the last CREATE) covers them automatically. The
+	// audit trail IS the deltas log: one mechanism, zero per-table wiring.
+	// All-new tables, no backfill, so plain guarded CREATEs every open (the
+	// idempotent house pattern).
+	// api_keys: HASHES only — a raw key is shown once at creation, never
+	// persisted. Token mechanics (owner amendment): token_type access|refresh;
+	// rotation = new row + parent_key_id chain + old row stamped rotated_at;
+	// expires_at NULL = forever (the owner's forever pair; users: access 30d,
+	// refresh NULL = rotate-until-infinity); jti = unique denylist key;
+	// revocation is per-token (revoked_at) and per-actor (every row of the
+	// actor) — both plain UPDATEs the deltas triggers already see.
+	// auth_events: the issued|refreshed|rotated|revoked|rejected ledger.
+	db.run(
+		"CREATE TABLE IF NOT EXISTS api_keys (key_id TEXT PRIMARY KEY, key_hash TEXT NOT NULL, jti TEXT, name TEXT, team TEXT, actor TEXT, token_type TEXT NOT NULL DEFAULT 'access', parent_key_id TEXT, scopes TEXT, rpm_limit INTEGER, tpm_limit INTEGER, expires_at INTEGER, rotated_at INTEGER, revoked_at INTEGER, created_at INTEGER NOT NULL)",
+	);
+	db.run(
+		"CREATE UNIQUE INDEX IF NOT EXISTS api_keys_hash ON api_keys(key_hash)",
+	); // auth = one hash lookup
+	db.run("CREATE UNIQUE INDEX IF NOT EXISTS api_keys_jti ON api_keys(jti)"); // denylist checks
+	db.run(
+		"CREATE TABLE IF NOT EXISTS teams (team_id TEXT PRIMARY KEY, name TEXT, department TEXT, created_at INTEGER NOT NULL)",
+	);
+	// route_audit (W136 §6): one row per request — INSERTed at dispatch
+	// (target already known), UPDATEd in place with the outcome joined by
+	// rid; the deltas insert+update trigger pair captures both writes.
+	// candidates = ordered top candidate ids (comma-joined); resolved_target
+	// = kind:host:port/model; actor + dialect are the W127 /usage join keys
+	// the doc pins. Denied requests audit too (belt doctrine, unchanged).
+	db.run(
+		"CREATE TABLE IF NOT EXISTS route_audit (rid TEXT PRIMARY KEY, ts INTEGER NOT NULL, actor TEXT, dialect TEXT, hint TEXT NOT NULL DEFAULT '', candidates TEXT, resolved_target TEXT, decision TEXT NOT NULL, latency_class TEXT, error_code TEXT)",
+	);
+	db.run("CREATE INDEX IF NOT EXISTS route_audit_ts ON route_audit(ts, rid)"); // window scans for panels
+	// aid_events: one row per aid decision; est_tok_saved stays NULL at
+	// event time (W137 honesty rule — savings are A/B-derived at dashboard
+	// time, never fabricated per-request). aid_rollup: the W137 §6 SQL
+	// verbatim — composite PK (hour_bucket, aid, domain, model_group),
+	// UPSERT-ADD semantics so hourly flushers never overwrite, they add.
+	// usage_rollup (v7) is reused as-is for token outcomes; the ROI join is
+	// aid_events(sid, work_item) ⋈ usage_rollup(actor, hour).
+	db.run(
+		"CREATE TABLE IF NOT EXISTS aid_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, sid TEXT, work_item TEXT, aid TEXT NOT NULL, packet_id TEXT, tokens_injected INTEGER NOT NULL DEFAULT 0, est_tok_saved INTEGER)",
+	);
+	db.run(
+		"CREATE TABLE IF NOT EXISTS aid_rollup (hour_bucket INTEGER NOT NULL, aid TEXT NOT NULL, domain TEXT NOT NULL, model_group TEXT NOT NULL, injected INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0, tok_injected INTEGER NOT NULL DEFAULT 0, est_tok_saved INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (hour_bucket, aid, domain, model_group))",
+	);
+	// budget_state (W135): the O(1) counters' durable half — (key_id, window)
+	// rows the router flushes async. Flush = upsert-ADD so a retried batch
+	// can never lose counts; window_start moves to the flusher's value so a
+	// rolled window restarts the count honestly.
+	db.run(
+		"CREATE TABLE IF NOT EXISTS budget_state (key_id TEXT NOT NULL, window TEXT NOT NULL, used_rpm INTEGER NOT NULL DEFAULT 0, used_tpm INTEGER NOT NULL DEFAULT 0, window_start INTEGER NOT NULL, PRIMARY KEY (key_id, window))",
+	);
+	db.run(
+		"CREATE TABLE IF NOT EXISTS auth_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT, event TEXT NOT NULL, jti TEXT, via TEXT)",
+	);
+	if (uv < 8) db.run("PRAGMA user_version = 8");
+	// the trigger loop runs AFTER the last CREATE (W132 moved it below the v8
+	// block): a trigger references its table at creation time, so on a fresh
+	// DB the loop must see every table it covers already in sqlite_master.
+	// CREATE TRIGGER IF NOT EXISTS keeps it idempotent and self-healing.
+	for (const { tbl, pk, cols } of deltaTables)
+		for (const op of ["insert", "update", "delete"] as const) {
+			const R = op === "delete" ? "OLD" : "NEW";
+			db.run(
+				`CREATE TRIGGER IF NOT EXISTS deltas_${tbl}_${op} AFTER ${op.toUpperCase()} ON ${tbl} BEGIN INSERT INTO deltas (ts, tbl, op, pk, before, after) VALUES (${deltaNow}, '${tbl}', '${op}', ${pk.replaceAll("$.", `${R}.`)}, ${op === "insert" ? "NULL" : deltaImg(cols, "OLD")}, ${op === "delete" ? "NULL" : deltaImg(cols, "NEW")}); END`,
+			);
+		}
 	migrateJSON(db);
 	return db;
 }

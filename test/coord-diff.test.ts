@@ -84,21 +84,21 @@ db.close();
 ).seq as number;
 
 describe("v5 migration — deltas table + row-image triggers", () => {
-	test("user_version 6 (v6 knowledge layer rode on top), deltas table, 15 deltas triggers, bus tables untracked", () => {
+	test("user_version 8 (v8 router tables rode on top), deltas table, 36 deltas triggers, bus tables untracked", () => {
 		expect(
 			(
 				sql<{ user_version: number }>(
 					"SELECT * FROM pragma_user_version",
 				)[0] as { user_version: number }
 			).user_version,
-		).toBe(6);
+		).toBe(8);
 		expect(
 			(
 				sql<{ n: number }>(
 					"SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'deltas_%'",
 				)[0] as { n: number }
 			).n,
-		).toBe(15);
+		).toBe(36);
 		expect(
 			sql(
 				"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'deltas_events_%'",
