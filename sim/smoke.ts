@@ -346,6 +346,23 @@ try {
 	report("citizenship/options-204", "ERR", String(e));
 }
 
+// OPTIONS → 204 + Allow (board surface — W168 oracle completion)
+try {
+	const res = await fetch(`${SIM_BOARD_URL}/status`, { method: "OPTIONS" });
+	await readCapped(res);
+	if (res.status === 204 && res.headers.get("allow") !== null) {
+		report("citizenship/options-204-board", "PASS", "204 + Allow");
+	} else {
+		report(
+			"citizenship/options-204-board",
+			"RED",
+			`OPTIONS /status → ${String(res.status)} (want 204 + Allow)`,
+		);
+	}
+} catch (e) {
+	report("citizenship/options-204-board", "ERR", String(e));
+}
+
 // 401 → WWW-Authenticate (proxy-class surface on buckle without creds)
 try {
 	const res = await fetch(`${SIM_BUCKLE_URL}/v1/chat/completions`, {
@@ -400,6 +417,32 @@ try {
 	report("citizenship/etag-304", "ERR", String(e));
 }
 
+// ETag + If-None-Match → 304 on the board /status snapshot (W168 oracle completion)
+try {
+	const r1 = await fetch(`${SIM_BOARD_URL}/status`);
+	await readCapped(r1);
+	const etag = r1.headers.get("etag");
+	if (r1.status === 200 && etag !== null) {
+		const r2 = await fetch(`${SIM_BOARD_URL}/status`, {
+			headers: { "if-none-match": etag },
+		});
+		await readCapped(r2);
+		report(
+			"citizenship/etag-304-board",
+			r2.status === 304 ? "PASS" : "RED",
+			`ETag ${etag}, If-None-Match → ${String(r2.status)} (want 304)`,
+		);
+	} else {
+		report(
+			"citizenship/etag-304-board",
+			"RED",
+			`no ETag on board GET /status — awaiting W155.1 deploy`,
+		);
+	}
+} catch (e) {
+	report("citizenship/etag-304-board", "ERR", String(e));
+}
+
 // Cache-Control: no-store on /auth/* + rate-limit trio on authenticated API
 if (hubAccess !== null) {
 	try {
@@ -433,6 +476,30 @@ if (hubAccess !== null) {
 	} catch (e) {
 		report("citizenship/rate-trio", "ERR", String(e));
 	}
+}
+
+// 401 → WWW-Authenticate on the store /auth/* surface, no creds (W168)
+try {
+	const res = await fetch(`${SIM_STORE_URL}/auth/whoami`);
+	await readCapped(res);
+	if (res.status === 401) {
+		const www = res.headers.get("www-authenticate");
+		report(
+			"citizenship/401-www-auth-store",
+			www !== null ? "PASS" : "RED",
+			www !== null
+				? `401 + WWW-Authenticate: ${www}`
+				: "401 MISSING WWW-Authenticate — awaiting W155.1 deploy",
+		);
+	} else {
+		report(
+			"citizenship/401-www-auth-store",
+			"RED",
+			`GET /auth/whoami → ${String(res.status)} (want 401)`,
+		);
+	}
+} catch (e) {
+	report("citizenship/401-www-auth-store", "ERR", String(e));
 }
 
 // summary — exit 0 all green, 2 = REDs (expected), 1 = harness error
