@@ -31,6 +31,14 @@ import {
 import { hostname } from "node:os";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
+// W177: lane resource caps live with the other spawn plumbing (lane.ts);
+// the dispatch verb's inline recipe embeds the same jobslab preamble.
+import {
+	jobslabFor,
+	jobslabPrefix,
+	jobslabTag,
+	laneClassOf,
+} from "../../scripts/lib/jobslab.ts";
 
 const argv = process.argv.slice(2);
 const MODE = argv[0];
@@ -98,6 +106,7 @@ type Lane = {
 	branch: string;
 	worktree: string;
 	agent?: string;
+	slab?: string;
 };
 
 function readJsonSync<T>(p: string): T | null {
@@ -751,11 +760,16 @@ if (MODE === "dispatch") {
 	// log file is the live-tail surface for the board.
 	const sq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
 	const laneLog = `${REPO}/.fleet/lane-${sid}.log`;
+	// W177 jobslab: the same per-class ceilings the fleet scripts' spawn
+	// recipe applies — claude/codex get the working caps, config-overridable
+	// via <repo>/.fleet/jobslab.json.
+	const slab = laneClassOf(AGENT);
+	const js = jobslabFor(slab, `${REPO}/.fleet`);
 	const proc = Bun.spawn(
 		[
 			"/bin/sh",
 			"-c",
-			`exec ${sq(bin)} ${agentArgs.map(sq).join(" ")} < /dev/null >> ${sq(laneLog)} 2>&1`,
+			`${jobslabPrefix(js)}${sq(bin)} ${agentArgs.map(sq).join(" ")} < /dev/null >> ${sq(laneLog)} 2>&1`,
 		],
 		{ cwd: wt, env, stdout: "ignore", stderr: "ignore", stdin: "ignore" },
 	);
@@ -768,12 +782,15 @@ if (MODE === "dispatch") {
 		worktree: wt,
 		agent: AGENT,
 		host: hostname(),
+		slab,
 		launchedAt: Date.now(),
 	};
 	const all = lanes().filter((l) => l.sid !== sid);
 	all.push(entry);
 	writeFileSync(`${REPO}/.fleet/lanes.json`, JSON.stringify(all, null, 2));
-	log(`DISPATCHED ${item} → ${sid} (pid ${proc.pid}, ${branch})`);
+	log(
+		`DISPATCHED ${item} → ${sid} (pid ${proc.pid}, ${branch}, slab ${jobslabTag(slab, js)})`,
+	);
 	console.log(`dispatched ${item} → ${sid} (pid ${proc.pid})`);
 	process.exit(0);
 }

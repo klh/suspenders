@@ -6,6 +6,7 @@
 // the churn — the mutation gate caps edits at 40 lines; the spawn/env core
 // (the part a divergence would corrupt lanes with) is shared for real.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { jobslabEnv, jobslabFor, jobslabPrefix } from "./jobslab.ts";
 
 export type Lane = {
 	sid: string;
@@ -15,6 +16,7 @@ export type Lane = {
 	worktree: string;
 	agent?: string;
 	host?: string;
+	slab?: string;
 	launchedAt: number;
 };
 
@@ -121,19 +123,25 @@ export const spawnClaude = (o: {
 	logFile: string;
 	env: Record<string, string>;
 	allowedTools?: string;
+	agent?: string;
+	fleetDir?: string;
 }) => {
 	const sq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
+	// W177 jobslab: nice + ulimit ceilings + env caps per lane class, before
+	// the exec — a runaway lane dies at the rlimit instead of forkbombing
+	// the user machine. Zero-cap classes (llm) keep the bare recipe.
+	const js = jobslabFor(o.agent ?? "claude", o.fleetDir);
 	// sh -c exec + stdin detach: the intermediary survives parent exit (the
 	// dns-sd lesson); the log file is the board's live-tail surface.
 	return Bun.spawn(
 		[
 			"/bin/sh",
 			"-c",
-			`exec ${sq(o.bin)} -p ${sq(o.prompt)} --allowedTools '${o.allowedTools ?? DEFAULT_ALLOWED_TOOLS}' --permission-mode acceptEdits < /dev/null >> ${sq(o.logFile)} 2>&1`,
+			`${jobslabPrefix(js)}${sq(o.bin)} -p ${sq(o.prompt)} --allowedTools '${o.allowedTools ?? DEFAULT_ALLOWED_TOOLS}' --permission-mode acceptEdits < /dev/null >> ${sq(o.logFile)} 2>&1`,
 		],
 		{
 			cwd: o.cwd,
-			env: o.env,
+			env: jobslabEnv(js, o.env),
 			stdout: "ignore",
 			stderr: "ignore",
 			stdin: "ignore",

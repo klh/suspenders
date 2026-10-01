@@ -53,6 +53,7 @@ import {
 	worktreeLive,
 	type Lane,
 } from "./lib/lane.ts";
+import { laneClassOf } from "./lib/jobslab.ts";
 
 /** scope isolation: itemId is the root itself or its parent chain reaches
  *  the root — children, grandchildren, any depth. Reads only; every
@@ -350,6 +351,7 @@ const main = async (): Promise<void> => {
 			cwd: wt,
 			logFile: `${FLEET}/lane-${sid}.log`,
 			env,
+			fleetDir: FLEET,
 		});
 		proc.unref();
 		journal.dispatchedAt[item] = Date.now();
@@ -362,6 +364,7 @@ const main = async (): Promise<void> => {
 			worktree: wt,
 			agent: "claude",
 			host: hostname(),
+			slab: laneClassOf("claude"),
 			launchedAt: Date.now(),
 		});
 		console.log(

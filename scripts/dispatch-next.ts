@@ -27,6 +27,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { laneEnv, spawnClaude } from "./lib/lane.ts";
+import { jobslabFor, jobslabTag, laneClassOf } from "./lib/jobslab.ts";
 
 const argv = process.argv.slice(2);
 const val = (flag: string): string | undefined => {
@@ -51,6 +52,7 @@ type Lane = {
 	worktree: string;
 	agent?: string;
 	host?: string;
+	slab?: string;
 	launchedAt: number;
 };
 
@@ -312,8 +314,10 @@ const dispatchItem = (
 		cwd: wt,
 		logFile: laneLog,
 		env,
+		fleetDir: FLEET,
 	});
 	proc.unref();
+	const slab = laneClassOf("claude");
 	const entry: Lane = {
 		sid,
 		item,
@@ -322,10 +326,13 @@ const dispatchItem = (
 		worktree: wt,
 		agent: "claude",
 		host: hostname(),
+		slab,
 		launchedAt: Date.now(),
 	};
 	lanes.push(entry);
-	log(`DISPATCHED ${item} → ${sid} (pid ${proc.pid}, ${branch})`);
+	log(
+		`DISPATCHED ${item} → ${sid} (pid ${proc.pid}, ${branch}, slab ${jobslabTag(slab, jobslabFor(slab, FLEET))})`,
+	);
 	console.log(
 		`dispatched ${item} → ${sid} (pid ${proc.pid})${capsule ? " — resumed from capsule" : ""}`,
 	);

@@ -5,7 +5,13 @@
 // and a LIVE sh exec proving the limits + nice take effect in a spawned
 // lane process.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +21,7 @@ import {
 	jobslabTag,
 	laneClassOf,
 } from "../scripts/lib/jobslab.ts";
+import { spawnClaude } from "../scripts/lib/lane.ts";
 
 const fleet = (cfg?: string): string => {
 	const dir = mkdtempSync(join(tmpdir(), "jobslab-fleet-"));
@@ -143,4 +150,34 @@ describe("tag", () => {
 		const js = jobslabFor("claude");
 		expect(jobslabTag("claude", js)).toBe("claude:n10/p2048/c3600/f4194304");
 	});
+});
+
+describe("spawnClaude wiring", () => {
+	test("lane spawn applies slab preamble + env caps end to end", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "jobslab-wire-"));
+		const cfg = `{"claude": {"maxProc": 1500, "env": {"W177_PROOF": "yes"}}}`;
+		writeFileSync(join(dir, "jobslab.json"), cfg);
+		const fix = join(dir, "fixture.sh");
+		const script = `#!/bin/sh\necho "u=$(ulimit -Su) t=$(ulimit -t) proof=$W177_PROOF nice=$(ps -o nice= -p $$)"\n`;
+		writeFileSync(fix, script);
+		chmodSync(fix, 0o755);
+		const log = join(dir, "fixture.log");
+		spawnClaude({
+			bin: fix,
+			prompt: "hi",
+			cwd: dir,
+			logFile: log,
+			env: {},
+			fleetDir: dir,
+		}).unref();
+		await Bun.sleep(900);
+		const out = readFileSync(log, "utf8").trim();
+		const m = /u=(\d+) t=(\d+) proof=(\S+) nice=(\d+)/.exec(out);
+		expect(m).not.toBeNull();
+		expect(m?.[1]).toBe("1500"); // config override reached the rlimit
+		expect(m?.[2]).toBe("3600"); // default cpu cap intact
+		expect(m?.[3]).toBe("yes"); // env cap rode the lane env
+		expect(Number(m?.[4] ?? 0)).toBe(10); // niced
+		rmSync(dir, { recursive: true, force: true });
+	}, 20_000);
 });
