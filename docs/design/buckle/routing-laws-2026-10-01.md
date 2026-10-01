@@ -525,3 +525,41 @@ refused on sight. One selector at a time, deterministic.
 - **`must speed`-style data gaps** (§7.5) are expected on day one; the
   fix is operator data (tags blocks, good_at), and the audit's
   `candidates_top` + `why` make each gap visible within one occurrence.
+
+## Repo-scoped laws + BYO-LLM (owner model, 2026-10-01)
+
+Routing law sources gain a repo layer and a user-private plane, with BOTH
+configuration paths built in from day one — the `.llm` dotfile AND the
+GUI settings surfaces: same grammar, same parser, same validation (one
+source of truth for the grammar; two editors for the sources).
+
+- **Repo dotfile** (`.llm` in any working-dir root): `prefer=<glob>`,
+  `must=<glob>`, `tier=`, `fallback=` lines — same W96 grammar, one law
+  per line, comments allowed. Belt picks it up per-project (the
+  x-belt-hint header seam stays the transport; the dotfile is the
+  per-repo SOURCE). Invalid lines fail loudly with the line number.
+- **GUI paths built in**: /console/settings gains repo-scope editors for
+  the user plane (pick a repo, edit its laws with preview→apply, the
+  W147 flow); the hub's settings surface edits company-repo policies
+  which ride the W154 policy pull. GUI edits a repo's dotfile by writing
+  the same file (preview + diff, never silently) — dotfile and GUI are
+  views over the same store, not competing formats.
+- **BYO-LLM (user plane)**: a user's privately-purchased LLMs
+  (ElevenLabs, personal z.ai, anything with an endpoint) register in the
+  SPOKE's belt registry from the user's own config (keys in the user
+  secrets home, mode 600, never committed). They appear in the spoke
+  menu as user-plane entries alongside — never inside — the
+  hub-entitled menu.
+- **Resolution precedence**: repo dotfile > user plane policy > central
+  policy for company repos > install default. Company repos: central
+  `must` wins over user `prefer` (entitlements are ceilings, not
+  suggestions); private repos: the user's laws are sovereign, the hub is
+  not consulted unless opted in. `must` with no fit still errors honestly
+  at every layer (never silent substitution).
+
+IKEA-shaped example (owner's): IKEA repos route to the IKEA hub's OpenAI
+LLM via central policy; a private repo routes to personal glm-5.3 on
+z.ai via the user plane; a text-heavy repo sends its work to a private
+ElevenLabs endpoint via its dotfile. One grammar, three sources, fixed
+precedence, two first-class editing paths. Registered as W164 (blocked
+on W154).
