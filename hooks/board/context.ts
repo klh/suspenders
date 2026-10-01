@@ -2,9 +2,7 @@
 // Pieces moved verbatim from bin/fleet-board.ts; exports widened so
 // sibling modules and the route modules import them.
 
-import { json } from "./helpers.ts";
-import { board, events, inbox, payload } from "./data.ts";
-import { openGovernorDb } from "../lib/govdb.ts";
+import { openStore, type GovernorStore } from "../lib/govdb.ts";
 
 export const CLI = (f: string) =>
 	new URL(`../bin/${f}`, import.meta.url).pathname;
@@ -42,7 +40,10 @@ export interface WorkItemRow {
 	origin: string | null;
 }
 
-export const db = openGovernorDb();
+// W92.2: the board binds the control-plane store port — colocation-free
+// like the CLIs (W92.1): GOVERNOR_STORE_URL / ${REG}/store.url rides the
+// HTTP transport, default stays the in-process file (byte-identical local).
+export const db: GovernorStore = openStore();
 export const PORT =
 	Number(process.argv[process.argv.indexOf("--port") + 1] ?? 7799) || 7799;
 export const BIND = process.env.SUSPENDERS_BIND ?? "127.0.0.1";
