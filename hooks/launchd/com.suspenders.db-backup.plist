@@ -11,6 +11,6 @@
     <key>Minute</key><integer>0</integer>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>/tmp/governor-backup.log</string>
-  <key>StandardErrorPath</key><string>/tmp/governor-backup.log</string>
+  <key>StandardOutPath</key><string>__HOME__/.claude-insights/logs/governor-backup.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.claude-insights/logs/governor-backup.log</string>
 </dict></plist>

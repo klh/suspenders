@@ -160,14 +160,14 @@ async function cmdDownload(): Promise<void> {
 	console.log(
 		`📥 Downloading ${DOWNLOAD_MODELS.length} models (~61GB total)…\n`,
 	);
-	const procs = DOWNLOAD_MODELS.map((model) => {
+	const procs = DOWNLOAD_MODELS.map(({ model, revision }) => {
 		const name = model.split("/")[1];
-		console.log(`  → ${name}…`);
+		console.log(`  → ${name} @ ${revision.slice(0, 7)}…`);
 		return spawn(
 			MLX_PYTHON,
 			[
 				"-c",
-				`from huggingface_hub import snapshot_download; snapshot_download("${model}")`,
+				`from huggingface_hub import snapshot_download; snapshot_download("${model}", revision="${revision}")`,
 			],
 			{ stdio: "pipe" },
 		);

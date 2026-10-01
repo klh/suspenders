@@ -44,8 +44,8 @@
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>/tmp/fleet-loop.log</string>
+	<string>__HOME__/.claude-insights/logs/fleet-loop.log</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/fleet-loop.log</string>
+	<string>__HOME__/.claude-insights/logs/fleet-loop.log</string>
 </dict>
 </plist>

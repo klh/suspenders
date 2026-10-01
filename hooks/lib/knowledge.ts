@@ -509,12 +509,22 @@ export function loadRootDocs(root: string): SubstitutionDoc[] {
 
 // the row's own source file joins the corpus (a fact can derive from its
 // source_ref file, not only from docs/) — ref may carry a symbol suffix
+
+// W199.1 (W181 L19) — a source_ref must name a file INSIDE the docs root:
+// absolute paths and `..` segments resolve outside it (hash/existence oracle
+// on arbitrary files). Enforced at enqueue and before every root-relative read.
+export function isSafeSourceRef(ref: string): boolean {
+	if (!ref || ref.startsWith("/")) return false;
+	return !ref.split("/").includes("..");
+}
+
 export function docForRef(
 	root: string,
 	ref: string | null | undefined,
 ): SubstitutionDoc | null {
 	if (!ref) return null;
 	for (const cand of [ref, ref.split(/\s+/)[0]]) {
+		if (!isSafeSourceRef(cand)) continue;
 		try {
 			return { path: ref, text: readFileSync(join(root, cand), "utf8") };
 		} catch {} // next candidate
@@ -544,7 +554,9 @@ export function extractDocPaths(text: string): string[] {
 	const out: string[] = [];
 	for (const m of text.matchAll(DOC_PATH_RE)) {
 		const tok = m[0];
+		// W199.1 (W181 L19) — `..` segments traverse out of the root; skip
 		if (tok.startsWith("/") || tok.includes("//")) continue;
+		if (tok.split("/").includes("..")) continue;
 		const stem = tok.replace(/\.(?:md|mdx|ts|tsx|json|toml)$/, "");
 		if (stem.split("/").some((s) => VERSION_SEGMENT_RE.test(s))) continue;
 		if (!out.includes(tok)) out.push(tok);

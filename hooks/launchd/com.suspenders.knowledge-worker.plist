@@ -17,6 +17,6 @@
          test (pointer-row conversion / reject on ingest) -->
     <key>KNOWLEDGE_DOCS_ROOT</key><string>__REPO__</string>
   </dict>
-  <key>StandardOutPath</key><string>/tmp/suspenders-knowledge-worker.log</string>
-  <key>StandardErrorPath</key><string>/tmp/suspenders-knowledge-worker.log</string>
+  <key>StandardOutPath</key><string>__HOME__/.claude-insights/logs/suspenders-knowledge-worker.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.claude-insights/logs/suspenders-knowledge-worker.log</string>
 </dict></plist>

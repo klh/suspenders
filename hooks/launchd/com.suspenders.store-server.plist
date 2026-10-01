@@ -18,6 +18,6 @@
   <key>EnvironmentVariables</key><dict>
     <key>GOVERNOR_STORE_PORT</key><string>7794</string>
   </dict>
-  <key>StandardOutPath</key><string>/tmp/suspenders-store-server.log</string>
-  <key>StandardErrorPath</key><string>/tmp/suspenders-store-server.log</string>
+  <key>StandardOutPath</key><string>__HOME__/.claude-insights/logs/suspenders-store-server.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.claude-insights/logs/suspenders-store-server.log</string>
 </dict></plist>

@@ -106,7 +106,9 @@ const enc = (o: unknown): string =>
 
 const b64url = (b: Buffer): string => b.toString("base64url");
 
-const safeEq = (a: string, b: string): boolean => {
+// W199.1 (W181 L1) — exported for the other secret compares (store token,
+// approvals HMAC): constant-time equality, not `!==` (timing oracle).
+export const safeEq = (a: string, b: string): boolean => {
 	const ba = Buffer.from(a);
 	const bb = Buffer.from(b);
 	return ba.length === bb.length && timingSafeEqual(ba, bb);

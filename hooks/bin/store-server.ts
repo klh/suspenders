@@ -21,6 +21,7 @@ import {
 	type GovernorStore,
 } from "../lib/govdb.ts";
 import { handleAuthRoutes } from "../lib/auth-server.ts";
+import { safeEq } from "../lib/auth.ts";
 import { servicemon } from "../lib/servicemon.ts";
 
 const PORT =
@@ -91,7 +92,8 @@ const base = {
 			);
 		if (req.method !== "POST" || url.pathname !== "/rpc")
 			return new Response("not found", { status: 404 });
-		if (TOKEN && req.headers.get("x-governor-token") !== TOKEN)
+		// W199.1 (W181 L1) — timing-safe token compare, not `!==`
+		if (TOKEN && !safeEq(req.headers.get("x-governor-token") ?? "", TOKEN))
 			return new Response("forbidden", { status: 403 });
 		const body = (await req.json()) as {
 			mode?: string;

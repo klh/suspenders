@@ -44,7 +44,11 @@ writeFileSync(
 	"WRONG repo content — must never be referenced.",
 );
 
-const DB_PATH = join(WORK, "governor.db");
+// W199.1: mirror the post-W166 live layout — knowledge.db carries the
+// knowledge table; governor.db (the sibling) carries sessions and is ATTACHed
+// by the sweep (the live hub holds them side by side in ~/.cache/claude-governor).
+const DB_PATH = join(WORK, "knowledge.db");
+const GOV_PATH = join(WORK, "governor.db");
 const sha = (t: string): string => createHash("sha256").update(t).digest("hex");
 
 const KNOWLEDGE_DDL =
@@ -56,10 +60,13 @@ function freshDb(): Database {
 	if (openDb) openDb.close();
 	const db = new Database(DB_PATH, { create: true });
 	openDb = db;
+	db.run("ATTACH DATABASE ? AS gov", [GOV_PATH]);
 	db.exec("DROP TABLE IF EXISTS knowledge");
-	db.exec("DROP TABLE IF EXISTS sessions");
+	db.exec("DROP TABLE IF EXISTS gov.sessions");
 	db.exec(KNOWLEDGE_DDL);
-	db.exec(SESSIONS_DDL);
+	db.exec(
+		SESSIONS_DDL.replace("CREATE TABLE sessions", "CREATE TABLE gov.sessions"),
+	);
 	const now = Date.now();
 	const sess = db.query(
 		"INSERT INTO sessions (sid, project, started_at, hb) VALUES (?, ?, ?, ?)",

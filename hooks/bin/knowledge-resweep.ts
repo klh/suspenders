@@ -24,7 +24,7 @@
 //   --root-map override → origin_sid's session → contributors' sessions →
 //   domain-basename match.
 import { Database } from "bun:sqlite";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { realpathSync } from "node:fs";
 import { extractDocPaths, pointerFromText } from "../lib/knowledge.ts";
 
@@ -209,7 +209,9 @@ export function sweep(
 		)
 		.all() as ResweepRow[];
 	const sessions = db
-		.query("SELECT sid, project FROM sessions WHERE project IS NOT NULL")
+		// W199.1 (W181 L21) — sessions live in governor.db post-W166; read via
+		// the ATTACHed sibling (main() wires it) so --write lands on the live store
+		.query("SELECT sid, project FROM gov.sessions WHERE project IS NOT NULL")
 		.all() as { sid: string; project: string }[];
 	const idx = buildRootIndex(sessions, opts.rootMap ?? new Map());
 	const retired = rows.filter((r) => r.state === "retired");
@@ -251,7 +253,10 @@ export function sweep(
 	};
 }
 
-const DEFAULT_DB = `${process.env.HOME}/.cache/claude-governor/governor.db`;
+// W199.1 (W181 L21) — the W166 knowledge split moved knowledge rows to
+// knowledge.db (the store openKnowledgeDb() names); a governor.db default made
+// every --write sweep a silent no-op against the live store.
+const DEFAULT_DB = `${process.env.HOME}/.cache/claude-governor/knowledge.db`;
 
 function parseRootMap(spec: string | undefined): Map<string, string[]> {
 	const m = new Map<string, string[]>();
@@ -282,6 +287,10 @@ function main(): void {
 	const db = write
 		? new Database(dbPath)
 		: new Database(dbPath, { readonly: true });
+	// W199.1 (W181 L21) — governor.db rides BESIDE the knowledge db (post-W166
+	// layout: ~/.cache/claude-governor/{governor,knowledge}.db); the sweep reads
+	// sessions through it, writes stay on knowledge.db. Tests mirror the layout.
+	db.run("ATTACH DATABASE ? AS gov", [join(dirname(dbPath), "governor.db")]);
 	const rep = sweep(db, { write, rootMap });
 	const mode = write ? "WRITE" : "dry-run";
 	console.log(`knowledge-resweep (${mode}) — db: ${dbPath}`);

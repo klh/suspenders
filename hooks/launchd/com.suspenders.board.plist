@@ -12,6 +12,6 @@
   </dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>/tmp/fleet-board.log</string>
-  <key>StandardErrorPath</key><string>/tmp/fleet-board.log</string>
+  <key>StandardOutPath</key><string>__HOME__/.claude-insights/logs/fleet-board.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.claude-insights/logs/fleet-board.log</string>
 </dict></plist>

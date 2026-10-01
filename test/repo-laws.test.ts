@@ -3,13 +3,14 @@
 // files only (BUCKLE_SECRETS_HOME pinned to a temp home) — never the live
 // secrets home, never committed config.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	findLlmDotfile,
 	parseLlmDotfile,
 	parseLawExpr,
+	readLlmDotfile,
 	readUserKey,
 	readUserPlane,
 	reconcileRepoLaws,
@@ -243,5 +244,27 @@ describe("user key law (mode 600, by NAME)", () => {
 		mkdirSync(join(home, "keys"), { recursive: true });
 		writeFileSync(userKeyPath("tight", env), "sk-tight\n", { mode: 0o600 });
 		expect(readUserKey("tight", env)).toEqual({ ok: true, key: "sk-tight" });
+	});
+});
+
+describe("W181 L18 — .llm symlink + size caps", () => {
+	test("symlinked .llm is refused (discovery skips, read returns null)", () => {
+		const repo = mkdtempSync(join(tmpdir(), "w199-l18-"));
+		const outside = mkdtempSync(join(tmpdir(), "w199-l18-out-"));
+		const secret = join(outside, "secret.env");
+		writeFileSync(secret, "TOKEN=inside\n");
+		symlinkSync(secret, join(repo, ".llm"));
+		expect(findLlmDotfile(repo)).toBeNull();
+		expect(readLlmDotfile(join(repo, ".llm"))).toBeNull();
+	});
+
+	test("oversized .llm is refused; a normal dotfile reads fine", () => {
+		const repo = mkdtempSync(join(tmpdir(), "w199-l18-big-"));
+		writeFileSync(join(repo, ".llm"), "x".repeat(65 * 1024));
+		expect(readLlmDotfile(join(repo, ".llm"))).toBeNull();
+		const ok = mkdtempSync(join(tmpdir(), "w199-l18-ok-"));
+		writeFileSync(join(ok, ".llm"), "prefer=local\n");
+		expect(readLlmDotfile(join(ok, ".llm"))).toBe("prefer=local\n");
+		expect(findLlmDotfile(ok)).toBe(join(ok, ".llm"));
 	});
 });

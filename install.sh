@@ -39,8 +39,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "    models (BELT_TIER=minimal residents, resumable download):"
   BELT_TIER=minimal LOCAL_LLM_HOME="$KIT_DIR" bun -e '
 const { residentSet } = await import(process.env.LOCAL_LLM_HOME + "/registry.ts");
-for (const s of residentSet()) console.log("      " + s.model + " → :" + s.port);
-' 2>/dev/null || echo "      (bun import failed — kit registry unreadable)"
+for (const s of residentSet()) console.log("      " + s.model + " @ " + s.revision.slice(0, 7) + " → :" + s.port);
+' 2> /dev/null || echo "      (bun import failed — kit registry unreadable)"
   echo "    launchd: com.suspenders.local-llm (swarm.ts serve, KeepAlive)"
   exit 0
 fi
@@ -100,12 +100,12 @@ if [[ $NO_LLM -eq 0 ]]; then
     if [ -x "$MLX_PYTHON" ]; then
       MODELS="$(BELT_TIER=minimal LOCAL_LLM_HOME="$LLM_HOME" bun -e '
 const { residentSet } = await import(process.env.LOCAL_LLM_HOME + "/registry.ts");
-process.stdout.write(residentSet().map((s) => s.model).join("\n"));
+process.stdout.write(residentSet().map((s) => s.model + " " + s.revision).join("\n"));
 ')"
-      printf '%s\n' "$MODELS" | while IFS= read -r model; do
+      printf '%s\n' "$MODELS" | while IFS= read -r model revision; do
         [ -z "$model" ] && continue
-        echo "→ downloading $model (resumes if partial)"
-        "$MLX_PYTHON" -c 'from huggingface_hub import snapshot_download; import sys; snapshot_download(sys.argv[1])' "$model" \
+        echo "→ downloading $model @ $revision (resumes if partial)"
+        "$MLX_PYTHON" -c 'from huggingface_hub import snapshot_download; import sys; snapshot_download(sys.argv[1], revision=sys.argv[2])' "$model" "$revision" \
           || echo "  ✗ $model failed — re-run install to resume"
       done
     else
@@ -145,11 +145,40 @@ if [[ $WITH_LAUNCHD -eq 1 ]]; then
     echo "→ --with-launchd skipped (not macOS)"
   else
     BUN_BIN="$(command -v bun)"
+    # W199.1 (W181 L9) — launchd logs live under the secrets home, not /tmp
+    # (predictable /tmp paths = symlink pre-create clobber on multi-user hosts)
+    mkdir -p "$HOME/.claude-insights/logs"
     for f in "$REPO_DIR"/hooks/launchd/*.plist; do
       name="$(basename "$f")"
       out="$HOME/Library/LaunchAgents/$name"
-      sed -e "s|__BUN__|$BUN_BIN|" -e "s|__HOME__|$HOME|" -e "s|__PREFIX__|$PREFIX|" -e "s|__REPO__|$REPO_DIR|" \
-        -e "s|__BELT_URL__|${BELT_URL:-http://127.0.0.1:4100}|" -e "s|__BELT_TOKEN__|${BELT_TOKEN:-}|" "$f" >"$out"
+      # W199.1 (W181 L7) — templating via the XML-escaping serializer, never
+      # sed: `&`/`|` in BELT_TOKEN or repo paths corrupted the job (XML
+      # metachars broke plist structure); plutil -lint gates the load.
+      SUSPENDERS_TEMPLATE="$f" SUSPENDERS_OUT="$out" \
+      SUSPENDERS_BUN="$BUN_BIN" SUSPENDERS_HOME="$HOME" SUSPENDERS_PREFIX="$PREFIX" \
+      SUSPENDERS_REPO="$REPO_DIR" SUSPENDERS_BELT_URL="${BELT_URL:-http://127.0.0.1:4100}" \
+      SUSPENDERS_BELT_TOKEN="${BELT_TOKEN:-}" bun -e '
+const fs = require("node:fs");
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+const vals = {
+  __BUN__: process.env.SUSPENDERS_BUN,
+  __HOME__: process.env.SUSPENDERS_HOME,
+  __PREFIX__: process.env.SUSPENDERS_PREFIX,
+  __REPO__: process.env.SUSPENDERS_REPO,
+  __BELT_URL__: process.env.SUSPENDERS_BELT_URL,
+  __BELT_TOKEN__: process.env.SUSPENDERS_BELT_TOKEN,
+};
+let xml = fs.readFileSync(process.env.SUSPENDERS_TEMPLATE, "utf8");
+for (const [k, v] of Object.entries(vals)) {
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\n\r]/.test(v))
+    { console.error(`refusing control character in ${k}`); process.exit(2); }
+  xml = xml.split(k).join(esc(v));
+}
+if (/__[A-Z_]+__/.test(xml))
+  { console.error("unsubstituted placeholder remains — template drift"); process.exit(2); }
+fs.writeFileSync(process.env.SUSPENDERS_OUT, xml);
+'
+      plutil -lint "$out" > /dev/null || { rm -f "$out"; echo "✗ $name failed plutil -lint — not loaded"; exit 1; }
       launchctl bootout "gui/$(id -u)/${name%.plist}" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$out"
       echo "→ loaded $name"

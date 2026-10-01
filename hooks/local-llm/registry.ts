@@ -5,6 +5,8 @@
 export interface Specialist {
 	port: SPECIALIST_PORTS;
 	model: string; // exact mlx-community id — mlx_lm validates it
+	// W199.1 (W181 L11) — pinned HF commit SHA: downloads never float to latest
+	revision: string;
 	label: string; // display + routing role
 	role: "code" | "extract" | "reason" | "embed" | "rerank" | "general";
 	ram_gb: number;
@@ -52,6 +54,7 @@ export const SPECIALISTS: Specialist[] = [
 		// 2026-09-23: engine -> rapid (bench-suite A/B: 121.8 vs 91.9 tok/s).
 		port: 8901,
 		model: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+		revision: "6e302ea604ad9ab206367e2c501d1571023e7b6d",
 		label: "⚡ code",
 		role: "code",
 		ram_gb: 16,
@@ -66,6 +69,7 @@ export const SPECIALISTS: Specialist[] = [
 	{
 		port: 8902,
 		model: "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+		revision: "50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b",
 		label: "🏠 extract",
 		role: "extract",
 		ram_gb: 2,
@@ -81,6 +85,7 @@ export const SPECIALISTS: Specialist[] = [
 		// determinate-answer probes; newer gen, multimodal.
 		port: 8903,
 		model: "mlx-community/Qwen3.5-35B-A3B-4bit",
+		revision: "1e20fd8d42056f870933bf98ca6211024744f7ec",
 		label: "🧠 reason",
 		role: "reason",
 		ram_gb: 20,
@@ -101,6 +106,7 @@ export const SPECIALISTS: Specialist[] = [
 	{
 		port: 8906,
 		model: "mlx-community/Qwen3.5-9B-MLX-4bit",
+		revision: "938d8919941c6e7efd3c7150eff7fe9d12afa631",
 		label: "🌐 danish/general",
 		role: "general",
 		ram_gb: 5.6,
@@ -120,6 +126,7 @@ export const SPECIALISTS: Specialist[] = [
 		// by the 8904/8905 retirement (context-rag / mail-rag rerank consumers).
 		port: 8913,
 		model: "mlx-community/Qwen3-Reranker-0.6B-4bit",
+		revision: "5f324548f1d20c2b5a450f126fc6ef2fb1126524",
 		label: "🔀 rerank",
 		role: "rerank",
 		ram_gb: 1,
@@ -130,9 +137,19 @@ export const SPECIALISTS: Specialist[] = [
 	},
 ];
 
-export const DOWNLOAD_MODELS: string[] = [
-	...SPECIALISTS.map((s) => s.model),
-	"mlx-community/translategemma-4b-it-4bit",
+// W199.1 (W181 L11) — downloads name exact commits, never "latest at runtime";
+// SHAs resolved 2026-10-02 from huggingface.co/api/models/<id> — bump
+// deliberately, not silently.
+export interface PinnedModel {
+	model: string;
+	revision: string;
+}
+export const DOWNLOAD_MODELS: PinnedModel[] = [
+	...SPECIALISTS.map((s) => ({ model: s.model, revision: s.revision })),
+	{
+		model: "mlx-community/translategemma-4b-it-4bit",
+		revision: "5788ec08c047f3f2e17808101b8d9566ac930d58",
+	},
 ];
 
 export const byPort = (port: number): Specialist | undefined =>

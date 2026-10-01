@@ -671,6 +671,30 @@ describe("W112 extractDocPaths", () => {
 			hash: sha256Hex(DOC_TEXT),
 		});
 	});
+
+	test("pointerFromText: traversal tokens are never extracted", () => {
+		expect(extractDocPaths("see ../../../etc/passwd.md now")).toEqual([]);
+	});
+});
+
+// ─── W199.1 (W181 L19) — source_ref traversal reject ───
+
+import { docForRef, isSafeSourceRef } from "../hooks/lib/knowledge.ts";
+
+describe("W181 L19 isSafeSourceRef / docForRef", () => {
+	test("rejects absolute paths and .. segments", () => {
+		expect(isSafeSourceRef("docs/x.md")).toBe(true);
+		expect(isSafeSourceRef("/etc/passwd")).toBe(false);
+		expect(isSafeSourceRef("../secrets.env")).toBe(false);
+		expect(isSafeSourceRef("docs/../../etc/passwd")).toBe(false);
+		expect(isSafeSourceRef("")).toBe(false);
+	});
+
+	test("docForRef refuses refs that resolve outside the docs root", () => {
+		expect(docForRef(REPO, "/etc/passwd")).toBeNull();
+		expect(docForRef(REPO, "../../etc/passwd")).toBeNull();
+		expect(docForRef(REPO, "docs/pointer-source.md")).not.toBeNull();
+	});
 });
 
 describe("W112 pointer rows through the worker", () => {

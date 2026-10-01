@@ -14,9 +14,9 @@
 	<key>StartInterval</key>
 	<integer>240</integer>
 	<key>StandardOutPath</key>
-	<string>/tmp/llm-keepwarm.log</string>
+	<string>__HOME__/.claude-insights/logs/llm-keepwarm.log</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/llm-keepwarm.err</string>
+	<string>__HOME__/.claude-insights/logs/llm-keepwarm.err</string>
 	<key>Nice</key>
 	<integer>10</integer>
 </dict>

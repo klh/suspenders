@@ -12,7 +12,14 @@
 // LOUDLY with the line number — every error collected, never a silent guess.
 // Discovery is git-like: nearest .llm upward from the working dir, stopping
 // at the repo root (a parent repo's laws never leak into a nested repo).
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	statSync,
+} from "node:fs";
+import type { Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { atomicWrite } from "./board-config.ts";
@@ -186,6 +193,26 @@ export function serializeLaws(doc: DotfileLaws): string {
 // ─── discovery (git-like upward, repo-root bounded) ────────────────────────
 const DOTFILE = ".llm";
 const MAX_WALK = 64; // depth cap — never walk into a symlink farm
+// W199.1 (W181 L18) — .llm is grammar text; 64 KB is ample. Caps the hostile-
+// repo shapes: symlink → arbitrary-file read-out, giant file → memory hangup.
+const DOTFILE_MAX_BYTES = 64 * 1024;
+
+/** W199.1 (W181 L18) — read the .llm dotfile ONLY as a regular file: lstat
+ *  (never follow a symlink), non-regular refused, reads capped at 64 KB. */
+export function readLlmDotfile(path: string): string | null {
+	let st: Stats;
+	try {
+		st = lstatSync(path);
+	} catch {
+		return null;
+	}
+	if (!st.isFile() || st.size > DOTFILE_MAX_BYTES) return null;
+	try {
+		return readFileSync(path, "utf8");
+	} catch {
+		return null;
+	}
+}
 
 /** Nearest .llm upward from startDir; the walk stops at the repo root (the
  *  first dir containing .git) so a parent's laws never leak into a repo.
@@ -193,7 +220,11 @@ const MAX_WALK = 64; // depth cap — never walk into a symlink farm
 export function findLlmDotfile(startDir: string): string | null {
 	let dir = startDir;
 	for (let i = 0; i < MAX_WALK; i++) {
-		if (existsSync(join(dir, DOTFILE))) return join(dir, DOTFILE);
+		const candidate = join(dir, DOTFILE);
+		try {
+			// W199.1 (W181 L18) — regular files only: a symlinked .llm is skipped
+			if (lstatSync(candidate).isFile()) return candidate;
+		} catch {} // absent — keep walking
 		if (existsSync(join(dir, ".git"))) return null;
 		const parent = dirname(dir);
 		if (parent === dir) return null;
@@ -473,7 +504,8 @@ export function reconcileApply(
 	why: string;
 } {
 	const dotPath = join(root, DOTFILE);
-	const dotfile = existsSync(dotPath) ? readFileSync(dotPath, "utf8") : null;
+	// W199.1 (W181 L18) — capped, regular-file-only read (symlinks refused)
+	const dotfile = readLlmDotfile(dotPath);
 	const cfg = readRepoLawsConfig(env);
 	const existing = cfg.repos[root] ?? null;
 	const r = reconcileRepoLaws({

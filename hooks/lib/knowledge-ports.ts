@@ -27,6 +27,7 @@ import {
 	loadDocs,
 	loadRootDocs,
 	docForRef,
+	isSafeSourceRef,
 	substitutionCheck,
 } from "./knowledge.ts";
 import { openGovernorDb, openKnowledgeDb } from "./govdb.ts";
@@ -798,7 +799,11 @@ export async function enqueueKnowledge(job: {
 }): Promise<number> {
 	// W100: hash the declared source FILE here — the producer has repo access;
 	// the distiller never sees the filesystem.
-	const ref = normalizeSourceRef(job.sourceRef || job.codeOrigin || "");
+	const raw = normalizeSourceRef(job.sourceRef || job.codeOrigin || "");
+	// W199.1 (W181 L19) — reject absolute/`..` refs at enqueue: the pointer and
+	// its hash must stay inside the docs root (else stored absent — honest
+	// unverified, never an outside-root read).
+	const ref = isSafeSourceRef(raw) ? raw : null;
 	const root =
 		job.docsRoot ??
 		process.env.KNOWLEDGE_DOCS_ROOT ??
@@ -838,6 +843,8 @@ export function normalizeSourceRef(ref: string): string {
 // sha256 of the file a ref names under root — same utf8 bytes trustOf and
 // coord knowledge-verify hash. Unresolvable → null (honest unverified).
 function fileHash(root: string, ref: string): string | null {
+	// W199.1 (W181 L19) — defense in depth: never read outside the docs root
+	if (!isSafeSourceRef(ref)) return null;
 	try {
 		return createHash("sha256")
 			.update(readFileSync(join(root, ref), "utf8"))
