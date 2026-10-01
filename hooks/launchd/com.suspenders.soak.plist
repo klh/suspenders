@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DELIVERED NOT INSTALLED (W145) — activation is a coordinator step.
+  Activate: SUSPENDERS_PREFIX=~/.claude/hooks/suspenders ./install.sh --with-launchd
+  W179.3 nightly real-provider soak. Tiny caps by default (see hooks/lib/soak.ts):
+  SOAK_MAX_USD (0.25) / SOAK_MAX_TOKENS (40000) / SOAK_ITERS (48) /
+  SOAK_MAX_MINUTES (20). Belt auth resolves via resolveBelt() from HOME
+  (belt.json / belt-tokens.json) — set SOAK_URL/SOAK_TOKEN or SUSPENDERS_BELT_URL
+  at install time to override. A cap hit is a clean exit (the cap working).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.suspenders.soak</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__BUN__</string>
+		<string>__PREFIX__/bin/soak.ts</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key><integer>3</integer>
+		<key>Minute</key><integer>15</integer>
+	</dict>
+	<key>RunAtLoad</key><false/>
+	<key>Nice</key><integer>10</integer>
+	<key>ProcessType</key><string>Background</string>
+	<key>StandardOutPath</key><string>/tmp/soak.log</string>
+	<key>StandardErrorPath</key><string>/tmp/soak.log</string>
+</dict>
+</plist>

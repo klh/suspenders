@@ -48,6 +48,35 @@ async function alive(base: string): Promise<boolean> {
 	return false;
 }
 
+// W179.3: authed reachability — liveness is not usability. A DNS vhost can
+// answer /api/status while stripping Authorization (belt.local today), so
+// the discriminator must be an AUTHED call. Cheap version: POST /api/route
+// with a deliberately invalid bearer — belt's auth check runs before any
+// routing, so a healthy path answers 403 "token not recognized" in ms (no
+// model call, no spend), while an auth-stripping vhost answers 401
+// "missing". 403 = the bearer survives the path; anything else = reject.
+async function authOk(base: string): Promise<boolean> {
+	try {
+		const r = await fetch(`${base.replace(/\/$/, "")}/api/route`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				authorization: "Bearer soak-auth-probe-invalid",
+			},
+			body: JSON.stringify({
+				role: "general",
+				execute: true,
+				max_tokens: 1,
+				messages: [{ role: "user", content: "auth probe" }],
+			}),
+			signal: AbortSignal.timeout(1_500),
+		});
+		return r.status === 403;
+	} catch {
+		return false;
+	}
+}
+
 export async function resolveBelt(): Promise<BeltLocation | null> {
 	// 1. explicit env override
 	const envUrl = process.env.SUSPENDERS_BELT_URL;
@@ -74,7 +103,9 @@ export async function resolveBelt(): Promise<BeltLocation | null> {
 	// 4. mDNS/DNS-SD browse lands here too: probing the candidate host reuses
 	//    the remotes.ts discovery pattern (locate a listening endpoint)
 	for (const cand of ["http://belt.local", "http://belt.local:7791"]) {
-		if (await alive(cand)) return { url: cand, token, via: "dns belt.local" };
+		if ((await alive(cand)) && (await authOk(cand))) {
+			return { url: cand, token, via: "dns belt.local" };
+		}
 	}
 	// 5. last resort: same-box dev default
 	const def = "http://127.0.0.1:7791";
