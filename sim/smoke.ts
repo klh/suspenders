@@ -374,6 +374,32 @@ try {
 	report("citizenship/401-www-auth", "ERR", String(e));
 }
 
+// 401 body: problem+json with the stable buckle code (http-citizenship)
+try {
+	const res = await fetch(`${SIM_BUCKLE_URL}/v1/chat/completions`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: "{}",
+	});
+	const { text } = await readCapped(res);
+	const ct = res.headers.get("content-type") ?? "";
+	let code = "";
+	if (res.status === 401 && ct.startsWith("application/problem+json")) {
+		try {
+			code = String((JSON.parse(text) as { code?: unknown }).code ?? "");
+		} catch {}
+	}
+	report(
+		"citizenship/problem-json-buckle",
+		code === "buckle.auth_missing" ? "PASS" : "RED",
+		code === "buckle.auth_missing"
+			? `401 problem+json, code=${code}`
+			: `${String(res.status)} ct=${ct || "absent"} code=${code || "absent"} — awaiting W155.2`,
+	);
+} catch (e) {
+	report("citizenship/problem-json-buckle", "ERR", String(e));
+}
+
 // ETag + If-None-Match → 304 on GET-able resources (W155)
 try {
 	const r1 = await fetch(`${SIM_BUCKLE_URL}/status`);
