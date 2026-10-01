@@ -301,15 +301,17 @@ try {
 }
 
 // http-citizenship (docs/design/http-citizenship.md) — the smoke CHECKS the
-// standard and marks RED where a hub surface does not meet it yet (W155)
-for (const [name, base] of [
-	["citizenship/405-allow-buckle", SIM_BUCKLE_URL],
-	["citizenship/405-allow-board", SIM_BOARD_URL],
-	["citizenship/405-allow-store", SIM_STORE_URL],
-	["citizenship/405-allow-belt", SIM_BELT_URL],
+// standard and marks RED where a hub surface does not meet it yet (W155).
+// Path-aware: each surface probes its own known status path (belt's is
+// /api/status — W155.3).
+for (const [name, base, path] of [
+	["citizenship/405-allow-buckle", SIM_BUCKLE_URL, "/status"],
+	["citizenship/405-allow-board", SIM_BOARD_URL, "/status"],
+	["citizenship/405-allow-store", SIM_STORE_URL, "/status"],
+	["citizenship/405-allow-belt", SIM_BELT_URL, "/api/status"],
 ] as const) {
 	try {
-		const res = await fetch(`${base}/status`, { method: "DELETE" });
+		const res = await fetch(`${base}${path}`, { method: "DELETE" });
 		await readCapped(res);
 		if (res.status === 405) {
 			report(
@@ -321,7 +323,7 @@ for (const [name, base] of [
 			report(
 				name,
 				"RED",
-				`DELETE /status → ${String(res.status)} (want 405+Allow)`,
+				`DELETE ${path} → ${String(res.status)} (want 405+Allow)`,
 			);
 		}
 	} catch (e) {
@@ -329,21 +331,26 @@ for (const [name, base] of [
 	}
 }
 
-// OPTIONS → 204 + Allow
-try {
-	const res = await fetch(`${SIM_BUCKLE_URL}/status`, { method: "OPTIONS" });
-	await readCapped(res);
-	if (res.status === 204 && res.headers.get("allow") !== null) {
-		report("citizenship/options-204", "PASS", "204 + Allow");
-	} else {
-		report(
-			"citizenship/options-204",
-			"RED",
-			`OPTIONS /status → ${String(res.status)} (want 204 + Allow)`,
-		);
+// OPTIONS → 204 + Allow (each surface on its known status path)
+for (const [name, base, path] of [
+	["citizenship/options-204", SIM_BUCKLE_URL, "/status"],
+	["citizenship/options-204-belt", SIM_BELT_URL, "/api/status"],
+] as const) {
+	try {
+		const res = await fetch(`${base}${path}`, { method: "OPTIONS" });
+		await readCapped(res);
+		if (res.status === 204 && res.headers.get("allow") !== null) {
+			report(name, "PASS", "204 + Allow");
+		} else {
+			report(
+				name,
+				"RED",
+				`OPTIONS ${path} → ${String(res.status)} (want 204 + Allow)`,
+			);
+		}
+	} catch (e) {
+		report(name, "ERR", String(e));
 	}
-} catch (e) {
-	report("citizenship/options-204", "ERR", String(e));
 }
 
 // 401 → WWW-Authenticate (proxy-class surface on buckle without creds)
@@ -375,29 +382,30 @@ try {
 }
 
 // ETag + If-None-Match → 304 on GET-able resources (W155)
-try {
-	const r1 = await fetch(`${SIM_BUCKLE_URL}/status`);
-	await readCapped(r1);
-	const etag = r1.headers.get("etag");
-	if (r1.status === 200 && etag !== null) {
-		const r2 = await fetch(`${SIM_BUCKLE_URL}/status`, {
-			headers: { "if-none-match": etag },
-		});
-		await readCapped(r2);
-		report(
-			"citizenship/etag-304",
-			r2.status === 304 ? "PASS" : "RED",
-			`ETag ${etag}, If-None-Match → ${String(r2.status)} (want 304)`,
-		);
-	} else {
-		report(
-			"citizenship/etag-304",
-			"RED",
-			`no ETag on GET /status — awaiting W155`,
-		);
+for (const [name, base, path] of [
+	["citizenship/etag-304", SIM_BUCKLE_URL, "/status"],
+	["citizenship/etag-304-belt", SIM_BELT_URL, "/api/status"],
+] as const) {
+	try {
+		const r1 = await fetch(`${base}${path}`);
+		await readCapped(r1);
+		const etag = r1.headers.get("etag");
+		if (r1.status === 200 && etag !== null) {
+			const r2 = await fetch(`${base}${path}`, {
+				headers: { "if-none-match": etag },
+			});
+			await readCapped(r2);
+			report(
+				name,
+				r2.status === 304 ? "PASS" : "RED",
+				`ETag ${etag}, If-None-Match → ${String(r2.status)} (want 304)`,
+			);
+		} else {
+			report(name, "RED", `no ETag on GET ${path} — awaiting W155`);
+		}
+	} catch (e) {
+		report(name, "ERR", String(e));
 	}
-} catch (e) {
-	report("citizenship/etag-304", "ERR", String(e));
 }
 
 // Cache-Control: no-store on /auth/* + rate-limit trio on authenticated API
