@@ -1,0 +1,118 @@
+# W162 sim — federation hub trio in Docker Desktop on the sim host.
+# Spoke = the real host stack (nothing here runs models; spoke-local LLMs are
+# invisible to the hub — visibility-boundary law).
+#
+# Laws baked in:
+#   - signing keys + identity data NEVER leave hub volumes (owner law): the
+#     W149 HS256 key auto-generates at first boot inside hub-secrets; W156's
+#     RS256 keys + JWKS land in the same volume.
+#   - loopback-only binds preserved: buckle, store-server and fleet-board all
+#     bind 127.0.0.1 in-code — so they run with network_mode: host on
+#     dedicated 17xxx ports instead of defeating the bind.
+#   - belt hard-binds 0.0.0.0, so IT rides the bridge with a loopback-only
+#     publish (127.0.0.1:17004) to keep it off the LAN.
+#   - repos bind-mount READ-ONLY; containers write only into volumes.
+#   - no registry pushes: oven/bun base + bind mounts only.
+
+name: suspenders-hub-sim
+
+services:
+  buckle-hub:
+    image: oven/bun:1
+    container_name: sim-buckle-hub
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /src/buckle
+    command: bun run src/server.ts
+    environment:
+      HOME: /state/hub-home
+      BUCKLE_PORT: ${SIM_BUCKLE_PORT:-17001}
+      BUCKLE_DB: /state/buckle/buckle.db
+      BUCKLE_POLICY: /src/buckle/routing-policy.yaml
+      BUCKLE_UPSTREAMS: /src/buckle/upstreams.yaml
+      BUCKLE_SECRETS_HOME: /state/secrets
+      BUCKLE_AUTH: ${SIM_BUCKLE_AUTH:-on}
+    volumes:
+      - ${SIM_BUCKLE_REPO:-../../buckle}:/src/buckle:ro
+      - buckle-state:/state/buckle
+      - hub-secrets:/state/secrets
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - bun -e 'const r = await fetch("http://127.0.0.1:" + (process.env.BUCKLE_PORT ?? "17001") + "/status"); if (!r.ok) process.exit(1);'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  board-hub:
+    image: oven/bun:1
+    container_name: sim-board-hub
+    network_mode: host
+    restart: unless-stopped
+    command: bun /src/suspenders/hooks/bin/fleet-board.ts --port ${SIM_BOARD_PORT:-17002}
+    environment:
+      HOME: /state/hub-home
+      SUSPENDERS_BIND: "127.0.0.1"
+    volumes:
+      - ${SIM_SUSPENDERS_REPO:-..}:/src/suspenders:ro
+      - hub-state:/state/hub-home
+    depends_on:
+      store-hub:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - bun -e 'const r = await fetch("http://127.0.0.1:" + (process.env.SIM_BOARD_PORT ?? "17002") + "/status"); if (!r.ok) process.exit(1);'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  store-hub:
+    image: oven/bun:1
+    container_name: sim-store-hub
+    network_mode: host
+    restart: unless-stopped
+    command: bun /src/suspenders/hooks/bin/store-server.ts --port ${SIM_STORE_PORT:-17003}
+    environment:
+      HOME: /state/hub-home
+    volumes:
+      - ${SIM_SUSPENDERS_REPO:-..}:/src/suspenders:ro
+      - hub-state:/state/hub-home
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - bun -e 'const r = await fetch("http://127.0.0.1:" + (process.env.SIM_STORE_PORT ?? "17003") + "/status"); if (!r.ok) process.exit(1);'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  belt-hub:
+    image: oven/bun:1
+    container_name: sim-belt-hub
+    ports:
+      - "127.0.0.1:${SIM_BELT_PORT:-17004}:7791"
+    restart: unless-stopped
+    command: sh -c 'mkdir -p /state/belt-home/.claude/local-llm /state/belt-home/.claude-insights && exec bun /src/belt/bin/dashboard.ts'
+    environment:
+      HOME: /state/belt-home
+      BELT_PORT: "7791"
+    volumes:
+      - ${SIM_BELT_REPO:-../../belt}:/src/belt:ro
+      - belt-state:/state/belt-home
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - bun -e 'const r = await fetch("http://127.0.0.1:7791/api/status"); if (!r.ok) process.exit(1);'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  buckle-state:
+  hub-state:
+  hub-secrets:
+  belt-state:
