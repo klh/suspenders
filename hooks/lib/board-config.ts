@@ -310,6 +310,10 @@ export interface BoardSettings {
 	/** W201 executor policy: allow-list of lane executors. Absent = everything
 	 * allowed (no policy); claude/openai blocked by listing only what's in. */
 	enabled_executors?: string[];
+	/** W217: which model produces decision recommendations — user override of
+	 * the hub default; read by advise.ts + decide-eval.ts (URL + model id). */
+	recommendation_url?: string;
+	recommendation_model?: string;
 }
 
 export const boardSettingsPath = (home = process.env.HOME ?? ""): string =>
@@ -367,6 +371,22 @@ export function validateBoardSettings(v: unknown): BoardSettings {
 				"enabled_executors: must be an array of 1-20 non-empty strings (max 200 chars each)",
 			);
 		out.enabled_executors = ee as string[];
+	}
+	const ru = o.recommendation_url;
+	if (ru !== undefined && ru !== null && ru !== "") {
+		if (typeof ru !== "string" || ru.length > 400)
+			throw new ConfigError(
+				"recommendation_url: must be a string (max 400 chars)",
+			);
+		out.recommendation_url = ru;
+	}
+	const rm = o.recommendation_model;
+	if (rm !== undefined && rm !== null && rm !== "") {
+		if (typeof rm !== "string" || rm.length > 200)
+			throw new ConfigError(
+				"recommendation_model: must be a big-reasoner id (max 200 chars)",
+			);
+		out.recommendation_model = rm;
 	}
 	return out;
 }

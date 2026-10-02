@@ -13,6 +13,8 @@ const CAP = 10;
 // SUSPENDERS_LLM_MODEL wins; otherwise ask the endpoint what it serves
 let cachedModel: string | null = null;
 async function evalModel(): Promise<string> {
+	const want = readBoardSettings().settings.recommendation_model;
+	if (want) return want;
 	if (process.env.SUSPENDERS_LLM_MODEL) return process.env.SUSPENDERS_LLM_MODEL;
 	if (cachedModel) return cachedModel;
 	const base = llmBase();
@@ -30,6 +32,7 @@ async function evalModel(): Promise<string> {
 
 function llmBase(): string {
 	const u =
+		readBoardSettings().settings.recommendation_url ??
 		process.env.SUSPENDERS_LLM_URL ??
 		"http://127.0.0.1:8901/v1/chat/completions";
 	return u.replace(/\/chat\/completions$/, "");

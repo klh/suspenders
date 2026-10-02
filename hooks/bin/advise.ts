@@ -9,6 +9,7 @@
 //        SUSPENDERS_LLM_MODEL (default "local")
 //        SUSPENDERS_LLM_KEY   (optional bearer token)
 import { isDecisionKind, openGovernorDb } from "../lib/govdb.ts";
+import { readBoardSettings } from "../lib/board-config.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
 import {
 	chatRemote,
@@ -23,8 +24,13 @@ if (!id) {
 	console.error("usage: bun hooks/bin/advise.ts <event-id>");
 	process.exit(1);
 }
+// recommendation endpoint (W217 model map): user settings override env —
+// config-over-code; the hub-default tier is a later policy-manifest rule
+const SETTINGS = readBoardSettings().settings;
 const URL_ =
-	process.env.SUSPENDERS_LLM_URL ?? "http://127.0.0.1:8901/v1/chat/completions";
+	SETTINGS.recommendation_url ??
+	process.env.SUSPENDERS_LLM_URL ??
+	"http://127.0.0.1:8901/v1/chat/completions";
 // safe parse — a malformed SUSPENDERS_LLM_URL must not throw inside the catch
 // below: the failure path itself has to be throw-proof (same guard as the
 // board's LLM_ORIGIN)
@@ -37,7 +43,9 @@ const LLM_HOST = (() => {
 })();
 const KEY = process.env.SUSPENDERS_LLM_KEY;
 const MODEL =
-	process.env.SUSPENDERS_LLM_MODEL ?? (await defaultModel(URL_, KEY));
+	SETTINGS.recommendation_model ??
+	process.env.SUSPENDERS_LLM_MODEL ??
+	(await defaultModel(URL_, KEY));
 const now = Date.now();
 
 // no model configured → ask the endpoint what it serves (first entry); works
@@ -76,12 +84,10 @@ if (!ev || !isDecisionKind(ev.kind)) {
 	process.exit(1);
 }
 
-// already advised? (idempotent — board retries shouldn't re-bill the LLM)
+// W217 (owner: ad nauseum): a stale or empty advice fact must never wedge
+// the card — every advise run overwrites the single-slot fact with a fresh
+// take. The evaluate route keeps the CAPPED HISTORY; this fact stays "latest".
 const fk = `advice.${id}`;
-if (db.query("SELECT 1 AS x FROM facts WHERE key = ?").get(fk)) {
-	console.log(`#${id} already advised (${fk})`);
-	process.exit(0);
-}
 
 let question = "";
 try {
