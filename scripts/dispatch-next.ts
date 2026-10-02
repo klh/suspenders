@@ -26,6 +26,8 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
+import { openGovernorDb, projectIdentity } from "../hooks/lib/govdb.ts";
+import { runGovernor, STATE_PATH } from "./lib/governor.ts";
 import { laneEnv, spawnClaude } from "./lib/lane.ts";
 
 const argv = process.argv.slice(2);
@@ -350,6 +352,21 @@ const main = async (): Promise<void> => {
 	// with a live claude/codex cwd is alive no matter what the pid says —
 	// daemonized `claude -p` re-parents away from the recorded pid within minutes.
 	const lanes = loadLanes();
+	// W187: the cap decision reads the GRAPH — claims with alive pids — not
+	// the registry, which prunes/re-parents and undercounted (the W187
+	// symptom: dispatch said 2/8 while the graph showed 13 ◐). The governor
+	// steps that cap: down on pressure (lane deaths / 429 burst), up on
+	// clean 10-min windows. Dry-run observes and steps nothing.
+	const gdb = openGovernorDb();
+	const governor = runGovernor({
+		db: gdb,
+		project: projectIdentity(),
+		baseTarget: TARGET,
+		lanes,
+		statePath: STATE_PATH,
+		readOnly: DRY,
+	});
+	const cap = governor.cap;
 	const live = lanes.filter((l) => alive(l.pid) || worktreeLive(l.worktree));
 	// resume candidates: dead dispatched lanes whose item is still CLAIMED by
 	// them (state on the graph) — re-dispatch with the same sid so the capsule
@@ -364,7 +381,7 @@ const main = async (): Promise<void> => {
 	}
 	const dispatched: string[] = [];
 	for (const [, resume] of resumeOf) {
-		if (live.length + dispatched.length >= TARGET) break;
+		if (governor.live + dispatched.length >= cap) break;
 		const out = dispatchItem(resume.item, live, resume);
 		if (out) dispatched.push(out);
 	}
@@ -379,7 +396,7 @@ const main = async (): Promise<void> => {
 			!isOwnerGated(r.title),
 	);
 	for (const r of ready) {
-		if (live.length + dispatched.length >= TARGET) break;
+		if (governor.live + dispatched.length >= cap) break;
 		const out = dispatchItem(r.id, live);
 		if (out) dispatched.push(out);
 	}
@@ -423,8 +440,11 @@ const main = async (): Promise<void> => {
 	}
 	// dry-run is read-only end to end — never rewrite the lane registry
 	if (!DRY) saveLanes(lanes);
+	const stepped = governor.step
+		? ` — governor ${governor.step.dir} ${governor.step.from}→${governor.step.to} (${governor.step.reason})`
+		: "";
 	console.log(
-		`lanes live: ${live.length}/${TARGET}${dispatched.length ? ` — dispatched: ${dispatched.join(", ")}` : " — pool drained or lanes busy"}`,
+		`lanes live: ${governor.live}/${cap}${stepped}${dispatched.length ? ` — dispatched: ${dispatched.join(", ")}` : " — pool drained or lanes busy"}`,
 	);
 	if (ready.length === 0 && resumeOf.size === 0)
 		console.log(

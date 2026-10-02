@@ -116,6 +116,8 @@ describe("dry-run dispatch", () => {
 		expect(out.out).toContain("CAPSULE PROTOCOL");
 		expect(out.out).toContain("LANDING CHAIN");
 		expect(out.out).toContain(`lane "autow${id.slice(1)}"`);
+		// W187: the cap decision reads the governor (graph claims × alive pids)
+		expect(out.out).toContain("lanes live: 0/1");
 		// no side effects: no claim, no worktree, no lane registry
 		const show = tool("work.ts", "show", id);
 		expect(show.out).toContain("READY");

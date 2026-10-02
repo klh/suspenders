@@ -87,6 +87,63 @@ export const saveLanes = (lanes: Lane[], fleet: string): void => {
 	writeFileSync(lanesFileFor(fleet), JSON.stringify(lanes, null, 2));
 };
 
+// W187 lane view (#3854): one row per sid from EITHER source — the registry
+// undercounts (prunes/re-parents, the W187 symptom) and overcounts (stale
+// rows); the graph knows what is claimed but not what is running. The union
+// exposes both ghosts: claims with no live pid (zombies) and registry lanes
+// with no claims (winding down).
+export type LaneRow = {
+	sid: string;
+	item: string; // graph claims joined "," — registry item if it has no claims
+	ageS: number | null; // registry launchedAt age; null = unregistered
+	pid: number | null; // registry pid; null = zombie claim
+	isAlive: boolean | null; // kill -0 on the pid; null = no pid to probe
+	claimLive: boolean; // holds a current coord claim — alive without a pid
+};
+
+export const laneRows = (
+	lanes: Lane[],
+	claims: { owner_sid: string; id: string }[],
+	nowMs: number,
+	aliveFn: (pid: number) => boolean = alive,
+	coordLive: Set<string> = new Set(),
+): LaneRow[] => {
+	const itemsBySid = new Map<string, string[]>();
+	for (const c of claims)
+		itemsBySid.set(c.owner_sid, [...(itemsBySid.get(c.owner_sid) ?? []), c.id]);
+	const bySid = new Map<string, LaneRow>();
+	for (const [sid, items] of itemsBySid)
+		bySid.set(sid, {
+			sid,
+			item: items.join(","),
+			ageS: null,
+			pid: null,
+			isAlive: null,
+			claimLive: coordLive.has(sid),
+		});
+	for (const l of lanes) {
+		const row: LaneRow = bySid.get(l.sid) ?? {
+			sid: l.sid,
+			item: l.item,
+			ageS: null,
+			pid: null,
+			isAlive: null,
+			claimLive: false,
+		};
+		if (itemsBySid.has(l.sid))
+			row.item = (itemsBySid.get(l.sid) ?? []).join(",");
+		row.ageS =
+			l.launchedAt > 0
+				? Math.max(0, Math.round((nowMs - l.launchedAt) / 1000))
+				: null;
+		row.pid = l.pid > 0 ? l.pid : null;
+		if (coordLive.has(l.sid)) row.claimLive = true;
+		row.isAlive = row.pid === null ? null : aliveFn(row.pid);
+		bySid.set(l.sid, row);
+	}
+	return [...bySid.values()].sort((a, b) => a.sid.localeCompare(b.sid));
+};
+
 // env: belt routing rides into the lane (the launchd plist carries
 // ANTHROPIC_BASE_URL/AUTH_TOKEN); model overrides must NOT — a GLM-routed
 // shell hung a lane at model init (W57), so the whole family is scrubbed.

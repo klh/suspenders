@@ -19,8 +19,10 @@ import {
 	resolve,
 } from "./shared.ts";
 import type { Database } from "./shared.ts";
+import { dirname } from "node:path";
+import { laneRows, loadLanes } from "../../scripts/lib/lane.ts";
 
-export async function cmdBootstrap(rest: string[]): Promise<void> {
+export async function cmdBootstrap(_rest: string[]): Promise<void> {
 	// the session-start ritual: identity + owned work + ready pool + inbox,
 	// so no session reconstructs operational state from Markdown
 	const as =
@@ -130,6 +132,41 @@ export async function cmdBootstrap(rest: string[]): Promise<void> {
 }
 
 export async function cmdFleet(rest: string[]): Promise<void> {
+	if (rest.includes("--lanes")) {
+		// W187 (#3854): the first-class lane view — sid, item, age_s, pid,
+		// alive — so nobody ever bun -e's lanes.json again
+		// (lesson.control-plane-first).
+		const claims = db
+			.query(
+				"SELECT owner_sid, id FROM work_items WHERE project = ? AND state = 'CLAIMED' AND owner_sid IS NOT NULL ORDER BY id",
+			)
+			.all(projectIdentity()) as { owner_sid: string; id: string }[];
+		const coordLive = new Set(
+			(
+				db.query("SELECT DISTINCT sid FROM claims").all() as { sid: string }[]
+			).map((r) => r.sid),
+		);
+		const fleetDir = `${dirname(projectIdentity())}/.fleet`;
+		const rows = laneRows(
+			loadLanes(fleetDir),
+			claims,
+			Date.now(),
+			undefined,
+			coordLive,
+		);
+		const liveN = rows.filter((r) => r.isAlive === true || r.claimLive).length;
+		console.log(
+			`LANES ${rows.length} (live ${liveN}) — graph claims × liveness (pid / coord claim)`,
+		);
+		console.log(
+			`  ${dim("SID")}          ${dim("ITEM")}           ${dim("AGE_S")}     ${dim("PID")}       ${dim("ALIVE")}`,
+		);
+		for (const r of rows)
+			console.log(
+				`  ${r.sid.padEnd(12)} ${r.item.padEnd(15)} ${String(r.ageS ?? "—").padEnd(7)} ${String(r.pid ?? "—").padEnd(9)} ${r.isAlive === true ? green("yes") : r.claimLive ? cyan("claim") : r.isAlive === false ? red("no") : dim("—")}`,
+			);
+		return;
+	}
 	// one-line fleet projection for a terminal pane (the Desktop panel
 	// projection lives in subagent-statusline.ts; the CLI inline rows are
 	// harness-owned and ignore it)
