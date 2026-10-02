@@ -16,6 +16,8 @@
 // An oidc-type entry (discovery URL, audience, roles claim) validates an
 // external IdP token the way buckle's validate-jwt does — discovery → JWKS →
 // RS256, audience, roles — with zero Entra calls in tests (fetchImpl inject).
+// W191: audience is MANDATORY on oidc entries (fail closed), and the
+// requiredScope gate binds oidc tokens via their scp/scope claim.
 //
 // KEY MATERIAL LAW: the signing key lives at ~/.claude/local-llm/buckle-jwt.key
 // (mode 600, the sanctioned secrets home), referenced from config by
@@ -166,9 +168,10 @@ export interface OidcIssuerConfig {
 	type: "oidc";
 	iss: string; // must equal the token's iss claim — v2-first allowlist
 	discovery: string; // openid-configuration URL
-	audience?: string; // the app's Application/Client ID
+	audience: string; // W191: mandatory — the app's Application/Client ID
 	roles_claim?: string; // default "roles"
 	roles?: string[]; // required roles (any-of); absent = none required
+	scopes_claim?: string; // default "scp" then "scope" (W191 scope gate)
 }
 
 export type IssuerConfig = LocalIssuerConfig | OidcIssuerConfig;
@@ -189,6 +192,19 @@ export function loadAuthConfig(): AuthConfig {
 	const cfg = JSON.parse(readFileSync(f, "utf8")) as AuthConfig;
 	if (!Array.isArray(cfg.issuers))
 		throw new Error(`auth config ${f}: issuers array missing`);
+	// W191: per-entry validation — auth config is load-bearing, fail closed
+	for (const i of cfg.issuers) {
+		if (!i.iss) throw new Error(`auth config ${f}: every issuer needs iss`);
+		if (i.type !== "oidc") continue;
+		if (!i.discovery)
+			throw new Error(
+				`auth config ${f}: oidc issuer ${i.iss} missing discovery`,
+			);
+		if (!i.audience)
+			throw new Error(
+				`auth config ${f}: oidc issuer ${i.iss} must set audience`,
+			);
+	}
 	return cfg;
 }
 // ─── issue / rotate / revoke over the v8 api_keys rows ───────────────────────
@@ -480,7 +496,8 @@ export interface RequestLike {
 }
 
 export interface VerifyOpts {
-	// string = any-of, array = all-of
+	// string = any-of, array = all-of; enforced for BOTH issuer types —
+	// local tokens via claims.scopes, oidc tokens via scp/scope (W191)
 	requiredScope?: string | string[];
 	// local-issuer tokens check the api_keys denylist through this store;
 	// external IdP tokens skip it (signature+allowlist+roles is the trust)
@@ -691,6 +708,21 @@ function checkRoles(
 		);
 	return null;
 }
+
+// W191: oidc tokens present granted scopes in `scp` (array) or `scope`
+// (space-separated string); scopes_claim names a custom claim instead.
+// Roles stay a separate, issuer-level gate — they never satisfy a scope.
+function scopesOf(
+	entry: OidcIssuerConfig,
+	payload: Record<string, unknown>,
+): string[] {
+	const raw = entry.scopes_claim
+		? payload[entry.scopes_claim]
+		: (payload.scp ?? payload.scope);
+	if (Array.isArray(raw)) return raw.map(String);
+	if (typeof raw === "string") return raw.split(" ").filter(Boolean);
+	return [];
+}
 export async function verifyJwt(
 	req: RequestLike,
 	requiredScope?: string | string[],
@@ -714,6 +746,15 @@ export async function verifyJwt(
 			"issuer_not_allowed",
 			`issuer not in allowlist: ${String(j.claims.iss ?? "?")}`,
 		);
+	// W191: audience is mandatory on oidc entries — a config missing it is
+	// broken; fail closed before any JWKS fetch. JSON-loaded config bypasses
+	// the type, so the runtime guard stays even though the type requires it.
+	if (entry.type === "oidc" && !entry.audience)
+		return fail(
+			401,
+			"auth_config_invalid",
+			`oidc issuer ${entry.iss} must configure audience`,
+		);
 	const sigFail = await checkSignature(entry, j, opts.fetchImpl ?? fetch);
 	if (sigFail) return sigFail;
 	const expFail = checkExpiry(j.claims, nowS);
@@ -728,10 +769,13 @@ export async function verifyJwt(
 		const r = checkRoles(entry, j.payload);
 		if (r) return r;
 	}
-	if (
-		entry.type === "local" &&
-		!scopeCheck(j.claims.scopes ?? [], requiredScope)
-	)
+	// W191: the requiredScope gate binds BOTH issuer types now — local tokens
+	// present scopes in claims.scopes, oidc tokens in the scp/scope claim.
+	const granted =
+		entry.type === "local"
+			? (j.claims.scopes ?? [])
+			: scopesOf(entry, j.payload);
+	if (!scopeCheck(granted, requiredScope))
 		return fail(
 			403,
 			"insufficient_scope",

@@ -8,7 +8,7 @@
 // module load (the govdb-router-tables.test.ts pattern), and the auth libs
 // resolve the secrets home from homedir() per call.
 import { describe, test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { generateKeyPairSync, createSign } from "node:crypto";
 import { join } from "node:path";
 
@@ -471,6 +471,125 @@ describe("Entra RP RS256 negative paths", () => {
 		});
 		expect(r.ok).toBe(false);
 		if (!r.ok) expect(r.code).toBe("missing_role");
+	});
+
+	test("oidc scp array satisfies requiredScope (write→read inheritance)", async () => {
+		const now = Math.floor(Date.now() / 1000);
+		const tok = signRs256(
+			{
+				iss: ISS_ENTRA,
+				aud: "api://buckle",
+				sub: "u",
+				roles: ["buckle.admin"],
+				scp: ["write_route"],
+				exp: now + 600,
+			},
+			RSA.privateKey,
+			"kid-1",
+		);
+		const r = await auth.verifyJwt(req(tok), "read_route", {
+			config: CFG,
+			fetchImpl: ENTRA_FETCH,
+		});
+		expect(r.ok).toBe(true);
+	});
+
+	test("oidc scope string claim satisfies requiredScope", async () => {
+		const now = Math.floor(Date.now() / 1000);
+		const tok = signRs256(
+			{
+				iss: ISS_ENTRA,
+				aud: "api://buckle",
+				sub: "u",
+				roles: ["buckle.admin"],
+				scope: "read_x write_x",
+				exp: now + 600,
+			},
+			RSA.privateKey,
+			"kid-1",
+		);
+		const r = await auth.verifyJwt(req(tok), "write_x", {
+			config: CFG,
+			fetchImpl: ENTRA_FETCH,
+		});
+		expect(r.ok).toBe(true);
+	});
+
+	test("oidc token without the required scope → 403 insufficient_scope", async () => {
+		const now = Math.floor(Date.now() / 1000);
+		const tok = signRs256(
+			{
+				iss: ISS_ENTRA,
+				aud: "api://buckle",
+				sub: "u",
+				roles: ["buckle.admin"],
+				scp: ["read_usage"],
+				exp: now + 600,
+			},
+			RSA.privateKey,
+			"kid-1",
+		);
+		const r = await auth.verifyJwt(req(tok), "write_usage", {
+			config: CFG,
+			fetchImpl: ENTRA_FETCH,
+		});
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.code).toBe("insufficient_scope");
+	});
+
+	test("oidc entry without audience → 401 auth_config_invalid", async () => {
+		const now = Math.floor(Date.now() / 1000);
+		const tok = signRs256(
+			{
+				iss: ISS_ENTRA,
+				aud: "api://buckle",
+				sub: "u",
+				exp: now + 600,
+			},
+			RSA.privateKey,
+			"kid-1",
+		);
+		const noAud = {
+			issuers: [
+				{
+					type: "oidc",
+					iss: ISS_ENTRA,
+					discovery: "https://example.invalid/.well-known/openid-configuration",
+				},
+			],
+		} as unknown as auth.AuthConfig;
+		const r = await auth.verifyJwt(req(tok), undefined, {
+			config: noAud,
+			fetchImpl: ENTRA_FETCH,
+		});
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.code).toBe("auth_config_invalid");
+	});
+});
+describe("W191 loadAuthConfig validation", () => {
+	test("oidc entry without audience → throws (fail closed)", () => {
+		const f = join(HOME, "auth-config-no-audience.json");
+		writeFileSync(
+			f,
+			JSON.stringify({
+				issuers: [
+					{
+						type: "oidc",
+						iss: ISS_ENTRA,
+						discovery:
+							"https://example.invalid/.well-known/openid-configuration",
+					},
+				],
+			}),
+		);
+		const prev = process.env.BUCKLE_AUTH_CONFIG;
+		process.env.BUCKLE_AUTH_CONFIG = f;
+		try {
+			expect(() => auth.loadAuthConfig()).toThrow();
+		} finally {
+			if (prev === undefined) delete process.env.BUCKLE_AUTH_CONFIG;
+			else process.env.BUCKLE_AUTH_CONFIG = prev;
+		}
 	});
 });
 // ─── live server: /auth routes + auth-client refresher + CLI ─────────────────
