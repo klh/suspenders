@@ -121,15 +121,28 @@ export const spawnClaude = (o: {
 	logFile: string;
 	env: Record<string, string>;
 	allowedTools?: string;
+	/** Executor-specific arg tail (W223 dual-harness): copilot takes
+	 * ["--allow-all-tools"], claude keeps the allowedTools recipe. */
+	cliArgs?: string[];
 }) => {
 	const sq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
+	const tail = (
+		o.cliArgs ?? [
+			"--allowedTools",
+			o.allowedTools ?? DEFAULT_ALLOWED_TOOLS,
+			"--permission-mode",
+			"acceptEdits",
+		]
+	)
+		.map((a) => (a.includes(" ") ? sq(a) : a))
+		.join(" ");
 	// sh -c exec + stdin detach: the intermediary survives parent exit (the
 	// dns-sd lesson); the log file is the board's live-tail surface.
 	return Bun.spawn(
 		[
 			"/bin/sh",
 			"-c",
-			`exec ${sq(o.bin)} -p ${sq(o.prompt)} --allowedTools '${o.allowedTools ?? DEFAULT_ALLOWED_TOOLS}' --permission-mode acceptEdits < /dev/null >> ${sq(o.logFile)} 2>&1`,
+			`exec ${sq(o.bin)} -p ${sq(o.prompt)} ${tail} < /dev/null >> ${sq(o.logFile)} 2>&1`,
 		],
 		{
 			cwd: o.cwd,

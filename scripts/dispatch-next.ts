@@ -44,22 +44,63 @@ const FLEET = `${REPO}/.fleet`;
 const LANES_JSON = `${FLEET}/lanes.json`;
 const LOOP_LOG = `${FLEET}/loop.log`;
 
-/** Executor pick (W201 policy + W176 prefer-drives): the first entry of the
- * user's ordered default_executors that survives the enabled_executors
- * allow-list wins; "claude" is only reachable if the list includes it. Any
- * non-claude executor rides the same claude CLI with ANTHROPIC_MODEL pinned
- * — belt routes by model id, so a model name IS an executor here. */
-const execPick = (): { agent: string; model: string | null } => {
+/** Repo dotfile (.prefer, dotfiles-win law): `must=executor` / `prefer=`
+ * / `hub=Label` — a repo pins its executor and hub label. Policy still
+ * gates: an executor the W201 allow-list denies SKIPs with a loud note. */
+const preferOf = (): { executor: string | null; hub: string | null } => {
+	try {
+		const kv = new Map<string, string>();
+		for (const line of readFileSync(`${REPO}/.prefer`, "utf8").split("\n")) {
+			const i = line.indexOf("=");
+			if (i <= 0) continue;
+			kv.set(line.slice(0, i).trim(), line.slice(i + 1).trim());
+		}
+		return {
+			executor: kv.get("must") ?? kv.get("prefer") ?? null,
+			hub: kv.get("hub") ?? null,
+		};
+	} catch {
+		return { executor: null, hub: null };
+	}
+};
+
+/** Executor pick (W201 policy + W176 prefer-drives + dotfiles-win): a repo
+ * .prefer MUST beats everything except the policy allow-list; otherwise the
+ * first default_executors entry that survives wins. Non-claude/codex
+ * executors ride the claude CLI with ANTHROPIC_MODEL pinned — belt routes
+ * by model id, so a model name IS an executor. copilot rides its own CLI.
+ * The hub label is PRESENTATION (e.g. [IKEA]) — no federation behind it. */
+const execPick = (): { agent: string; model: string | null; bin: string } => {
+	const prefer = preferOf();
 	const s = readBoardSettings().settings;
 	const enabled = s.enabled_executors;
+	const allowed = (name: string): boolean => !enabled || enabled.includes(name);
+	const label = (executor: string): string =>
+		prefer.hub ? `[${prefer.hub.toUpperCase()}] ${executor}` : executor;
+	if (prefer.executor) {
+		if (!allowed(prefer.executor))
+			console.log(
+				`NOTE — .prefer must=${prefer.executor} not in enabled_executors; falling back to policy pick`,
+			);
+		else {
+			const e = prefer.executor;
+			return {
+				agent: label(e),
+				model: e === "claude" || e === "copilot" ? null : e,
+				bin: e === "copilot" ? "copilot" : "claude",
+			};
+		}
+	}
 	const order = [...(s.default_executors ?? []), "claude"];
 	for (const name of order) {
-		if (enabled && !enabled.includes(name)) continue;
-		return name === "claude"
-			? { agent: "claude", model: null }
-			: { agent: name, model: name };
+		if (!allowed(name)) continue;
+		return {
+			agent: label(name),
+			model: name === "claude" ? null : name,
+			bin: name === "copilot" ? "copilot" : "claude",
+		};
 	}
-	return { agent: "claude", model: null }; // no policy + empty prefs = legacy
+	return { agent: "claude", model: null, bin: "claude" };
 };
 
 type Lane = {
@@ -186,9 +227,12 @@ export const composeBrief = (o: {
 	repo?: string;
 	aids?: string[];
 	extra?: string[];
+	agent?: string;
 }): string => {
 	const parts = [
 		`You are lane "${o.sid}", Work Graph item ${o.item}, repo ${o.repo ?? REPO}. English only.`,
+		``,
+		`IDENTITY: executor ${o.agent ?? "claude"}. [HUB] prefixes are labels — traffic routes through that hub's gateway.`,
 		``,
 		`MISSION (from work show):`,
 		o.showOut.replace(ANSI, "").trim(),
@@ -304,6 +348,7 @@ const dispatchItem = (
 		sh(["git", "-C", wt, "branch", "--show-current"]) || `suspenders/${item}`;
 	const show = run([process.execPath, `${BIN}/work.ts`, "show", item]);
 	const capsule = capsuleGet(sid);
+	const pick = execPick();
 	const brief = composeBrief({
 		item,
 		showOut: show.out,
@@ -311,21 +356,21 @@ const dispatchItem = (
 		branch,
 		worktree: wt,
 		capsule,
+		agent: pick.agent,
 	});
 	const briefFile = `${FLEET}/brief-${sid}.md`;
 	mkdirSync(FLEET, { recursive: true });
 	writeFileSync(briefFile, brief);
-	// env + spawn recipe shared with supervise.ts via scripts/lib/lane.ts
+	// env + spawn recipe shared with supervise.ts per executor (W223):
+	// copilot takes --allow-all-tools, claude keeps the allowedTools recipe
 	const env = laneEnv({ ...process.env }, NO_BELT);
 	env.SUSPENDERS_SID = sid;
-	const pick = execPick();
 	// model pin only makes sense behind belt (belt routes by model id); with
-	// --no-belt the claude CLI talks to its own API and a foreign model id
-	// would just 404
+	// --no-belt the claude CLI speaks its own API and a foreign id just 404s
 	if (pick.model && !NO_BELT) env.ANTHROPIC_MODEL = pick.model;
-	const bin = Bun.which("claude");
+	const bin = Bun.which(pick.bin);
 	if (!bin) {
-		console.log("SKIP — claude binary not found on PATH");
+		console.log(`SKIP — executor binary not found on PATH: ${pick.bin}`);
 		return null;
 	}
 	const prompt = `Read ${briefFile} and execute it fully.`;
@@ -336,6 +381,7 @@ const dispatchItem = (
 		cwd: wt,
 		logFile: laneLog,
 		env,
+		cliArgs: pick.bin === "copilot" ? ["--allow-all-tools"] : undefined,
 	});
 	proc.unref();
 	const entry: Lane = {
