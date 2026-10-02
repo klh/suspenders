@@ -8,9 +8,11 @@
 //   auth.ts list [--actor A]
 //   auth.ts whoami --url URL --token-file BASE
 //
-// TTLs: 0 (or omitted flag semantics documented in --help) = forever
-// (expires_at NULL). Default with NO ttl flags: access 30d, refresh NULL
-// (rotate-until-infinity) — the user convention. The owner pair passes 0.
+// TTLs: explicit 0 = forever (expires_at NULL, the owner escape). Default
+// with NO ttl flags: access 30d (the W194 bounded default — the lib also
+// clamps any TTL at 365d, and rotation inherits the family's remaining
+// refresh budget), refresh NULL (rotate-until-infinity) — the user
+// convention.
 // Raw tokens NEVER print to stdout unless --show is passed; --save BASE
 // writes ~/.claude/local-llm/buckle-<BASE>.token + .refresh (mode 600) and
 // output shows fingerprints only.

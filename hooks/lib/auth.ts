@@ -154,6 +154,14 @@ export function scopeCheck(
 	if (typeof required === "string") return scopeSatisfies(granted, required);
 	return required.every((r) => scopeSatisfies(granted, r));
 }
+
+// W194 mint rule: the escalation residue — every requested scope the grant
+// does NOT satisfy (admin satisfies everything; write_X implies read_X).
+// Empty array = the request is a subset of the caller's power.
+export const scopeEscalations = (
+	requested: string[],
+	granted: string[],
+): string[] => requested.filter((s) => !scopeSatisfies(granted, s));
 // ─── issuer config (Entra RP mode — config-only, no code dependency) ─────────
 
 export interface LocalIssuerConfig {
@@ -169,6 +177,12 @@ export interface OidcIssuerConfig {
 	audience?: string; // the app's Application/Client ID
 	roles_claim?: string; // default "roles"
 	roles?: string[]; // required roles (any-of); absent = none required
+	// W194 JWKS pinning — pin trust in config instead of re-discovering it:
+	//   jwks     embedded key set → fully offline verification, zero fetches
+	//   jwks_uri pinned JWKS endpoint → skips the discovery hop entirely
+	// discovery stays the unpinned fallback when neither is set.
+	jwks_uri?: string;
+	jwks?: { kid?: string; kty?: string; [n: string]: unknown }[];
 }
 
 export type IssuerConfig = LocalIssuerConfig | OidcIssuerConfig;
@@ -268,6 +282,23 @@ export interface IssuedPair {
 
 const KEY_INS =
 	"INSERT INTO api_keys (key_id, key_hash, jti, name, team, actor, token_type, parent_key_id, scopes, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+// ─── W194 bounded TTLs ───────────────────────────────────────────────────────
+// A missing TTL never means forever-by-omission: access defaults to 30d (the
+// documented user convention — and the old rotation path silently minted
+// forever access by omitting TTLs). Explicit 0 stays forever (the owner
+// escape); negative stays passthrough (already-expired-at-mint); >MAX clamps.
+export const DEFAULT_ACCESS_TTL_MS = 30 * 86400_000;
+export const MAX_TOKEN_TTL_MS = 365 * 86400_000;
+
+export function boundTtl(
+	ms: number | null | undefined,
+	fallback: number | null,
+): number | null {
+	if (ms == null) return fallback;
+	if (ms === 0) return null;
+	if (ms < 0) return ms;
+	return Math.min(ms, MAX_TOKEN_TTL_MS);
+}
 function buildClaims(p: IssueParams, nowS: number, jti: string): JwtClaims {
 	return {
 		sub: p.actor,
@@ -297,19 +328,19 @@ function mintRows(
 	parentKeyId?: string,
 ): void {
 	const common = [metaJson(p.name, p.token_class), p.team ?? null, p.actor];
-	store
-		.query(KEY_INS)
-		.run(
-			jtiA,
-			sha256hex(access),
-			jtiA,
-			...common,
-			"access",
-			null,
-			JSON.stringify(p.scopes),
-			expiresAt,
-			now,
-		);
+	store.query(KEY_INS).run(
+		jtiA,
+		sha256hex(access),
+		jtiA,
+		...common,
+		"access",
+		// W194: parented on its own pair's refresh — the family is one tree,
+		// so a refresh-theft cascade reaches the live access token too
+		jtiR,
+		JSON.stringify(p.scopes),
+		expiresAt,
+		now,
+	);
 	store
 		.query(KEY_INS)
 		.run(
@@ -351,11 +382,19 @@ function mintPair(
 	const nowS = Math.floor(now / 1000);
 	const jtiA = randomUUID();
 	const jtiR = randomUUID();
-	const claims = buildClaims(p, nowS, jtiA);
+	// W194: bound the TTLs at the single mint chokepoint — omission now means
+	// the bounded default, never forever (the old rotation path minted
+	// forever access by passing no TTLs at all)
+	const b: IssueParams = {
+		...p,
+		accessTtlMs: boundTtl(p.accessTtlMs, DEFAULT_ACCESS_TTL_MS),
+		refreshTtlMs: boundTtl(p.refreshTtlMs, null),
+	};
+	const claims = buildClaims(b, nowS, jtiA);
 	const access = signJwt(claims, loadSigningKey());
 	const refresh = randomBytes(32).toString("base64url");
 	const expiresAt = claims.exp ? claims.exp * 1000 : null;
-	const refreshExpiresAt = p.refreshTtlMs ? now + p.refreshTtlMs : null;
+	const refreshExpiresAt = b.refreshTtlMs ? now + b.refreshTtlMs : null;
 	mintRows(
 		store,
 		p,
@@ -384,7 +423,12 @@ export function issueTokens(store: GovernorStore, p: IssueParams): IssuedPair {
 }
 export type RotateResult =
 	| ({ ok: true } & IssuedPair)
-	| { ok: false; code: string; error: string };
+	| {
+			ok: false;
+			code: string;
+			error: string;
+			cascade_revoked?: number;
+	  };
 
 // single-use rotation: hash-lookup the refresh token, reject
 // revoked/rotated/expired (each a 'rejected' auth_event), then mint the next
@@ -415,11 +459,36 @@ export function rotateRefresh(
 		if (row.token_type !== "refresh")
 			return reject("not_a_refresh_token", "token is not a refresh token");
 		if (row.revoked_at) return reject("token_revoked", "refresh token revoked");
-		if (row.rotated_at)
-			return reject(
-				"refresh_already_used",
-				"refresh already rotated (single-use)",
+		if (row.rotated_at) {
+			// W194 theft cascade: reuse of a single-use refresh is the theft
+			// signal — revoke the reused row and every descendant (the live
+			// pair the first use minted), so the stolen chain dies at once.
+			const casc = store
+				.query(
+					`WITH RECURSIVE fam(id) AS (
+					SELECT key_id FROM api_keys WHERE key_id = ?
+					UNION ALL
+					SELECT k.key_id FROM api_keys k JOIN fam f ON k.parent_key_id = f.id
+				)
+				UPDATE api_keys SET revoked_at = ?
+				WHERE key_id IN (SELECT id FROM fam) AND revoked_at IS NULL`,
+				)
+				.run(row.key_id, now).changes;
+			authEvent(
+				store,
+				now,
+				row.actor ?? null,
+				"theft_cascade",
+				row.jti,
+				`${via}: ${casc} row(s)`,
 			);
+			return {
+				ok: false,
+				code: "refresh_already_used",
+				error: "refresh already rotated (single-use)",
+				cascade_revoked: casc,
+			};
+		}
 		if (row.expires_at && row.expires_at < now)
 			return reject("refresh_expired", "refresh token expired");
 		const meta = metaOf(row);
@@ -429,6 +498,10 @@ export function rotateRefresh(
 			token_class: meta.class,
 			scopes: JSON.parse(row.scopes ?? "[]") as string[],
 			name: meta.label,
+			// W194: rotated access takes the bounded default (30d — previously a
+			// silent forever); the rotated refresh inherits the family's
+			// REMAINING budget, so bounded grants stay bounded across rotation
+			refreshTtlMs: row.expires_at ? Math.max(row.expires_at - now, 1) : null,
 			via,
 		};
 		return { ok: true, ...mintPair(store, p, now, via, row.key_id) };
@@ -503,6 +576,9 @@ export interface AuthFailure {
 	error: string;
 	// true → caller sends x-auth-renew: /auth/refresh
 	renew?: boolean;
+	// W194 theft cascade: set on a refresh_already_used rejection — the
+	// number of family rows revoked with the reused token
+	cascade?: number;
 }
 
 export type AuthResult = AuthSuccess | AuthFailure;
@@ -545,17 +621,34 @@ async function verifyOidcSignature(
 	sig: Buffer,
 	fetchImpl: typeof fetch,
 ): Promise<boolean> {
-	const c = jwksCache.get(entry.iss);
+	// W194 pinning: embedded keys are the trust anchor — zero fetches, fully
+	// offline; cache keys split pinned-URI entries from discovery entries so
+	// a config flip is honored immediately, not after the TTL lapses
+	const ck = entry.jwks_uri ? `pin:${entry.iss}:${entry.jwks_uri}` : entry.iss;
+	// embedded keys: the config IS the trust anchor — zero fetches, offline
+	if (entry.jwks?.length)
+		return entry.jwks.some((k) => tryKey(k, data, kid, sig));
+	const c = jwksCache.get(ck);
 	if (c && Date.now() - c.at < JWKS_TTL_MS)
 		return c.keys.some((k) => tryKey(k, data, kid, sig));
-	const disc = (await (await fetchImpl(entry.discovery)).json()) as {
-		jwks_uri?: string;
-	};
-	if (!disc.jwks_uri) return false;
-	const jwks = (await (await fetchImpl(disc.jwks_uri)).json()) as JwksEntry;
-	const keys = jwks.keys ?? [];
-	jwksCache.set(entry.iss, { at: Date.now(), keys });
-	return keys.some((k) => tryKey(k, data, kid, sig));
+	try {
+		// pinned jwks_uri skips discovery (the pin IS the anchor); an
+		// unreachable anchor fails closed — no trust established
+		const uri =
+			entry.jwks_uri ??
+			(
+				(await (await fetchImpl(entry.discovery)).json()) as {
+					jwks_uri?: string;
+				}
+			).jwks_uri;
+		if (!uri) return false;
+		const jwks = (await (await fetchImpl(uri)).json()) as JwksEntry;
+		const keys = jwks.keys ?? [];
+		jwksCache.set(ck, { at: Date.now(), keys });
+		return keys.some((k) => tryKey(k, data, kid, sig));
+	} catch {
+		return false;
+	}
 }
 const fail = (
 	status: 401 | 403,

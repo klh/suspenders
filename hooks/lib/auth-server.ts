@@ -11,7 +11,14 @@
 // refresh_endpoint, and one agent_next_steps sentence; 401s from an expired
 // access token carry the x-auth-renew header.
 import type { AuthFailure } from "./auth.ts";
-import { issueTokens, rotateRefresh, revoke, verifyJwt } from "./auth.ts";
+import {
+	DEFAULT_ACCESS_TTL_MS,
+	issueTokens,
+	rotateRefresh,
+	revoke,
+	scopeEscalations,
+	verifyJwt,
+} from "./auth.ts";
 import type { GovernorStore } from "./govdb.ts";
 
 export interface AuthServerOpts {
@@ -26,6 +33,7 @@ export function authFailureResponse(r: AuthFailure): Response {
 			error: r.code,
 			error_description: r.error,
 			...(r.renew ? { refresh_endpoint: "/auth/refresh" } : {}),
+			...(r.cascade != null ? { theft_cascade: r.cascade } : {}),
 			agent_next_steps: r.renew
 				? "POST {refresh_endpoint} with {refresh_token} to mint a new pair, then retry once."
 				: "Obtain a token with the required scope (POST /auth/token from an admin) and retry.",
@@ -79,6 +87,17 @@ async function handleToken(
 				.split(",")
 				.map((s) => s.trim())
 				.filter(Boolean);
+	// W194 mint rule: the requested scopes must be a subset of the caller's
+	// own grant — a write_auth holder cannot mint buckle:admin (or any scope
+	// it does not itself hold) for another actor
+	const esc = scopeEscalations(scopes, auth.claims.scopes ?? []);
+	if (esc.length)
+		return authFailureResponse({
+			ok: false,
+			status: 403,
+			code: "scope_escalation",
+			error: `requested scopes exceed the caller's grant: ${esc.join(", ")}`,
+		});
 	const ttl = (v: number | null | undefined): number | null =>
 		v == null || v <= 0 ? null : v * 1000;
 	const pair = issueTokens(store, {
@@ -87,7 +106,12 @@ async function handleToken(
 		token_class: body.token_class as "app-role" | "delegated",
 		scopes,
 		name: body.name ?? null,
-		accessTtlMs: ttl(body.access_ttl_seconds),
+		// W194: an omitted access TTL takes the bounded default (30d), never
+		// forever-by-omission; explicit 0 stays the forever escape
+		accessTtlMs:
+			body.access_ttl_seconds == null
+				? DEFAULT_ACCESS_TTL_MS
+				: ttl(body.access_ttl_seconds),
 		refreshTtlMs: ttl(body.refresh_ttl_seconds),
 		via: "api:/auth/token",
 	});
@@ -116,7 +140,14 @@ async function handleRefresh(
 	if (!body.refresh_token) return bad("refresh_token is required in the body");
 	const r = rotateRefresh(store, body.refresh_token, "api:/auth/refresh");
 	if (!r.ok)
-		return authFailureResponse({ status: 401, code: r.code, error: r.error });
+		return authFailureResponse({
+			status: 401,
+			code: r.code,
+			error: r.error,
+			...(r.cascade_revoked !== undefined
+				? { cascade: r.cascade_revoked }
+				: {}),
+		});
 	return Response.json({
 		access_token: r.access,
 		token_type: "Bearer",
