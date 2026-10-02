@@ -269,4 +269,5 @@ button.lanesend:disabled { opacity:.45; cursor:default; }
 </style></head><body>
 ${topbar("suspenders")}
 <script>${TOPBAR_JS}</script>
-${BODY}${CORE}${RENDERS}${DECISIONS}${HISTORY}${TASKS}${DIFF}${SHIP}${TAIL}${ACTIVITY}${SETUP}${TABS}${ORCH}${BOOT}`);
+${BODY}${CORE}${RENDERS}${DECISIONS}${HISTORY}${TASKS}${DIFF}${SHIP}${TAIL}${ACTIVITY}${SETUP}${TABS}${ORCH}${BOOT}</script>
+<script type="module" src="/vendor/klh-components.js"></script>`);

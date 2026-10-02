@@ -4,7 +4,8 @@
 import { db } from "./context.ts";
 import { beltRegistry, rowLocality } from "./belt.ts";
 import { json } from "./helpers.ts";
-import { syncDecisions, label, projectList, unblockedBy } from "./lanes.ts";
+import { syncDecisions, projectList, unblockedBy } from "./lanes.ts";
+import { decisionEvals } from "./decide-eval.ts";
 import {
 	taskShape,
 	tasks,
@@ -12,26 +13,44 @@ import {
 	taskDecisions,
 	activity,
 	setupChecks,
-	board,
-	events,
 	decisionsPayload,
-	llm,
 	payload,
 	payloadFor,
 } from "./data.ts";
 
 export async function handleData(
-	req: Request,
+	_req: Request,
 	url: URL,
 ): Promise<Response | null> {
 	if (url.pathname === "/api/data") {
 		const sid = url.searchParams.get("session") ?? "";
 		return json(sid ? payloadFor(sid) : payload());
 	}
+	{
+		// W217: the vendored Lit component bundle (offline — built artifact,
+		// never CDN). Exact path only; anything else falls through.
+		const vf = "/vendor/klh-components.js";
+		if (url.pathname === vf) {
+			const f = `${import.meta.dir}/../board-html/vendor/klh-components.js`;
+			return new Response(Bun.file(f), {
+				headers: { "content-type": "text/javascript; charset=utf-8" },
+			});
+		}
+	}
 	if (url.pathname === "/api/decisions")
 		// full decision records + counts — the decisions feed the UI polls.
 		// Default OPEN-only; &history=1 folds in the resolved rows
 		return json(decisionsPayload(url.searchParams.get("history") === "1"));
+	{
+		// W217: evaluation history for one decision (the card's hydrate feed)
+		const m = url.pathname.match(/^\/api\/decisions\/(\d+)\/evals$/);
+		if (m)
+			return json({
+				ok: true,
+				event_id: Number(m[1]),
+				evals: decisionEvals(Number(m[1])),
+			});
+	}
 	if (url.pathname === "/api/tasks") {
 		// v3 tasks feed (docs/board-api.md) — every live work item, newest
 		// activity first, with open fork counts and human owner labels

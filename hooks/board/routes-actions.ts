@@ -12,7 +12,7 @@ import {
 	readShipJson,
 	sessionAlive,
 } from "./lanes.ts";
-import { sessions, board, events, llm } from "./data.ts";
+import { decisionEvals, evaluateDecision } from "./decide-eval.ts";
 import { isDecisionKind } from "../lib/govdb.ts";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
@@ -120,6 +120,33 @@ export async function handleActions(
 		return Number(done.changes) === 0
 			? json({ ok: false, error: "stale" }, 409)
 			: json({ ok: true, output: out.slice(0, 400), to });
+	}
+	if (
+		req.method === "POST" &&
+		/^\/api\/decisions\/\d+\/evaluate$/.test(url.pathname)
+	) {
+		// W217: re-evaluate an OPEN decision — each call runs a fresh LLM
+		// evaluation (local/z.ai via the :4000 shim) and appends a stamped
+		// entry; the owner clicks as often as they like (ad nauseum, no cap).
+		const guard = writeGuard(req, url);
+		if (guard) return guard;
+		const id = Number(
+			url.pathname.match(/\/api\/decisions\/(\d+)\/evaluate/)?.[1],
+		);
+		if (!id) return json({ ok: false, error: "bad id" }, 400);
+		try {
+			const entry = await evaluateDecision(id);
+			return json({
+				ok: true,
+				latest: entry,
+				count: decisionEvals(id).length,
+			});
+		} catch (e) {
+			return json(
+				{ ok: false, error: e instanceof Error ? e.message : String(e) },
+				502,
+			);
+		}
 	}
 	if (req.method === "POST" && url.pathname === "/api/ack") {
 		// board dismiss = CANCELLED (the UI confirms before calling).
