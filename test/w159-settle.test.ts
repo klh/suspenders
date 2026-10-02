@@ -154,6 +154,26 @@ test("settle is idempotent and never re-flips settled rows", async () => {
 	expect(flags("knowledge_queue", "s-idem")).toEqual([1]);
 });
 
+test("W197 identity verification: a sid with no sessions row never settles", async () => {
+	const db = freshDb();
+	queueRow("s-ghost-id");
+	queueRow("s-ghost-id");
+	knowledgeRow("s-ghost-id");
+	const r = await settleSessionWith(db, "s-ghost-id");
+	expect(r.settled).toBe(false);
+	expect(r.queueMarked).toBe(0);
+	expect(r.rowsBackfilled).toBe(0);
+	// rows stay NULL (unsettled) — the real owner's settle stamps them later
+	expect(flags("knowledge_queue", "s-ghost-id")).toEqual([-1, -1]);
+	expect(flags("knowledge", "s-ghost-id")).toEqual([-1]);
+	// once the identity exists, the settle proceeds and stamps
+	seedSession("s-ghost-id", "hub");
+	const r2 = await settleSessionWith(db, "s-ghost-id");
+	expect(r2.settled).toBe(true);
+	expect(flags("knowledge_queue", "s-ghost-id")).toEqual([1, 1]);
+	expect(flags("knowledge", "s-ghost-id")).toEqual([1]);
+});
+
 test("emits a knowledge.settled event for observability", async () => {
 	const db = freshDb();
 	seedSession("s-evt", "hub");

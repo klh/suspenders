@@ -3,7 +3,13 @@
 // tests call repoLawRoutes directly against a temp repo + temp secrets
 // home — never the live config).
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -135,6 +141,30 @@ describe("repo laws console flow", () => {
 		// the concurrent write survived — apply did not clobber it
 		expect(readFileSync(join(REPO, ".llm"), "utf8")).toBe("prefer=cloud\n");
 	});
+
+	test("W197: apply re-validates the repo root — not-a-repo → 404, no write", async () => {
+		const fake = join(TMP, "not-a-repo");
+		const values = Buffer.from(
+			JSON.stringify({ repo: fake, text: "prefer=local\n" }),
+		).toString("base64");
+		const res = await repoLawsApply(
+			new URLSearchParams({ feature: "repos", values, mtime: "0" }),
+			DEPS,
+		);
+		expect(res.status).toBe(404);
+		expect(existsSync(join(fake, ".llm"))).toBe(false);
+	});
+
+	test("W197: preview validates the repo root too", async () => {
+		const res = await repoLawsPreview(
+			new URLSearchParams({
+				repo: join(TMP, "not-a-repo"),
+				laws: "prefer=local\n",
+			}),
+			DEPS,
+		);
+		expect(res.status).toBe(404);
+	});
 });
 
 describe("byo user-plane console flow", () => {
@@ -191,11 +221,43 @@ describe("byo user-plane console flow", () => {
 				values: Buffer.from(JSON.stringify({ entries: leak })).toString(
 					"base64",
 				),
-				mtime: "0",
+				mtime: String(
+					statSync(join(ENV.BUCKLE_SECRETS_HOME, "local-models.json")).mtimeMs,
+				),
 			}),
 			DEPS,
 		);
 		expect(await resL.text()).toContain("key MATERIAL");
+	});
+
+	test("byo mtime guard: registry changed since preview → apply refused", async () => {
+		const good = [
+			{ name: "mtime-guard", base: "https://m.example.net/v1", model: "m1" },
+		];
+		const pv = await (
+			await byoPreview(
+				new URLSearchParams({ entries: JSON.stringify(good) }),
+				DEPS,
+			)
+		).text();
+		const form = /name="values" value="([^"]+)"/.exec(pv);
+		const mtime = /name="mtime" value="([^"]+)"/.exec(pv);
+		expect(form).not.toBeNull();
+		// the registry drifts out-of-band after the preview
+		writeFileSync(join(ENV.BUCKLE_SECRETS_HOME, "local-models.json"), "[]\n");
+		const res = await byoApply(
+			new URLSearchParams({
+				feature: "byo",
+				values: form ? form[1] : "",
+				mtime: mtime ? mtime[1] : "0",
+			}),
+			DEPS,
+		);
+		expect(await res.text()).toContain("changed since the preview");
+		// the out-of-band write survived — apply did not clobber it
+		expect(
+			readFileSync(join(ENV.BUCKLE_SECRETS_HOME, "local-models.json"), "utf8"),
+		).toBe("[]\n");
 	});
 });
 

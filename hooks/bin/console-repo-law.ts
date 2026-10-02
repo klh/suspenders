@@ -155,6 +155,13 @@ export interface DotfileValues {
 	text: string;
 }
 
+/** W197: a repo root is real only with a .git — preview AND apply
+ *  re-validate (the form `repo` field and the base64 `values` payload are
+ *  client-supplied; the edit route's GET check alone is not enough). */
+function isRepoRoot(root: string): boolean {
+	return root.length > 0 && existsSync(join(root, ".git"));
+}
+
 /** POST /console/settings/repos/preview — validate hard (the parser is the
  *  law), diff, and render the confirm page. Invalid input never reaches the
  *  confirm step. */
@@ -164,6 +171,8 @@ export function repoLawsPreview(
 ): Response {
 	const env = deps.env ?? process.env;
 	const root = form.get("repo") ?? "";
+	if (!isRepoRoot(root))
+		return new Response("not a repo root", { status: 404 });
 	const st = editorState(root, env);
 	const text = form.get("laws") ?? "";
 	const p = parseLlmDotfile(text);
@@ -223,6 +232,10 @@ export function repoLawsApply(
 		root = v.repo;
 		text = v.text;
 	}
+	// W197: apply re-validates the repo root — the values payload rides the
+	// client, never trusted from the preview step.
+	if (!isRepoRoot(root))
+		return new Response("not a repo root", { status: 404 });
 	const st = editorState(root, env);
 	if (existsSync(st.target) && String(statSync(st.target).mtimeMs) !== mtime)
 		return new Response(
@@ -390,6 +403,24 @@ export function byoApply(form: URLSearchParams, deps: RepoLawDeps): Response {
 		values = {};
 	}
 	const entries = Array.isArray(values.entries) ? values.entries : [];
+	// W197: the BYO mtime guard — the confirm form carries the mtime the
+	// preview saw; a drifted registry means a stale preview. Bounce to the
+	// editor showing the CURRENT registry (same law as the dotfile flow).
+	const p = userPlanePath(env);
+	const now = existsSync(p) ? String(statSync(p).mtimeMs) : "0";
+	if (now !== (form.get("mtime") ?? "0"))
+		return new Response(
+			byoPage(
+				{
+					entries: readUserPlane(env).entries,
+					errors: [
+						"user plane changed since the preview — review the fresh diff and confirm again",
+					],
+				},
+				deps.me?.(),
+			),
+			{ headers: { "content-type": "text/html; charset=utf-8" } },
+		);
 	return byoApplyWrite(entries, env, deps);
 }
 

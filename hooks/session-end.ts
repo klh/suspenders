@@ -22,6 +22,10 @@ if (input.session_id) {
 			console.error(
 				`[settle] ${r.sid.slice(0, 8)} domain=${r.domain} queue=${r.queueMarked} rows=${r.rowsBackfilled}`,
 			);
+		else if (!r.settled)
+			console.error(
+				`[settle] refused: ${r.sid.slice(0, 8)} has no sessions row (identity unverified) — nothing settled`,
+			);
 	} catch (e) {
 		console.error(`[settle] degraded (session end proceeds): ${String(e)}`);
 	}

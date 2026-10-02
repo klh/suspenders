@@ -28,6 +28,10 @@ export interface SettleResult {
 	queueMarked: number;
 	/** knowledge rows backfilled this pass (distilled before the settle). */
 	rowsBackfilled: number;
+	/** W197 identity verification: false = no sessions row for this sid —
+	 *  nothing stamped, nothing emitted (rows stay unsettled for the real
+	 *  owner's settle). */
+	settled: boolean;
 }
 
 /** Session provenance: sessions.data_domain, anything but 'hub' = private
@@ -71,7 +75,23 @@ export async function settleSessionWith(
 	sid: string,
 	opts: { store?: KnowledgeStore; emit?: boolean } = {},
 ): Promise<SettleResult> {
-	const domain = sessionDomain(db, sid);
+	// W197 identity verification: the settle stamps BY sid — a sid with no
+	// sessions row is an unverified identity. Refuse: no stamps, no event;
+	// rows stay NULL (unsettled) so a fabricated sid can never move the
+	// hub_eligible provenance. The real owner's settle stamps when its row
+	// exists.
+	const srow = db
+		.query("SELECT data_domain FROM sessions WHERE sid = ?")
+		.get(sid) as { data_domain: string | null } | null;
+	if (srow === null)
+		return {
+			sid,
+			domain: "private",
+			queueMarked: 0,
+			rowsBackfilled: 0,
+			settled: false,
+		};
+	const domain: DataDomain = srow.data_domain === "hub" ? "hub" : "private";
 	const flag = domain === "hub" ? 1 : 0;
 	// W167: the stamps ride the W91 knowledge STORE PORT — the seam runs on
 	// knowledge.db (W166 split), never the governor handle. Its counts are
@@ -85,6 +105,7 @@ export async function settleSessionWith(
 		domain,
 		queueMarked,
 		rowsBackfilled,
+		settled: true,
 	};
 	if (opts.emit !== false) {
 		db.query(

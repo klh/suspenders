@@ -9,14 +9,12 @@
 // its claims, inbox, lane state, and the event tail.
 
 import { db, PORT, BIND } from "../board/context.ts";
-import { json } from "../board/helpers.ts";
+import { writeGuard } from "../board/helpers.ts";
 import { projectList } from "../board/lanes.ts";
-import { board, claims, inbox } from "../board/data.ts";
-import { orchestrate } from "../board/orch.ts";
 import { tokenUsage } from "../lib/govdb.ts";
 import { scrub, servicemon } from "../lib/servicemon.ts";
 import { readBoardSettings } from "../lib/board-config.ts";
-import { hostname } from "node:os";
+import { consoleMe } from "../board/console-view.ts";
 import { handleData } from "../board/routes-data.ts";
 import { handleUsage } from "../board/routes-usage.ts";
 import { handleDrawer } from "../board/routes-drawer.ts";
@@ -24,6 +22,7 @@ import { handleActions } from "../board/routes-actions.ts";
 import { handleOrch } from "../board/routes-orch.ts";
 import { handleConsole } from "../board/routes-console.ts";
 import { handleMeta } from "../board/routes-meta.ts";
+import { repoLawRoutes } from "./console-repo-law.ts";
 // W157: seedDemo() self-invokes at demo.ts module load — the monolith
 // executed it inline before Bun.serve; the side-effect import keeps that
 // timing (nothing else imports the demo module)
@@ -73,6 +72,12 @@ const base = {
 			handleDrawer,
 			handleActions,
 			handleOrch,
+			// W197: the repo-law + BYO editors ride the board's OWN writeGuard
+			// (origin/host law) — not the weaker standalone default — and the
+			// consoleMe topbar. Must precede handleConsole: its
+			// /console/settings/* GET fallthrough 404s these paths first.
+			async (req, url) =>
+				repoLawRoutes(req, url, { guard: writeGuard, me: consoleMe }),
 			handleConsole,
 			handleMeta,
 		]) {

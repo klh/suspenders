@@ -307,4 +307,22 @@ describe("console routes (real board, temp config)", () => {
 		expect(st.settings.status_refresh_s).toBe(9);
 		expect(st.settings.harvest_ttl_s).toBe(120);
 	});
+
+	test("W197: repo-law routes ride the board — writeGuard injected, order safe", async () => {
+		// mounted BEFORE handleConsole: the settings GET fallthrough would
+		// otherwise 404 /console/settings/repos + /console/settings/byo
+		const idx = await (await fetch(`${BASE}/console/settings/repos`)).text();
+		expect(idx).toContain("SETTINGS · REPO LAWS");
+		const byo = await (await fetch(`${BASE}/console/settings/byo`)).text();
+		expect(byo).toContain("USER PLANE");
+		// loopback POST (no Origin) → the board writeGuard's host law, then
+		// the handler validates the repo root and renders the confirm page
+		const pv = await postForm("/console/settings/repos/preview", {
+			repo: REPO,
+			laws: "prefer=local\n",
+		});
+		const page = await pv.text();
+		expect(page).toContain('name="values"');
+		expect(page).toContain('name="mtime"');
+	});
 });
