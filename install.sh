@@ -7,6 +7,9 @@
 # Default (owner law 2026-10-01): ALWAYS sets up the local-llm swarm and
 # downloads the smallest-fit models (BELT_TIER=minimal residents).
 set -euo pipefail
+# secrets at rest (W195): everything this script creates is owner-only —
+# belt.env/belt-tokens.json/plists/settings.json carry tokens and keys
+umask 077
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${SUSPENDERS_PREFIX:-$HOME/.claude/hooks/suspenders}"
@@ -89,6 +92,13 @@ if [[ $NO_LLM -eq 0 ]]; then
       echo "+ $LLM_HOME/$f (stub — fill/verify at activation)"
     fi
   done
+  # secrets at rest (W195): belt.env carries ANTHROPIC_AUTH_TOKEN, belt-tokens
+  # .json carries the belt bearer — converge both to owner-only, fresh or kept
+  for f in belt.env belt-tokens.json; do
+    if [ -f "$LLM_HOME/$f" ]; then
+      chmod 600 "$LLM_HOME/$f"
+    fi
+  done
   # smallest-fit models: derived FROM the registry (same source of truth the
   # swarm reads) — BELT_TIER=minimal residents. huggingface_hub snapshot_
   # download resumes partial downloads; --skip-models skips for offline boxes.
@@ -121,6 +131,8 @@ fi
 if [[ $WIRE -eq 1 ]]; then
   SETTINGS="$HOME/.claude/settings.json"
   [ -f "$SETTINGS" ] || echo "{}" >"$SETTINGS"
+  # "$HOME/..." is a literal JS string for replaceAll, not shell expansion
+  # shellcheck disable=SC2016
   SUSPENDERS_EXAMPLE="$REPO_DIR/settings.example.json" SUSPENDERS_PREFIX="$PREFIX" bun -e '
     const fs = require("node:fs");
     const settingsPath = process.env.HOME + "/.claude/settings.json";
@@ -135,6 +147,7 @@ if [[ $WIRE -eq 1 ]]; then
       for (const e of rewritten) if (!seen.has(JSON.stringify(e))) cur.push(e);
     }
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+    fs.chmodSync(settingsPath, 0o600); // secrets at rest (W195): env keys can live in hook env blocks
     console.log("→ wired " + settingsPath);
   '
 fi
@@ -150,6 +163,8 @@ if [[ $WITH_LAUNCHD -eq 1 ]]; then
       out="$HOME/Library/LaunchAgents/$name"
       sed -e "s|__BUN__|$BUN_BIN|" -e "s|__HOME__|$HOME|" -e "s|__PREFIX__|$PREFIX|" -e "s|__REPO__|$REPO_DIR|" \
         -e "s|__BELT_URL__|${BELT_URL:-http://127.0.0.1:4100}|" -e "s|__BELT_TOKEN__|${BELT_TOKEN:-}|" "$f" >"$out"
+      # secrets at rest (W195): fleet-loop.plist embeds BELT_TOKEN — owner-only
+      chmod 600 "$out"
       launchctl bootout "gui/$(id -u)/${name%.plist}" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$out"
       echo "→ loaded $name"
