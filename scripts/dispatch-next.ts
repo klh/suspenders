@@ -27,6 +27,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { laneEnv, spawnClaude } from "./lib/lane.ts";
+import { applyInsertion, insertionCtx } from "./lib/insertion.ts";
 import { readBoardSettings } from "../hooks/lib/board-config.ts";
 
 const argv = process.argv.slice(2);
@@ -366,25 +367,11 @@ const dispatchItem = (
 	// copilot takes --allow-all-tools, claude keeps the allowedTools recipe
 	const env = laneEnv({ ...process.env }, NO_BELT);
 	env.SUSPENDERS_SID = sid;
-	// model pin only makes sense behind belt (belt routes by model id); with
-	// --no-belt the claude CLI speaks its own API and a foreign id just 404s
-	if (pick.model && !NO_BELT) env.ANTHROPIC_MODEL = pick.model;
-	// W229 universal insertion (proven BYOK recipe): copilot lanes ride local
-	// openai-wire by default — zero GitHub credits, lane code stays on the
-	// machine. SUSPENDERS_DISABLE_BYOK=1 opts out for lanes that must hit real
-	// GitHub (e.g. customer repos where Copilot seats are the point).
-	if (
-		pick.bin === "copilot" &&
-		!NO_BELT &&
-		env.SUSPENDERS_DISABLE_BYOK !== "1"
-	) {
-		env.COPILOT_PROVIDER_BASE_URL ??= "http://127.0.0.1:8903/v1";
-		env.COPILOT_PROVIDER_TYPE ??= "openai";
-		env.COPILOT_MODEL ??= "mlx-community/Qwen3.5-35B-A3B-4bit";
-	}
-	// W229 lane attribution slug for gateway-ledger joins (belt /w/<slug> path
-	// support is a belt-side follow-up).
-	env.KLH_LANE = `${pick.bin}:${item}`;
+	// W229 universal insertion: recipe data + one applicator (lib/insertion.ts)
+	// — executor knowledge lives in the table, dispatch has no per-executor
+	// branches. NO_BELT lanes speak their own API; nothing is inserted.
+	// (Model pins only make sense behind belt — belt routes by model id.)
+	if (!NO_BELT) applyInsertion(env, pick.bin, insertionCtx(env, pick.model));
 	const bin = Bun.which(pick.bin);
 	if (!bin) {
 		console.log(`SKIP — executor binary not found on PATH: ${pick.bin}`);
