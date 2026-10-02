@@ -78,18 +78,19 @@ const execPick = (): { agent: string; model: string | null; bin: string } => {
 	const label = (executor: string): string =>
 		prefer.hub ? `[${prefer.hub.toUpperCase()}] ${executor}` : executor;
 	if (prefer.executor) {
+		// W228 owner law: must ALWAYS wins — a repo .prefer is the more
+		// specific owner intent; allow-list collision is surfaced, never
+		// silently rerouted.
 		if (!allowed(prefer.executor))
 			console.log(
-				`NOTE — .prefer must=${prefer.executor} not in enabled_executors; falling back to policy pick`,
+				`NOTE — .prefer must=${prefer.executor} not in enabled_executors; MUST WINS (W228)`,
 			);
-		else {
-			const e = prefer.executor;
-			return {
-				agent: label(e),
-				model: e === "claude" || e === "copilot" ? null : e,
-				bin: e === "copilot" ? "copilot" : "claude",
-			};
-		}
+		const e = prefer.executor;
+		return {
+			agent: label(e),
+			model: e === "claude" || e === "copilot" ? null : e,
+			bin: e === "copilot" ? "copilot" : "claude",
+		};
 	}
 	const order = [...(s.default_executors ?? []), "claude"];
 	for (const name of order) {
@@ -368,6 +369,22 @@ const dispatchItem = (
 	// model pin only makes sense behind belt (belt routes by model id); with
 	// --no-belt the claude CLI speaks its own API and a foreign id just 404s
 	if (pick.model && !NO_BELT) env.ANTHROPIC_MODEL = pick.model;
+	// W229 universal insertion (proven BYOK recipe): copilot lanes ride local
+	// openai-wire by default — zero GitHub credits, lane code stays on the
+	// machine. SUSPENDERS_DISABLE_BYOK=1 opts out for lanes that must hit real
+	// GitHub (e.g. customer repos where Copilot seats are the point).
+	if (
+		pick.bin === "copilot" &&
+		!NO_BELT &&
+		env.SUSPENDERS_DISABLE_BYOK !== "1"
+	) {
+		env.COPILOT_PROVIDER_BASE_URL ??= "http://127.0.0.1:8903/v1";
+		env.COPILOT_PROVIDER_TYPE ??= "openai";
+		env.COPILOT_MODEL ??= "mlx-community/Qwen3.5-35B-A3B-4bit";
+	}
+	// W229 lane attribution slug for gateway-ledger joins (belt /w/<slug> path
+	// support is a belt-side follow-up).
+	env.KLH_LANE = `${pick.bin}:${item}`;
 	const bin = Bun.which(pick.bin);
 	if (!bin) {
 		console.log(`SKIP — executor binary not found on PATH: ${pick.bin}`);
