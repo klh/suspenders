@@ -1,21 +1,6 @@
 // hooks/board/routes-meta.ts — meta: /llms.txt (LLMS_TXT), / (the SPA page), 404 tail (W157 route module).
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
-import { CLI, db } from "./context.ts";
-import { json } from "./helpers.ts";
-import {
-	tasks,
-	activity,
-	sessions,
-	board,
-	claims,
-	events,
-	inbox,
-	llm,
-} from "./data.ts";
-import { orchestrate } from "./orch.ts";
-import { servicemon } from "../lib/servicemon.ts";
-import { resolveBelt } from "../lib/belt-locate.ts";
 import { HTML } from "../bin/fleet-board-html.ts";
 
 export const LLMS_TXT = `# suspenders
@@ -47,8 +32,9 @@ Board: http://127.0.0.1:7799 (LAN: http://suspenders.local:7799 via klh-local's 
 - GET /api/console/me avatar data: {ok, actor, tags, actors[], default_actor} — board host's latest session actor, "unassigned" until coord bootstrap --actor stamps one
 - GET /llms.txt       this file
 
-## Write endpoints (human at the board; origin/host guarded)
+## Write endpoints (origin/host guarded; every write also demands the board token when SUSPENDERS_BOARD_TOKEN is set — Authorization: Bearer header, board_token cookie, or the /console/token bootstrap)
 
+- POST /console/token browser bootstrap for the write gate: host-guarded; paste the token once (form field or Bearer header), get the board_token cookie every guarded write accepts
 - POST /api/answer    answer a decision fork (answer_token idempotency; stale token = 409)
 - POST /api/ack       dismiss an open fork (state to CANCELLED, idempotent)
 - POST /api/advise    fire the advice worker for a fork (async; lands as fact advice.<id>)
@@ -78,7 +64,7 @@ and nothing registers. Nothing else on the board depends on it.
 a Threads thing — http://www.threads.dk`;
 
 export async function handleMeta(
-	req: Request,
+	_req: Request,
 	url: URL,
 ): Promise<Response | null> {
 	if (url.pathname === "/llms.txt")
@@ -98,5 +84,4 @@ export async function handleMeta(
 			},
 		});
 	return new Response("not found", { status: 404 });
-	return null;
 }

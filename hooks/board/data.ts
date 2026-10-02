@@ -3,7 +3,6 @@
 // sibling modules and the route modules import them.
 
 import {
-	CLI,
 	db,
 	BIND,
 	REG_DIR,
@@ -11,7 +10,6 @@ import {
 	gatePath,
 	sessionStartPath,
 } from "./context.ts";
-import { json } from "./helpers.ts";
 import {
 	projOf,
 	syncDecisions,
@@ -264,6 +262,15 @@ export async function setupChecks(): Promise<unknown[]> {
 			fix: llm.ok ? null : "local LLM stack docs",
 		},
 		{ id: "bind", label: "LAN binding", ok: true, detail: BIND, fix: null },
+		{
+			id: "auth",
+			label: "Write auth",
+			ok: true,
+			detail: process.env.SUSPENDERS_BOARD_TOKEN
+				? "bearer gate on writes (SUSPENDERS_BOARD_TOKEN set)"
+				: "open writes — host-trust only; SUSPENDERS_BOARD_TOKEN gates them",
+			fix: null,
+		},
 	];
 }
 

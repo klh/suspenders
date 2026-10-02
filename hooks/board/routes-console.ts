@@ -2,7 +2,7 @@
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
 import { BELT_REPO } from "./context.ts";
-import { json, writeGuard } from "./helpers.ts";
+import { json, writeGuard, hostCheck, tokenOk, bearerOf } from "./helpers.ts";
 import { consoleMe, gatherBeltView, gatherLocalView } from "./console-view.ts";
 import {
 	htmlHdr,
@@ -27,6 +27,36 @@ import {
 	settingsFormPage,
 	settingsIndexPage,
 } from "../bin/console-html.ts";
+
+// board_token cookie: HttpOnly + SameSite=Lax (a cross-site form POST does
+// not carry it), 30-day lifetime; http LAN board, so no Secure flag
+const tokenCookie = (tok: string): string =>
+	`board_token=${encodeURIComponent(tok)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`;
+
+// one-field bootstrap page: paste SUSPENDERS_BOARD_TOKEN once, get the
+// cookie every guarded write accepts
+const tokenPage = (err?: string): string => `<!doctype html>
+<html><head><meta charset="utf-8"><title>board write auth</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { background:#141413; color:#e8e6e1; font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+form { background:#1c1b19; border:1px solid rgba(255,255,255,.12); border-radius:2px; padding:22px; width:min(380px,92vw); }
+h1 { font-size:13px; letter-spacing:.08em; text-transform:uppercase; margin:0 0 8px; }
+p { color:#98958e; margin:0 0 12px; }
+input { width:100%; background:#141413; color:#e8e6e1; border:1px solid rgba(255,255,255,.18); border-radius:2px; padding:7px 9px; font:inherit; }
+input:focus { outline:1px solid #d8900f; }
+.btnrow { display:flex; gap:8px; margin-top:12px; align-items:center; }
+button { background:#d8900f; color:#141413; border:1px solid #d8900f; border-radius:2px; padding:6px 14px; font:inherit; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; cursor:pointer; }
+.err { color:#c96a4f; margin:10px 0 0; }
+</style></head><body>
+<form method="post" action="/console/token">
+<h1>Board write auth</h1>
+<p>Writes are gated on this board's SUSPENDERS_BOARD_TOKEN (runtime config). Paste it once &mdash; it lands as a board_token cookie every guarded write accepts, and stays in this browser for 30 days.</p>
+<input type="password" name="token" placeholder="SUSPENDERS_BOARD_TOKEN" autofocus required>
+<div class="btnrow"><button type="submit">store token</button></div>
+${err ? `<p class="err">${err}</p>` : ""}
+</form>
+</body></html>`;
 
 export async function handleConsole(
 	req: Request,
@@ -165,6 +195,47 @@ export async function handleConsole(
 				headers: htmlHdr(),
 			});
 		}
+	}
+	if (req.method === "GET" && url.pathname === "/console/token") {
+		return new Response(tokenPage(), { headers: htmlHdr() });
+	}
+	if (req.method === "POST" && url.pathname === "/console/token") {
+		const guard = hostCheck(req);
+		if (guard) return guard;
+		const hdr = bearerOf(req);
+		if (hdr) {
+			if (!tokenOk(hdr)) return json({ ok: false, error: "bad token" }, 401);
+			return new Response(JSON.stringify({ ok: true }), {
+				headers: {
+					"content-type": "application/json",
+					"set-cookie": tokenCookie(hdr),
+				},
+			});
+		}
+		const ct = (req.headers.get("content-type") ?? "")
+			.split(";")[0]
+			.trim()
+			.toLowerCase();
+		if (ct !== "application/x-www-form-urlencoded")
+			return json(
+				{ ok: false, error: "expected the form or an Authorization header" },
+				415,
+			);
+		const f = new URLSearchParams(await req.text());
+		const tok = f.get("token") ?? "";
+		if (!tokenOk(tok)) {
+			return new Response(
+				tokenPage("no — that is not this board's SUSPENDERS_BOARD_TOKEN"),
+				{ status: 401, headers: htmlHdr() },
+			);
+		}
+		return new Response(null, {
+			status: 303,
+			headers: {
+				location: "/console/settings",
+				"set-cookie": tokenCookie(tok),
+			},
+		});
 	}
 	return null;
 }

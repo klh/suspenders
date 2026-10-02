@@ -40,15 +40,14 @@ function doOrchestrate(){
   var goal = (byId('orchGoal').value || '').trim();
   if (!goal) { orch.err = 'type a goal first'; renderOrch(); return; }
   orch.busy = true; orch.err = null; renderOrch();
-  fetch('/api/orchestrate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: proj, goal: goal }), signal: AbortSignal.timeout(130000) })
-    .then(function(r){ return r.json().catch(function(){ return {}; }); })
+  postJSON('/api/orchestrate', { project: proj, goal: goal }, 130000)
     .then(function(j){
-      j = j || {};
       if (j.ok) {
         orch.prop = j.proposal; orch.model = j.model || ''; orch.ms = j.ms || 0; orch.proj = proj;
       } else {
-        orch.err = String(j.error || 'orchestrate failed (HTTP ' + r.status + ')');
+        orch.err = String(j.error || 'orchestrate failed');
       }
+      orch.busy = false;
       renderOrch();
     })
     .catch(function(e){ orch.busy = false; orch.err = String((e && e.message) || e); renderOrch(); });

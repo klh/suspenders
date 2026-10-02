@@ -13,6 +13,20 @@ frontend consumes in `hooks/bin/fleet-board-html.ts`. All endpoints return JSON 
 - Times are epoch ms; ages precomputed as `*_s` seconds.
 - Labels: the UI never renders raw sids when a label exists — responses include both.
 
+## Write auth (W188)
+
+Every write route demands the board token when `SUSPENDERS_BOARD_TOKEN` is
+set (runtime config, never code): `Authorization: Bearer` header, the
+`board_token` cookie POST /console/token mints (HttpOnly, SameSite=Lax,
+30d), constant-time compared. Hosts are allowlisted in BOTH writeGuard
+branches — loopback names, `SUSPENDERS_BIND`, the published
+`suspenders.local` mDNS name, `SUSPENDERS_BOARD_HOSTS` extras — so a
+rebind attacker's same-origin pair (origin == host == attacker.example)
+fails the allowlist even though same-origin passes. Absent the token env,
+the posture is unchanged: host-trust only. The SPA's write helper prompts
+for the token on the first 401, stores it (localStorage + cookie) and
+retries once; /api/setup carries an `auth` posture row.
+
 ## GET /api/tasks?project=
 
 `{ ok, projects, tasks: [...] }` — every work_item not SUPERSEDED/DONE-with-owner,
@@ -70,6 +84,7 @@ checks, never throw:
 | monitor-agent | Fleet monitor launchd   | `~/Library/LaunchAgents/com.suspenders.fleet-monitor.plist` exists                         | `./install.sh --with-launchd` |
 | llm           | Advice LLM endpoint     | `GET $SUSPENDERS_LLM_URL/v1/models` (default `http://127.0.0.1:8901`) answers within 1.5 s | local LLM stack docs          |
 | bind          | LAN binding             | informational: SUSPENDERS_BIND value                                                       | —                             |
+| auth          | Write auth              | informational: bearer gate on when SUSPENDERS_BOARD_TOKEN is set, else host-trust only     | —                             |
 
 ## GET /api/executors
 

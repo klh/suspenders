@@ -79,12 +79,32 @@ function stateLabel(state, flagged){
 }
 // --- polling: single in-flight request per endpoint, 8s timeout, stale
 // responses dropped by server-ts compare, last good kept on failure ---
-function postJSON(url, body){
-  return fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) })
+// board write auth (W188): the token rides Authorization (localStorage) or
+// the board_token cookie; a 401 prompts once, stores, retries once
+function authHdr(){
+  var t = null;
+  try { t = localStorage.getItem('boardToken'); } catch (e0) {}
+  return t ? { 'authorization': 'Bearer ' + t } : {};
+}
+function authFix(j, r, redo){
+  if (!r || r.status !== 401 || j.authTried) return Promise.resolve(j);
+  var t = prompt('Board writes are token-gated — paste SUSPENDERS_BOARD_TOKEN:');
+  if (!t) { j.error = 'board token required'; return Promise.resolve(j); }
+  j.authTried = true;
+  return fetch('/console/token', { method: 'POST', headers: { 'authorization': 'Bearer ' + t } })
+    .then(function(r2){
+      if (!r2.ok) { j.error = 'board token rejected'; return j; }
+      try { localStorage.setItem('boardToken', t); } catch (e1) {}
+      return redo ? redo() : j;
+    });
+}
+function postJSON(url, body, tmo, authRedo){
+  return fetch(url, { method: 'POST', headers: Object.assign({ 'content-type': 'application/json' }, authHdr()), body: JSON.stringify(body), signal: AbortSignal.timeout(tmo || 8000) })
     .then(function(r){
       return r.json().catch(function(){ return {}; }).then(function(j){
         j = j || {};
         if (!r.ok && !j.error && !j.output) j.error = 'HTTP ' + r.status;
+        if (r.status === 401) return authFix(j, r, function(){ return postJSON(url, body, tmo, true); });
         return j;
       });
     });
