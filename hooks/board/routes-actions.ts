@@ -14,6 +14,7 @@ import {
 } from "./lanes.ts";
 import { decisionEvals, evaluateDecision } from "./decide-eval.ts";
 import { isDecisionKind } from "../lib/govdb.ts";
+import { executorAllowed, readBoardSettings } from "../lib/board-config.ts";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -327,6 +328,16 @@ export async function handleActions(
 		const raw = String(parsed.body?.agent ?? "claude");
 		const agent =
 			raw === "codex" ? "codex" : raw.startsWith("llm:") ? raw : "claude";
+		// W201: policy gates the dispatch target server-side — the feed
+		// filter only hides options from the UI; this is the teeth.
+		if (!executorAllowed(agent, readBoardSettings().settings))
+			return json(
+				{
+					ok: false,
+					error: `${agent} is disabled by the executor policy (suspenders-board.json)`,
+				},
+				409,
+			);
 		if (!project || !id)
 			return json({ ok: false, error: "missing project or id" }, 400);
 		if (DEMO)

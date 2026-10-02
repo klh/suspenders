@@ -310,6 +310,9 @@ export interface BoardSettings {
 	/** W201 executor policy: allow-list of lane executors. Absent = everything
 	 * allowed (no policy); claude/openai blocked by listing only what's in. */
 	enabled_executors?: string[];
+	/** W201 executor policy: deny-list — wins over enabled_executors (claude
+	 * + openai OFF until further notice). Absent = nothing denied. */
+	disabled_executors?: string[];
 	/** W217: which model produces decision recommendations — user override of
 	 * the hub default; read by advise.ts + decide-eval.ts (URL + model id). */
 	recommendation_url?: string;
@@ -372,6 +375,18 @@ export function validateBoardSettings(v: unknown): BoardSettings {
 			);
 		out.enabled_executors = ee as string[];
 	}
+	const dx = o.disabled_executors;
+	if (dx !== undefined && dx !== null) {
+		if (
+			!Array.isArray(dx) ||
+			dx.length > 20 ||
+			dx.some((s) => typeof s !== "string" || s.length > 200 || !s)
+		)
+			throw new ConfigError(
+				"disabled_executors: must be an array of 1-20 non-empty strings (max 200 chars each)",
+			);
+		out.disabled_executors = dx as string[];
+	}
 	const ru = o.recommendation_url;
 	if (ru !== undefined && ru !== null && ru !== "") {
 		if (typeof ru !== "string" || ru.length > 400)
@@ -389,6 +404,16 @@ export function validateBoardSettings(v: unknown): BoardSettings {
 		out.recommendation_model = rm;
 	}
 	return out;
+}
+
+// W201 executor policy gate (the single source — every consumer calls this):
+// deny-list wins over the allow-list; llm:* targets gate on the deny-list
+// alone (local llms + z.ai are the owner's default posture, vendors are not).
+export function executorAllowed(name: string, s: BoardSettings): boolean {
+	if (s.disabled_executors?.includes(name)) return false;
+	if (name.startsWith("llm:")) return true;
+	const en = s.enabled_executors;
+	return !en || en.includes(name);
 }
 
 export interface BoardSettingsState {
@@ -429,13 +454,34 @@ export function readBoardSettings(
 
 // Form semantics: empty string = unset (removes the knob). Numbers coerce
 // from the form strings; anything non-numeric throws the honest error.
-export function formToBoardSettings(f: Record<string, string>): BoardSettings {
-	return validateBoardSettings({
+// W201 toggles: `exec_all` is the rendered executor universe (comma-joined);
+// `exec_<name>` present = checked = allowed. Unchecked names become the
+// deny-list; the allow-list is preserved outside the universe and, when it
+// exists, rewritten to admit exactly the checked set (deny still wins).
+export function formToBoardSettings(
+	f: Record<string, string>,
+	cur: BoardSettings = {},
+): BoardSettings {
+	const out = validateBoardSettings({
 		status_refresh_s:
 			f.status_refresh_s === "" ? undefined : Number(f.status_refresh_s),
 		harvest_ttl_s: f.harvest_ttl_s === "" ? undefined : Number(f.harvest_ttl_s),
 		default_actor: f.default_actor,
 	});
+	const all = (f.exec_all ?? "")
+		.split(",")
+		.map((n) => n.trim())
+		.filter(Boolean);
+	if (!all.length) return out;
+	const checked = all.filter((n) => f[`exec_${n}`]);
+	const off = all.filter((n) => !f[`exec_${n}`]);
+	if (off.length) out.disabled_executors = off;
+	if (cur.enabled_executors) {
+		const keep = cur.enabled_executors.filter((n) => !all.includes(n));
+		if (keep.length || checked.length)
+			out.enabled_executors = [...keep, ...checked];
+	}
+	return out;
 }
 
 // Merge-apply the settings file: read → merge → validate → mtime guard →

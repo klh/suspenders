@@ -2,6 +2,7 @@
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
 import { BELT_REPO } from "./context.ts";
+import { executorCandidates } from "./belt.ts";
 import { json, writeGuard } from "./helpers.ts";
 import { consoleMe, gatherBeltView, gatherLocalView } from "./console-view.ts";
 import {
@@ -13,6 +14,7 @@ import {
 import { scrub } from "../lib/servicemon.ts";
 import {
 	ConfigError,
+	executorAllowed,
 	parsePolicy,
 	policyWritePath,
 	readBoardSettings,
@@ -112,6 +114,16 @@ export async function handleConsole(
 				perr = e instanceof ConfigError ? e.message : String(e);
 			}
 		}
+		const set = readBoardSettings();
+		const execs =
+			feature === "suspenders"
+				? (await executorCandidates()).map((c) => ({
+						value: c.value,
+						label: c.label,
+						locality: c.locality,
+						on: executorAllowed(c.value, set.settings),
+					}))
+				: undefined;
 		return new Response(
 			settingsFormPage(
 				feature,
@@ -119,10 +131,9 @@ export async function handleConsole(
 					gateway: gw,
 					polError: perr,
 					target:
-						feature === "suspenders"
-							? readBoardSettings().path
-							: scrub(policyWritePath()),
-					set: readBoardSettings(),
+						feature === "suspenders" ? set.path : scrub(policyWritePath()),
+					set,
+					execs,
 				},
 				consoleMe(),
 			),

@@ -257,6 +257,8 @@ export interface FormCur {
 	polError: string | null;
 	target: string;
 	set: BoardSettingsState;
+	/** W201: the per-executor toggle rows (universe + current on/off). */
+	execs?: { value: string; label: string; locality: string; on: boolean }[];
 }
 
 const numField = (
@@ -286,6 +288,27 @@ const ladderFields = (gw: PolicyGatewayParsed): string =>
 		.join("");
 
 const formFoot = `<p class="cfoot">Writes are config-over-code. belt+buckle share the policy file: belt activates at the next gateway-config emit + launchctl kickstart (between fan-outs — a reload drops in-flight streams); buckle loads the policy at boot.</p>`;
+
+// W201: per-executor on/off rows for the suspenders settings form —
+// checked = the executor may run. Policy math lives in board-config
+// (formToBoardSettings); the route supplies universe + current state.
+const executorToggles = (execs: FormCur["execs"]): string => {
+	if (!execs?.length)
+		return `<div class="panel"><h2>executor policy</h2><p class="cfoot">executor registry unreachable — no toggles this render</p></div>`;
+	const rows = execs
+		.map(
+			(e) =>
+				`<label class="k" style="text-transform:none;letter-spacing:normal;font-size:12px"><input type="checkbox" name="exec_${esc(e.value)}" value="1"${e.on ? " checked" : ""}> <b>${esc(e.value)}</b> <span class="cfield-hint" style="display:inline;margin:0">[ ${esc(e.locality)} ]</span></label>`,
+		)
+		.join("");
+	return (
+		`<div class="panel"><h2>executor policy · plane executors</h2>` +
+		`<div class="cfield-hint">checked = allowed — the dispatch pick, the /api/executors dropdown feed and board starts all honor this; unchecked names land in disabled_executors, a preset allow-list is rewritten to admit exactly the checked set.</div>` +
+		`<input type="hidden" name="exec_all" value="${esc(execs.map((e) => e.value).join(","))}">` +
+		rows +
+		`</div>`
+	);
+};
 
 const formFrame = (
 	title: string,
@@ -336,7 +359,8 @@ export const settingsFormPage = (
 				s.default_actor ?? "",
 				"preselects the avatar dropdown's demo switch; coord bootstrap default is a follow-up",
 			) +
-			`</div>`;
+			`</div>` +
+			executorToggles(cur.execs);
 		return formFrame(
 			"SETTINGS · SUSPENDERS",
 			head,
@@ -408,7 +432,7 @@ export const settingsIndexPage = (a: SettingsIndexArgs): string => {
 		`<div class="panel"><h2>suspenders-board.json · ${esc(s.path)}${s.exists ? "" : " · not created yet"}</h2>` +
 		(s.error
 			? `<div class="errbox">current file does not parse: ${esc(s.error)}</div>`
-			: `<div class="knobs"><span class="kchip">STATUS_REFRESH_S: <b>${s.settings.status_refresh_s ?? "default (5s)"}</b></span><span class="kchip">harvest TTL: <b>${s.settings.harvest_ttl_s ? `${s.settings.harvest_ttl_s}s` : "default (300s)"}</b></span><span class="kchip">default actor: <b>${s.settings.default_actor ? esc(s.settings.default_actor) : "unset"}</b></span></div>`) +
+			: `<div class="knobs"><span class="kchip">STATUS_REFRESH_S: <b>${s.settings.status_refresh_s ?? "default (5s)"}</b></span><span class="kchip">harvest TTL: <b>${s.settings.harvest_ttl_s ? `${s.settings.harvest_ttl_s}s` : "default (300s)"}</b></span><span class="kchip">default actor: <b>${s.settings.default_actor ? esc(s.settings.default_actor) : "unset"}</b></span><span class="kchip">executors enabled: <b>${s.settings.enabled_executors?.length ? esc(s.settings.enabled_executors.join(", ")) : "all (no allow-list)"}</b></span><span class="kchip">executors disabled: <b>${s.settings.disabled_executors?.length ? esc(s.settings.disabled_executors.join(", ")) : "none"}</b></span></div>`) +
 		`</div>`;
 	return consolePage(
 		"SETTINGS",

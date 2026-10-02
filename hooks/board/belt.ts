@@ -2,9 +2,7 @@
 // Pieces moved verbatim from bin/fleet-board.ts; exports widened so
 // sibling modules and the route modules import them.
 
-import { CLI, BELT_REPO } from "./context.ts";
-import { json } from "./helpers.ts";
-import { board } from "./data.ts";
+import { BELT_REPO } from "./context.ts";
 import { resolveBelt } from "../lib/belt-locate.ts";
 
 export interface BeltEndpoint {
@@ -78,4 +76,43 @@ export const rowLocality = (r: {
 		? "local"
 		: "remote";
 };
+// W201 executor universe (UNFILTERED — the /api/executors feed and the
+// console toggles build on this; policy filtering happens at the consumer).
+export interface ExecutorCandidate {
+	value: string;
+	label: string;
+	model: string;
+	locality: string;
+}
+export const executorCandidates = async (): Promise<ExecutorCandidate[]> => {
+	const rows = await beltRegistry();
+	const cands: ExecutorCandidate[] = [
+		{
+			value: "claude",
+			label: "claude",
+			model: "claude",
+			locality: "remote",
+		},
+		{
+			value: "codex",
+			label: "codex",
+			model: "codex",
+			locality: "remote",
+		},
+	];
+	for (const r of rows) {
+		if (r.protocol !== "openai") continue;
+		const tail = r.model ?? String(r.port ?? "");
+		if (!r.machine || !tail) continue;
+		const loc = rowLocality(r);
+		cands.push({
+			value: `llm:${r.machine}:${tail}`,
+			label: `${r.machine} · ${tail}${r.ok === false ? " (down)" : ""} (${loc})`,
+			model: r.model ?? tail,
+			locality: loc,
+		});
+	}
+	return cands;
+};
+
 // one bun sibling-CLI call — stdout+stderr folded, trimmed

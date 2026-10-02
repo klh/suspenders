@@ -2,7 +2,8 @@
 // The fetch fragment moved verbatim (route order preserved by the
 // entry's handler list); returns null when nothing matches.
 import { db } from "./context.ts";
-import { beltRegistry, rowLocality } from "./belt.ts";
+import { executorCandidates } from "./belt.ts";
+import { executorAllowed, readBoardSettings } from "../lib/board-config.ts";
 import { json } from "./helpers.ts";
 import { syncDecisions, projectList, unblockedBy } from "./lanes.ts";
 import { decisionEvals } from "./decide-eval.ts";
@@ -111,43 +112,11 @@ export async function handleData(
 		// probes ride along (the owner may dispatch to a down target).
 		// W105: every entry carries its model id + locality so the UI can
 		// badge cards/lanes with WHERE the model actually runs.
-		const rows = await beltRegistry();
-		const llms: {
-			value: string;
-			label: string;
-			model: string;
-			locality: string;
-		}[] = [];
-		for (const r of rows) {
-			if (r.protocol !== "openai") continue;
-			const tail = r.model ?? String(r.port ?? "");
-			if (!r.machine || !tail) continue;
-			const loc = rowLocality(r);
-			llms.push({
-				value: `llm:${r.machine}:${tail}`,
-				label: `${r.machine} · ${tail}${r.ok === false ? " (down)" : ""} (${loc})`,
-				model: r.model ?? tail,
-				locality: loc,
-			});
-		}
-		return json({
-			ok: true,
-			executors: [
-				{
-					value: "claude",
-					label: "claude",
-					model: "claude",
-					locality: "remote",
-				},
-				{
-					value: "codex",
-					label: "codex",
-					model: "codex",
-					locality: "remote",
-				},
-				...llms,
-			],
-		});
+		const s = readBoardSettings().settings;
+		const executors = (await executorCandidates()).filter((e) =>
+			executorAllowed(e.value, s),
+		);
+		return json({ ok: true, executors });
 	}
 	return null;
 }

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	composeBrief,
+	execPick,
 	isOwnerGated,
 	parseCapsuleGet,
 	parseReady,
@@ -160,5 +161,36 @@ describe("pool parsing", () => {
 		expect(parsed[1].title).toContain("OWNER-GATED");
 		expect(isOwnerGated(parsed[1].title)).toBe(true);
 		expect(isOwnerGated(parsed[0].title)).toBe(false);
+	});
+});
+
+describe("W201 executor policy pick", () => {
+	test("execPick: deny-list + allow-list gate the pick; nothing allowed → null", () => {
+		const orig = process.env.HOME;
+		const h = mkdtempSync(join(tmpdir(), "w201-execpick-"));
+		mkdirSync(join(h, ".claude", "local-llm"), { recursive: true });
+		const sp = join(h, ".claude", "local-llm", "suspenders-board.json");
+		const set = (s: unknown): void => writeFileSync(sp, JSON.stringify(s));
+		process.env.HOME = h;
+		try {
+			// claude denied via the allow-list, nothing else in the order → null
+			set({
+				default_executors: ["claude"],
+				enabled_executors: ["glm-5.3-flash"],
+			});
+			expect(execPick()).toBeNull();
+			// deny-list kills the pick even with no allow-list
+			set({ default_executors: ["claude"], disabled_executors: ["claude"] });
+			expect(execPick()).toBeNull();
+			// first allowed in the order wins
+			set({
+				default_executors: ["glm-5.3-flash", "claude"],
+				enabled_executors: ["glm-5.3-flash", "copilot"],
+			});
+			expect(execPick()?.agent).toBe("glm-5.3-flash");
+		} finally {
+			process.env.HOME = orig;
+			rmSync(h, { recursive: true, force: true });
+		}
 	});
 });

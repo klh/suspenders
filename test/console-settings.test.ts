@@ -27,6 +27,7 @@ import {
 	applyBoardSettings,
 	boardSettingsPath,
 	formToBoardSettings,
+	executorAllowed,
 } from "../hooks/lib/board-config.ts";
 
 const HOME = mkdtempSync(join(tmpdir(), "w147-home-"));
@@ -195,6 +196,67 @@ describe("policy config surface (board-config)", () => {
 	});
 });
 
+describe("W201 executor policy (board-config)", () => {
+	test("executorAllowed: deny wins, llm:* gates on the deny-list alone", () => {
+		expect(executorAllowed("claude", {})).toBe(true);
+		expect(
+			executorAllowed("llm:local:glm-5.3-flash", { enabled_executors: ["x"] }),
+		).toBe(true);
+		expect(
+			executorAllowed("claude", { enabled_executors: ["glm-5.3-flash"] }),
+		).toBe(false);
+		expect(
+			executorAllowed("claude", {
+				enabled_executors: ["claude"],
+				disabled_executors: ["claude"],
+			}),
+		).toBe(false);
+		expect(
+			executorAllowed("llm:x:y", { disabled_executors: ["llm:x:y"] }),
+		).toBe(false);
+	});
+
+	test("formToBoardSettings: toggles → deny-list + allow-list rewrite", () => {
+		expect(
+			formToBoardSettings(
+				{
+					status_refresh_s: "",
+					harvest_ttl_s: "",
+					default_actor: "",
+					exec_all: "claude,codex",
+					exec_claude: "1",
+					exec_codex: "1",
+				},
+				{},
+			).disabled_executors,
+		).toBeUndefined();
+		expect(
+			formToBoardSettings(
+				{
+					status_refresh_s: "",
+					harvest_ttl_s: "",
+					default_actor: "",
+					exec_all: "c1,c2",
+					exec_c2: "1",
+				},
+				{},
+			).disabled_executors,
+		).toEqual(["c1"]);
+		const rw = formToBoardSettings(
+			{
+				status_refresh_s: "",
+				harvest_ttl_s: "",
+				default_actor: "",
+				exec_all: "c1,c2",
+				exec_c2: "1",
+			},
+			{ enabled_executors: ["c1", "glm-5.3-flash"] },
+		);
+		expect(rw.disabled_executors).toEqual(["c1"]);
+		expect(rw.enabled_executors).toEqual(["glm-5.3-flash", "c2"]);
+	});
+});
+
 describe("console routes (real board, temp config)", () => {
 	test("shell on / and /usage; console sections render", async () => {
 		const home = await (await fetch(`${BASE}/`)).text();
@@ -306,5 +368,35 @@ describe("console routes (real board, temp config)", () => {
 		const st = readBoardSettings(boardSettingsPath(HOME));
 		expect(st.settings.status_refresh_s).toBe(9);
 		expect(st.settings.harvest_ttl_s).toBe(120);
+	});
+
+	test("W201: executor toggles render + feed honors the policy", async () => {
+		applyBoardSettings(boardSettingsPath(HOME), {
+			disabled_executors: ["claude", "codex"],
+		});
+		const susp = await (
+			await fetch(`${BASE}/console/settings/suspenders`)
+		).text();
+		expect(susp).toContain('name="exec_claude"');
+		expect(susp).toContain("exec_all");
+		// the feed drops denied executors (belt registry unreachable in the
+		// test env — the statics carry the assertion)
+		const feed = (await (await fetch(`${BASE}/api/executors`)).json()) as {
+			executors: { value: string }[];
+		};
+		const values = feed.executors.map((e) => e.value);
+		expect(values).not.toContain("claude");
+		expect(values).not.toContain("codex");
+	});
+
+	test("W201: /api/start refuses a disabled executor (policy has teeth)", async () => {
+		const r = await fetch(`${BASE}/api/start`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ project: "p", id: "x", agent: "claude" }),
+		});
+		expect(r.status).toBe(409);
+		const j = (await r.json()) as { error?: string };
+		expect(j.error).toMatch(/disabled by the executor policy/);
 	});
 });

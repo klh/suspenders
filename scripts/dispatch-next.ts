@@ -71,11 +71,17 @@ const preferOf = (): { executor: string | null; hub: string | null } => {
  * executors ride the claude CLI with ANTHROPIC_MODEL pinned — belt routes
  * by model id, so a model name IS an executor. copilot rides its own CLI.
  * The hub label is PRESENTATION (e.g. [the enterprise customer]) — no federation behind it. */
-const execPick = (): { agent: string; model: string | null; bin: string } => {
+export const execPick = (): {
+	agent: string;
+	model: string | null;
+	bin: string;
+} | null => {
 	const prefer = preferOf();
 	const s = readBoardSettings().settings;
 	const enabled = s.enabled_executors;
-	const allowed = (name: string): boolean => !enabled || enabled.includes(name);
+	const allowed = (name: string): boolean =>
+		!s.disabled_executors?.includes(name) &&
+		(!enabled || enabled.includes(name));
 	const label = (executor: string): string =>
 		prefer.hub ? `[${prefer.hub.toUpperCase()}] ${executor}` : executor;
 	if (prefer.executor) {
@@ -102,7 +108,7 @@ const execPick = (): { agent: string; model: string | null; bin: string } => {
 			bin: name === "copilot" ? "copilot" : "claude",
 		};
 	}
-	return { agent: "claude", model: null, bin: "claude" };
+	return null;
 };
 
 type Lane = {
@@ -351,6 +357,12 @@ const dispatchItem = (
 	const show = run([process.execPath, `${BIN}/work.ts`, "show", item]);
 	const capsule = capsuleGet(sid);
 	const pick = execPick();
+	if (!pick) {
+		console.log(
+			`SKIP ${item} — no allowed executor under the W201 policy (suspenders-board.json enabled/disabled_executors)`,
+		);
+		return null;
+	}
 	const brief = composeBrief({
 		item,
 		showOut: show.out,

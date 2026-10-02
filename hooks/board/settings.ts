@@ -17,7 +17,11 @@ import {
 	atomicWrite,
 } from "../lib/board-config.ts";
 import type { BoardSettings } from "../lib/board-config.ts";
-import { ConsoleMe, Feature, previewPage } from "../bin/console-html.ts";
+import {
+	type ConsoleMe,
+	type Feature,
+	previewPage,
+} from "../bin/console-html.ts";
 
 export const htmlHdr = (): Record<string, string> => ({
 	"content-type": "text/html; charset=utf-8",
@@ -38,11 +42,10 @@ export const suspPreview = (f: URLSearchParams, me: ConsoleMe): Response => {
 		return new Response(previewPage(ea, me), { headers: htmlHdr() });
 	};
 	try {
-		const p = formToBoardSettings({
-			status_refresh_s: f.get("status_refresh_s") ?? "",
-			harvest_ttl_s: f.get("harvest_ttl_s") ?? "",
-			default_actor: f.get("default_actor") ?? "",
-		});
+		const p = formToBoardSettings(
+			Object.fromEntries(f.entries()) as Record<string, string>,
+			readBoardSettings().settings,
+		);
 		return suspPreviewOk(p, me);
 	} catch (e) {
 		return bad(e instanceof Error ? e.message : String(e));
