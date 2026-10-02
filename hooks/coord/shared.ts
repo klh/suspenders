@@ -2,7 +2,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { openStore, type GovernorStore } from "../lib/govdb.ts";
-import { type KnowledgeHit } from "../lib/knowledge-ports.ts";
+import type { KnowledgeHit } from "../lib/knowledge-ports.ts";
 import { trustOf } from "../lib/knowledge.ts";
 
 export {
@@ -164,8 +164,9 @@ export function renderKnowledgeHit(
 ): void {
 	if (h.kind === "knowledge") {
 		const trust = trustOf(h.source_ref, h.source_hash);
+		const hop = h.hop === 1 ? ` · 1-hop ${h.via}` : "";
 		console.log(
-			`${cyan(`k#${h.id}`)} ${dim(`${h.state ?? "?"} · age ${h.ageDays ?? "?"}d · ${trust}`)} ${h.topic ?? ""} ${dim([h.domain, h.area, h.origin_kind, h.origin_system].filter(Boolean).join("/"))}\n  ${h.snippet}`,
+			`${cyan(`k#${h.id}`)} ${dim(`${h.state ?? "?"} · age ${h.ageDays ?? "?"}d · ${trust}${hop}`)} ${h.topic ?? ""} ${dim([h.domain, h.area, h.origin_kind, h.origin_system].filter(Boolean).join("/"))}\n  ${h.snippet}`,
 		);
 	} else if (h.kind === "fact")
 		console.log(`${cyan(String(h.key))}\n  ${h.snippet}`);

@@ -803,3 +803,203 @@ describe("W100 enqueue-time source hashing", () => {
 		expect(after.out).toContain("DRIFT");
 	});
 });
+
+// ─── W245 search stage: origin_kind prior + 1-hop pointer expansion ───
+
+import { knowledgeSearch } from "../hooks/lib/knowledge.ts";
+
+describe("W245 search stage", () => {
+	// minimal column subset — the search SQL only touches these columns
+	const KSCHEMA = `CREATE TABLE knowledge (
+	id INTEGER PRIMARY KEY,
+	ts INTEGER NOT NULL,
+	topic TEXT NOT NULL,
+	fact TEXT NOT NULL,
+	domain TEXT,
+	area TEXT,
+	origin_kind TEXT,
+	origin_system TEXT,
+	source_ref TEXT,
+	state TEXT NOT NULL DEFAULT 'candidate',
+	updated_at INTEGER)`;
+
+	// external-content FTS — indexed by explicit inserts, not triggers
+	const FSCHEMA = `CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+	topic, fact,
+	domain UNINDEXED, area UNINDEXED,
+	origin_kind UNINDEXED, origin_system UNINDEXED, state UNINDEXED,
+	content='knowledge', content_rowid='id')`;
+
+	type RawHit = KnowledgeHit & { origin_kind?: string | null };
+	let autoId = 0;
+	const NOW = Date.now();
+	const graphDb = (): Database => {
+		const db = new Database(":memory:");
+		db.exec(`${KSCHEMA}; ${FSCHEMA}`);
+		return db;
+	};
+
+	// seed one row into the content table + its FTS index row
+	const seed = (
+		db: Database,
+		row: {
+			topic: string;
+			fact: string;
+			originKind?: string | null;
+			domain?: string | null;
+			area?: string | null;
+			sourceRef?: string | null;
+			state?: string;
+		},
+	): number => {
+		const id = ++autoId;
+		db.query(
+			`INSERT INTO knowledge (id, ts, topic, fact, domain, area,
+				origin_kind, origin_system, source_ref, state, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			id,
+			NOW,
+			row.topic,
+			row.fact,
+			row.domain ?? null,
+			row.area ?? null,
+			row.originKind ?? null,
+			null,
+			row.sourceRef ?? null,
+			row.state ?? "active",
+			NOW,
+		);
+		db.query(
+			`INSERT INTO knowledge_fts (rowid, topic, fact, domain, area,
+				origin_kind, origin_system, state)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			id,
+			row.topic,
+			row.fact,
+			row.domain ?? null,
+			row.area ?? null,
+			row.originKind ?? null,
+			null,
+			row.state ?? "active",
+		);
+		return id;
+	};
+
+	const hitsOf = (db: Database, query: string, filters = {}) =>
+		knowledgeSearch(db, query, filters) as RawHit[];
+
+	test("origin_kind prior: incident > lesson > decision > fact at equal text", () => {
+		const db = graphDb();
+		seed(db, {
+			topic: "gate race",
+			fact: "let the gate build each chunk quxma",
+			originKind: "fact",
+		});
+		seed(db, {
+			topic: "gate race",
+			fact: "let the gate build each chunk qzdec",
+			originKind: "decision",
+		});
+		seed(db, {
+			topic: "gate race",
+			fact: "let the gate build each chunk zqles",
+			originKind: "lesson",
+		});
+		seed(db, {
+			topic: "gate race",
+			fact: "let the gate build each chunk mqinc",
+			originKind: "incident",
+		});
+		const hits = hitsOf(db, "gate build chunk");
+		expect(hits.map((h) => h.origin_kind)).toEqual([
+			"incident",
+			"lesson",
+			"decision",
+			"fact",
+		]);
+		// isolated rows (no shared axes) never gain hop markers
+		expect(hits.every((h) => h.hop === undefined)).toBe(true);
+	});
+
+	test("1-hop edges: pointer before domain; retired excluded", () => {
+		const db = graphDb();
+		const a = seed(db, {
+			topic: "seed row",
+			fact: "gates wobbling under qlty check words",
+			domain: "suspenders",
+			area: "gates",
+			originKind: "incident",
+			sourceRef: "docs/shared.md",
+		});
+		const p = seed(db, {
+			topic: "pointer sibling",
+			fact: "wholly unrelated vocabulary zqptr",
+			originKind: "fact",
+			sourceRef: "docs/shared.md",
+		});
+		const b = seed(db, {
+			topic: "domain sibling",
+			fact: "differing text entirely zqdom",
+			domain: "suspenders",
+			area: "gates",
+			originKind: "incident",
+		});
+		seed(db, {
+			topic: "retired sibling",
+			fact: "also differing text zqret",
+			domain: "suspenders",
+			area: "gates",
+			state: "retired",
+		});
+		const hits = hitsOf(db, "gates wobbling qlty");
+		expect(hits[0]?.id).toBe(a);
+		const exp = hits.filter((h) => h.hop === 1);
+		expect(exp.map((h) => h.id)).toEqual([p, b]);
+		expect(exp.map((h) => h.via)).toEqual(["pointer", "domain"]);
+	});
+
+	test("1-hop expansion obeys axis filters and the limit cap", () => {
+		const db = graphDb();
+		const a = seed(db, {
+			topic: "seed two",
+			fact: "board sizing tokens zqtw",
+			domain: "suspenders",
+			area: "board",
+			originKind: "incident",
+		});
+		seed(db, {
+			topic: "neighbor other area",
+			fact: "off-axis text zqoa",
+			domain: "suspenders",
+			area: "gates",
+		});
+		const b = seed(db, {
+			topic: "neighbor same area",
+			fact: "on-axis text zqon",
+			domain: "suspenders",
+			area: "board",
+		});
+		// origin-kind filter binds the expansion: fact-prior neighbor drops
+		const f = hitsOf(db, "board sizing tokens", { originKind: "incident" });
+		expect(f.some((h) => h.id === a)).toBe(true);
+		expect(f.some((h) => h.id === b)).toBe(false);
+		// limit caps the expansion and cannot resurrect a retired row
+		const l = hitsOf(db, "board sizing tokens", { limit: 1 });
+		const exp = l.filter((h) => h.hop === 1);
+		expect(exp.length).toBeLessThanOrEqual(1);
+	});
+
+	test("coord CLI search renders 1-hop cards from the pipeline graph", () => {
+		// marker-w103a primary-matches the docs-covered-pointer row; the
+		// w112-fallback row shares its source_ref → pulled in as hop 1
+		const s = run(["knowledge", "marker-w103a"]);
+		expect(s.code).toBe(0);
+		expect(s.out).toContain("1-hop pointer");
+		const j = JSON.parse(run(["knowledge", "marker-w103a", "--json"]).out) as {
+			hits: { hop?: number; via?: string }[];
+		};
+		expect(j.hits.some((h) => h.hop === 1 && h.via === "pointer")).toBe(true);
+	});
+});

@@ -51,6 +51,11 @@ export interface KnowledgeHit {
 	source_ref?: string | null;
 	source_hash?: string | null;
 	trust?: TrustState;
+	// W245: 1-hop pointer-graph expansion marker — hop 1 rows matched the
+	// graph (shared source_ref or domain+area with a query match), not the
+	// query text; via names the edge that pulled them in
+	hop?: number;
+	via?: "pointer" | "domain";
 }
 
 // FTS5 MATCH term list: quoted, OR-joined — bm25 ranks the union, so a
@@ -68,6 +73,80 @@ export function ftsTerms(q: string): string {
 	];
 	if (!terms.length) return "";
 	return terms.map((t) => `"${t.replaceAll('"', '""')}"`).join(" OR ");
+}
+
+// W245 — origin_kind importance prior, added to the bm25 rank (lower sorts
+// better). 0.5 per tier ≈ 10 days of the age term: a prior re-orders equals
+// without drowning a weaker text match. study/fact/unknown share the floor.
+const ORIGIN_PRIOR_SQL =
+	"CASE k.origin_kind WHEN 'incident' THEN 0.0 WHEN 'lesson' THEN 0.5 WHEN 'decision' THEN 1.0 ELSE 1.5 END";
+
+// axis filters shared verbatim by the primary match and the 1-hop expansion —
+// knowledge_fts is content-linked to knowledge, so k.* filters read the same
+const AXIS_FILTER_SQL =
+	"AND (? IS NULL OR k.domain = ?) AND (? IS NULL OR k.area = ?) AND (? IS NULL OR k.origin_kind = ?) AND (? IS NULL OR k.origin_system = ?)";
+
+// freshness penalty shared by the primary and the 1-hop mappers
+const ageDaysOf = (r: { updated_at?: number | null; ts: number }): number =>
+	Math.max(0, Math.round((Date.now() - (r.updated_at ?? r.ts)) / 86_400_000));
+
+// W245 — pointer-graph 1-hop expansion: neighbors of the seed hits joined by
+// SHARED PROVENANCE, not text. Edges (zero LLM, pure self-joins off seed ids):
+// same non-empty source_ref ("pointer"), else same non-null domain+area
+// ("domain"). Axis filters and the retired exclusion bind neighbors exactly
+// like the primary match; a neighbor is never also a seed. Order: pointer
+// edge before domain edge, then the origin prior, then age.
+function expandOneHop(
+	db: Database,
+	seeds: number[],
+	axes: {
+		dom: string | null;
+		area: string | null;
+		kind: string | null;
+		sys: string | null;
+	},
+	limit: number,
+): (KnowledgeHit & {
+	snip?: string;
+	via?: string;
+	updated_at?: number | null;
+})[] {
+	const marks = seeds.map(() => "?").join(", ");
+	const pointerEdge = `EXISTS (SELECT 1 FROM knowledge s WHERE s.id IN (${marks})
+	AND s.source_ref IS NOT NULL AND s.source_ref != '' AND s.source_ref = k.source_ref)`;
+	const anyEdge = `EXISTS (SELECT 1 FROM knowledge s WHERE s.id IN (${marks}) AND (
+	(s.source_ref IS NOT NULL AND s.source_ref != '' AND s.source_ref = k.source_ref)
+	OR (s.domain IS NOT NULL AND s.area IS NOT NULL AND s.domain = k.domain AND s.area = k.area)))`;
+	return db
+		.query(
+			`SELECT k.*, CASE WHEN ${pointerEdge} THEN 'pointer' ELSE 'domain' END AS via
+FROM knowledge k
+WHERE k.id NOT IN (${marks})
+	AND k.state != 'retired'
+	${AXIS_FILTER_SQL}
+	AND ${anyEdge}
+ORDER BY (CASE via WHEN 'pointer' THEN 0.0 ELSE 2.0 END) + ${ORIGIN_PRIOR_SQL}
+	+ (${Date.now()} - COALESCE(k.updated_at, k.ts)) / 86400000.0 * 0.05
+LIMIT ?`,
+		)
+		.all(
+			...seeds, // via CASE
+			...seeds, // NOT IN
+			axes.dom,
+			axes.dom,
+			axes.area,
+			axes.area,
+			axes.kind,
+			axes.kind,
+			axes.sys,
+			axes.sys,
+			...seeds, // edge EXISTS
+			limit,
+		) as (KnowledgeHit & {
+		snip?: string;
+		via?: string;
+		updated_at?: number | null;
+	})[];
 }
 
 // ranked search across the knowledge layer's three stores. Each store returns
@@ -89,44 +168,56 @@ export function knowledgeSearch(
 	const sys = filters.originSystem ?? null;
 	// 1. knowledge rows — the primary store; retired rows exit search
 	try {
+		const primary = db
+			.query(
+				`SELECT k.*, snippet(knowledge_fts, 1, '[', ']', '…', 12) AS snip
+FROM knowledge_fts
+JOIN knowledge k ON k.id = knowledge_fts.rowid
+WHERE knowledge_fts MATCH ?
+	AND knowledge_fts.state != 'retired'
+	${AXIS_FILTER_SQL}
+ORDER BY rank + (${Date.now()} - COALESCE(k.updated_at, k.ts)) / 86400000.0 * 0.05
+	+ ${ORIGIN_PRIOR_SQL}
+LIMIT ?`,
+			)
+			.all(
+				match,
+				dom,
+				dom,
+				area,
+				area,
+				kind,
+				kind,
+				sys,
+				sys,
+				limit,
+			) as (KnowledgeHit & { snip?: string; updated_at?: number | null })[];
 		out.push(
-			...(
-				db
-					.query(
-						`SELECT k.*, snippet(knowledge_fts, 1, '[', ']', '…', 12) AS snip
-	FROM knowledge_fts
-	JOIN knowledge k ON k.id = knowledge_fts.rowid
-	WHERE knowledge_fts MATCH ?
-		AND knowledge_fts.state != 'retired'
-		AND (? IS NULL OR knowledge_fts.domain = ?)
-		AND (? IS NULL OR knowledge_fts.area = ?)
-		AND (? IS NULL OR knowledge_fts.origin_kind = ?)
-		AND (? IS NULL OR knowledge_fts.origin_system = ?)
-	ORDER BY rank + (${Date.now()} - COALESCE(k.updated_at, k.ts)) / 86400000.0 * 0.05 LIMIT ?`,
-					)
-					.all(
-						match,
-						dom,
-						dom,
-						area,
-						area,
-						kind,
-						kind,
-						sys,
-						sys,
-						limit,
-					) as (KnowledgeHit & { snip?: string })[]
-			).map((r) => ({
+			...primary.map((r) => ({
 				...r,
 				kind: "knowledge" as const,
 				snippet: r.snip ?? "",
-				ageDays: Math.max(
-					0,
-					Math.round((Date.now() - (r.updated_at ?? r.ts)) / 86_400_000),
-				),
+				ageDays: ageDaysOf(r),
 			})),
 		);
+		// W245: 1-hop pointer-graph neighbors ride along AFTER the text matches
+		const seeds = primary.map((r) => r.id);
+		if (seeds.length)
+			out.push(
+				...expandOneHop(db, seeds, { dom, area, kind, sys }, limit).map(
+					(r) => ({
+						...r,
+						kind: "knowledge" as const,
+						snippet: r.fact ?? "",
+						ageDays: ageDaysOf(r),
+						hop: 1,
+						via:
+							r.via === "pointer" ? ("pointer" as const) : ("domain" as const),
+					}),
+				),
+			);
 	} catch {} // pre-v6 db opened raw — skip honestly
+
 	// 2. facts (key+value) — first search index for facts; ranked, no gate
 	try {
 		out.push(
@@ -348,8 +439,9 @@ export function proseCards(
 	for (const h of hits) {
 		if (h.kind === "knowledge") {
 			const trust = trustOf(h.source_ref, h.source_hash, root);
+			const hop = h.hop === 1 ? ` · 1-hop ${h.via}` : "";
 			lines.push(
-				`k#${h.id} · ${h.topic ?? "(untitled)"} [${h.state ?? "?"} · age ${h.ageDays ?? "?"}d · hash ${trust}]`,
+				`k#${h.id} · ${h.topic ?? "(untitled)"} [${h.state ?? "?"} · age ${h.ageDays ?? "?"}d · hash ${trust}${hop}]`,
 				`  ${h.fact ?? h.snippet}`,
 				`  source: ${h.source_ref ?? h.code_origin ?? "none"}${h.domain ? ` · domain ${h.domain}` : ""}${h.area ? ` · area ${h.area}` : ""}`,
 			);
