@@ -4,6 +4,13 @@
   Activate: SUSPENDERS_PREFIX=~/.claude/hooks/suspenders ./install.sh --with-launchd
   Belt LLM routing for spawned lanes: BELT_URL / BELT_TOKEN env at install time
   (defaults: http://127.0.0.1:4100 / empty).
+
+  W247: the merge ladder is the fresh-context review gate — every branch is
+  reviewed (belt, objective+diff+tests only) BEFORE the merge runs. Verdict
+  fail = ladder FAIL = strike (3 → park); belt down = REVIEW-SKIPPED
+  passthrough merge. Kill switch: touch .fleet/review-paused. Board ship
+  trigger needs the same ladder in .fleet/ship.json
+  ({"ladder":"__BUN__ __PREFIX__/bin/review-gate.ts --repo __REPO__ --branch {branch}"}).
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -20,7 +27,9 @@
 		<string>--glob</string>
 		<string>suspenders/*</string>
 		<string>--ladder</string>
-		<string>git merge --no-ff {branch}</string>
+		<string>__BUN__ __PREFIX__/bin/review-gate.ts --repo __REPO__ --branch {branch}</string>
+		<string>--ladder-timeout</string>
+		<string>15</string>
 		<string>--dispatch-cmd</string>
 		<string>__BUN__ scripts/dispatch-next.ts --target 3</string>
 		<string>--every</string>

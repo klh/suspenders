@@ -30,6 +30,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { symlinkBuildDirs } from "../lib/builddirs.ts";
+import { wtPathFromGit } from "../lib/gitwt.ts";
 import { openGovernorDb } from "../lib/govdb.ts";
 
 const argv = process.argv.slice(2);
@@ -172,24 +173,7 @@ const runCap = (cmd: string[]): { code: number; out: string } => {
 	};
 };
 
-/** Actual worktree path checked out at branch b, from git's registry —
- *  gaps parks lanes under .claude/worktrees/ (not .worktrees/), so the
- *  default-path guess misses them and branch delete stalls on "used by
- *  worktree" (autow294.1, 2026-09-28). */
-function wtPathFromGit(b: string): string | null {
-	const out = sh(["git", "worktree", "list", "--porcelain"]);
-	let path: string | null = null;
-	for (const line of out.split("\n")) {
-		if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
-		else if (line.startsWith("branch ")) {
-			if (line.slice("branch ".length).trim() === `refs/heads/${b}` && path)
-				return path;
-		}
-	}
-	return null;
-}
-
-/** live claude/codex process with cwd inside the worktree — contract-free
+/** live claude/codex process with cwd inside the worktree — contract-free/** live claude/codex process with cwd inside the worktree — contract-free
  * liveness, independent of lanes.json registration state and DISPATCHED log
  * formats (gaps 2026-09-30: their dispatch-next registers lanes.json async
  * 22-55s after spawn and no longer writes DISPATCHED lines, so both
@@ -232,7 +216,7 @@ function laneIsAlive(b: string): boolean {
 		} catch {}
 	}
 	const wt =
-		wtPathFromGit(b) ??
+		wtPathFromGit(REPO, b) ??
 		tracked?.worktree ??
 		`${REPO}/.worktrees/${b.replace(/^.*\//, "")}`;
 	return worktreeLive(wt);
@@ -255,7 +239,7 @@ function retireMerged(b: string): void {
 	// .claude/worktrees/ (not .worktrees/), so the bare default guess misses
 	// them and branch delete stalls on "used by worktree"
 	const wt =
-		wtPathFromGit(b) ??
+		wtPathFromGit(REPO, b) ??
 		tracked?.worktree ??
 		`${REPO}/.worktrees/${b.replace(/^.*\//, "")}`;
 	// mid-spawn grace (2026-09-28 gaps autow298/299): dispatch registers the
