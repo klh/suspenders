@@ -147,7 +147,10 @@ console.log(JSON.stringify({ local: s.local }));`,
 describe("HTTP transport (store-server.ts)", () => {
 	let url = "";
 	beforeAll(async () => {
-		url = await startServer(await freePort());
+		// W196 — the wire requires a token (fail-closed); CLIs carry it via env
+		url = await startServer(await freePort(), {
+			GOVERNOR_STORE_TOKEN: "wire-tok",
+		});
 	});
 	test("work verbs with transactions ride the wire", () => {
 		expect(
@@ -192,5 +195,78 @@ describe("HTTP transport (store-server.ts)", () => {
 });
 
 function hdr(url: string): Record<string, string> {
-	return { GOVERNOR_STORE_URL: url };
+	return { GOVERNOR_STORE_URL: url, GOVERNOR_STORE_TOKEN: "wire-tok" };
 }
+
+// W196 — POST /rpc via curl, return the HTTP status. curl (not fetch) because
+// the Host header must be overridable for the rebinding test.
+async function codeOf(url: string, headers: string[]): Promise<string> {
+	const p = Bun.spawnSync(
+		[
+			"curl",
+			"-sS",
+			"-o",
+			"/dev/null",
+			"-w",
+			"%{http_code}",
+			"-X",
+			"POST",
+			`${url}/rpc`,
+			...headers,
+			"--data-binary",
+			'{"mode":"get","sql":"SELECT 1","params":[]}',
+		],
+		{ stdout: "pipe", stderr: "pipe" },
+	);
+	return p.stdout.toString();
+}
+
+// W196 — fail-closed token: the store executes ARBITRARY SQL on governor.db,
+// so an unconfigured GOVERNOR_STORE_TOKEN must seal /rpc (403 everything,
+// even a guessed token) while /health stays observable.
+describe("W196 fail-closed", () => {
+	test("tokenless boot seals /rpc — health stays observable", async () => {
+		const surl = await startServer(await freePort());
+		const health = await (await fetch(`${surl}/health`)).json();
+		expect(health.sealed).toBe(true);
+		expect(
+			await codeOf(surl, [
+				"-H",
+				"x-governor-token: guessed",
+				"-H",
+				"content-type: application/json",
+			]),
+		).toBe("403");
+		const r = coord(["fact", "get", "k.h"], { GOVERNOR_STORE_URL: surl });
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("unreachable");
+	});
+});
+
+// W196 — wire hygiene: non-JSON bodies (cross-origin simple-request path)
+// and non-loopback Hosts (DNS rebinding) are refused even with a valid token.
+describe("W196 wire hygiene", () => {
+	test("non-JSON content-type → 415; non-loopback Host → 403", async () => {
+		const surl = await startServer(await freePort(), {
+			GOVERNOR_STORE_TOKEN: "t0ken",
+		});
+		expect(
+			await codeOf(surl, [
+				"-H",
+				"x-governor-token: t0ken",
+				"-H",
+				"content-type: text/plain",
+			]),
+		).toBe("415");
+		expect(
+			await codeOf(surl, [
+				"-H",
+				"Host: evil.example",
+				"-H",
+				"x-governor-token: t0ken",
+				"-H",
+				"content-type: application/json",
+			]),
+		).toBe("403");
+	});
+});

@@ -6,8 +6,13 @@
 // wire:  GET  /health  → { ok, store, user_version }
 //        POST /rpc     → { mode: "get"|"all"|"run", sql, params }
 //                        ← { row } | { rows } | { changes, lastInsertRowid }
-// auth:  loopback bind only + optional shared token (GOVERNOR_STORE_TOKEN;
-//        requests must then carry x-governor-token). Statement-shaped by
+// auth:  loopback bind + REQUIRED shared token (GOVERNOR_STORE_TOKEN;
+//        requests must carry x-governor-token). W196 fail-closed: with no
+//        token configured the server boots SEALED — /health (reports
+//        sealed:true) and /status stay observable, /rpc 403s everything.
+//        POST /rpc requires content-type: application/json, and every route
+//        checks the Host header against the loopback bind (DNS-rebinding
+//        gate). Statement-shaped by
 //        design: the port executes the exact SQL the CLIs run today, which is
 //        what keeps CLI output byte-compatible. Requests serialize on ONE
 //        connection so INSERT → last_insert_rowid() never interleaves.
@@ -28,6 +33,13 @@ const PORT =
 	Number(process.env.GOVERNOR_STORE_PORT ?? 7794) ||
 	7794;
 const TOKEN = process.env.GOVERNOR_STORE_TOKEN ?? "";
+
+// W196 — Host allow-list (DNS-rebinding gate): a rebinding fetch resolves
+// attacker.com → 127.0.0.1 and the browser sends Host: attacker.com:7794.
+// Only the loopback bind (port optional — some proxies strip it) may pass.
+const HOSTS = new Set(
+	["127.0.0.1", "localhost", "[::1]"].flatMap((h) => [h, `${h}:${PORT}`]),
+);
 
 // W125 — shared /status + /metrics (lib/servicemon.ts). /health stays for
 // compat. tokens_total is NOT served here: the store sees no token usage, and
@@ -70,11 +82,15 @@ const base = {
 	hostname: "127.0.0.1",
 	port: PORT,
 	async fetch(req) {
+		// W196 — DNS-rebinding gate: every route requires a loopback Host.
+		const host = (req.headers.get("host") ?? "").toLowerCase().trim();
+		if (!HOSTS.has(host)) return new Response("bad host", { status: 403 });
 		const url = new URL(req.url);
 		if (url.pathname === "/health")
 			return Response.json({
 				ok: true,
 				store: "governor",
+				sealed: !TOKEN,
 				user_version: (
 					db.query("PRAGMA user_version").get() as { user_version: number }
 				).user_version,
@@ -91,7 +107,17 @@ const base = {
 			);
 		if (req.method !== "POST" || url.pathname !== "/rpc")
 			return new Response("not found", { status: 404 });
-		if (TOKEN && req.headers.get("x-governor-token") !== TOKEN)
+		// W196 — wire hygiene: only a JSON body may hit the statement port
+		// (kills the cross-origin "simple request" form path), then the
+		// fail-closed shared token — no GOVERNOR_STORE_TOKEN configured means
+		// NOTHING serves; a configured token must match exactly.
+		const ctype = (req.headers.get("content-type") ?? "")
+			.split(";")[0]
+			.trim()
+			.toLowerCase();
+		if (ctype !== "application/json")
+			return new Response("unsupported media type", { status: 415 });
+		if (!TOKEN || req.headers.get("x-governor-token") !== TOKEN)
 			return new Response("forbidden", { status: 403 });
 		const body = (await req.json()) as {
 			mode?: string;
@@ -181,5 +207,9 @@ const base = {
 Bun.serve(sm.wrapped(base));
 
 console.log(
-	`governor store on 127.0.0.1:${PORT} (${TOKEN ? "token" : "open, loopback-only"})`,
+	`governor store on 127.0.0.1:${PORT} (${
+		TOKEN
+			? "token"
+			: "SEALED — set GOVERNOR_STORE_TOKEN to unseal /rpc (W196 fail-closed)"
+	})`,
 );

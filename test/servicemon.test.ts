@@ -49,6 +49,7 @@ const start = async (
 	script: string,
 	port: number,
 	envHome: string,
+	env: Record<string, string> = {},
 ): Promise<string> => {
 	const p = Bun.spawn(["bun", script, "--port", String(port)], {
 		env: {
@@ -59,6 +60,7 @@ const start = async (
 			// fresh snapshots: the startup probe must not prime the 5s cache
 			// ahead of the by_route/last_error assertions
 			STATUS_REFRESH_S: "0",
+			...env,
 		},
 		stdout: "ignore",
 		stderr: "ignore",
@@ -253,7 +255,13 @@ const unsafe = (s: string): boolean =>
 describe("wiring — store-server", () => {
 	let base = "";
 	beforeAll(async () => {
-		base = await start(join(BIN, "store-server.ts"), await freePort(), home);
+		base = await start(
+			join(BIN, "store-server.ts"),
+			await freePort(),
+			home,
+			// W196 — the wire is fail-closed; the /rpc compat probe authenticates
+			{ GOVERNOR_STORE_TOKEN: "sm-tok" },
+		);
 	});
 
 	test("/status snapshot shape", async () => {
@@ -284,7 +292,10 @@ describe("wiring — store-server", () => {
 	test("rpc compat, 404s in by_route, no path/token leakage", async () => {
 		const rpc = await fetch(`${base}/rpc`, {
 			method: "POST",
-			headers: { "content-type": "application/json" },
+			headers: {
+				"content-type": "application/json",
+				"x-governor-token": "sm-tok",
+			},
 			body: JSON.stringify({ mode: "get", sql: "SELECT 1 AS x", params: [] }),
 		});
 		expect(rpc.status).toBe(200);

@@ -33,6 +33,9 @@ afterAll(() => {
 	rmSync(HOME, { recursive: true, force: true });
 });
 
+// W196 — the store wire is fail-closed: every spawned server + binding
+// carries the shared token.
+const TOK = "auth-test-store-tok";
 const URL0 = await (async (): Promise<string> => {
 	const s = Bun.serve({ port: 0, fetch: () => new Response("ok") });
 	const port = s.port;
@@ -45,7 +48,7 @@ const URL0 = await (async (): Promise<string> => {
 			String(port),
 		],
 		{
-			env: { ...process.env, HOME, NO_COLOR: "1" },
+			env: { ...process.env, HOME, NO_COLOR: "1", GOVERNOR_STORE_TOKEN: TOK },
 			stdout: "ignore",
 			stderr: "ignore",
 		},
@@ -66,7 +69,7 @@ const auth = await import("../hooks/lib/auth.ts");
 const govdb = await import("../hooks/lib/govdb.ts");
 const client = await import("../hooks/lib/auth-client.ts");
 
-const store = new govdb.HttpGovernorStore(URL0, null); // the canonical db
+const store = new govdb.HttpGovernorStore(URL0, TOK); // the canonical db
 const req = (
 	tok: string | null,
 ): { headers: { get(n: string): string | null } } => ({

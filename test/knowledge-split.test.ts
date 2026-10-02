@@ -308,12 +308,19 @@ describe("W166 control-plane rejection", () => {
 		const rpc = (sql: string): Promise<Record<string, unknown>> =>
 			fetch(`http://127.0.0.1:${port}/rpc`, {
 				method: "POST",
-				headers: { "content-type": "application/json" },
+				headers: {
+					"content-type": "application/json",
+					"x-governor-token": "w166tok",
+				},
 				body: JSON.stringify({ mode: "get", sql, params: [] }),
 			}).then((r) => r.json());
 		const proc = Bun.spawn(
 			["bun", "hooks/bin/store-server.ts", "--port", String(port)],
-			{ env: { ...process.env, HOME }, stdout: "pipe", stderr: "pipe" },
+			{
+				env: { ...process.env, HOME, GOVERNOR_STORE_TOKEN: "w166tok" },
+				stdout: "pipe",
+				stderr: "pipe",
+			},
 		);
 		try {
 			let up = false;

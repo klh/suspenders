@@ -14,7 +14,14 @@
        http://127.0.0.1:7794 one-liner to ~/.cache/claude-governor/store.url
        (or export GOVERNOR_STORE_URL per machine). Remote machines bind via
        GOVERNOR_STORE_URL pointing at this host (env→config chain legs:
-       env→store.url now, .local/mDNS later). -->
+       env→store.url now, .local/mDNS later).
+       W196 fail-closed: /rpc serves ONLY with GOVERNOR_STORE_TOKEN set —
+       without it the server boots sealed (/health says sealed:true, /rpc 403).
+       Provide the token at activation (installed plist EnvironmentVariables,
+       launchctl setenv, or the unit's env file) and export the SAME value to
+       every lane env that binds remotely. Every coord/work CLI on hosts that
+       point store.url AT this server needs it too; hosts binding in-process
+       (no store.url / GOVERNOR_STORE_URL=local) need nothing. -->
   <key>EnvironmentVariables</key><dict>
     <key>GOVERNOR_STORE_PORT</key><string>7794</string>
   </dict>
