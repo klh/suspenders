@@ -610,14 +610,28 @@ if (MODE === "dispatch") {
 		"show",
 		item,
 	]);
+	// mechanical, not advisory: a one-shot lane only gets one mission read
+	// before it starts acting, so anything pending (fleet broadcast, a
+	// consult addressed to it before it even existed) must already be in
+	// the brief text — the DB query is sub-ms, no reason to gate it behind
+	// the lane remembering to run `coord inbox` itself.
+	const inboxAtDispatch = runTool([
+		`${process.env.HOME}/.claude/hooks/suspenders/bin/coord.ts`,
+		"inbox",
+		"--as",
+		sid,
+	]).out;
 	const brief = [
 		`You are lane "${sid}", Work Graph item ${item}, repo ${REPO}.`,
 		``,
 		`MISSION (from work show):`,
 		show.out,
 		``,
+		`INBOX AT DISPATCH (coordinator/board messages pending for you — already pulled, no need to re-fetch):`,
+		inboxAtDispatch || "(empty)",
+		``,
 		`PROTOCOL: BEFORE any edit, read AGENTS.md in the repo root and follow it (plan-first, shatter judgment, gates, done protocol, final-line vocabulary).`,
-		`Inbox: before planning and again before finishing, check coord inbox — coordinator and board messages arrive there: bun ~/.claude/hooks/suspenders/bin/coord.ts inbox --as ${sid}.`,
+		`Inbox: check again before finishing — coordinator and board messages still arrive after dispatch: bun ~/.claude/hooks/suspenders/bin/coord.ts inbox --as ${sid}.`,
 		`Work in the EXISTING worktree ${wt} (branch ${branch}).`,
 		`Finish: bun ~/.claude/hooks/suspenders/bin/work.ts done ${item} --sha <branch-head>.`,
 		`Final line: DONE <sha> | SPLIT ${item} | BLOCKED (after 3 honest attempts, tree restored).`,

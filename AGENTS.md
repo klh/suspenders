@@ -32,4 +32,27 @@ are and WHAT the mission is; this file carries HOW. Read it before any edit.
 Final line of output: `DONE <sha>` | `SPLIT <id>` | `BLOCKED` (after 3
 honest attempts, tree restored).
 
+## Consult/Broadcast Narration
+
+Any CLI polling `coord inbox`/`coord wait` narrates terse, not verbose:
+
+- Not addressed to you and not a consult (routine BROADCAST, work.landed,
+  knowledge.settled, etc.) — say nothing, just advance past it.
+- A consult addressed to your sid:
+  ```
+  consult: [C12] 3bb4718c asks <question, truncated>
+  thinking
+  consult: [C12] replying <answer, truncated>
+  ```
+- A fleet-wide consult (`--best`, no single addressee):
+  ```
+  consult: fleet asks, <question, truncated>
+  thinking
+  consult: fleet, no knowledge, didn't reply
+  ```
+  or, if you have an answer:
+  ```
+  consult: fleet, details forwarded
+  ```
+
 Repo doctrine (quality bar, architecture) lives in CLAUDE.md.
