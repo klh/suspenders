@@ -7,7 +7,7 @@ import {
 	slugifyLabelPart,
 	llmShorthand,
 } from "../lib/addressing.ts";
-import { LIVE_HEARTBEAT_WINDOW_MS, emitEvent, broadcastNote } from "./bus.ts";
+import { emitEvent, broadcastNote, isLiveSession } from "./bus.ts";
 
 interface SessionRow {
 	sid: string;
@@ -88,11 +88,13 @@ const factValue = (key: string): string | null =>
 	)?.value ?? null;
 
 const targetRows = (now = Date.now()): SessionRow[] =>
-	db
-		.query(
-			"SELECT sid, project, role, parent_sid, worktree, hb, state, capabilities, transcript_path, actor, tags FROM sessions WHERE state = 'RUNNING' AND hb > ? ORDER BY hb DESC, sid",
-		)
-		.all(now - LIVE_HEARTBEAT_WINDOW_MS) as SessionRow[];
+	(
+		db
+			.query(
+				"SELECT sid, project, role, parent_sid, worktree, hb, state, capabilities, transcript_path, actor, tags FROM sessions WHERE state = 'RUNNING' ORDER BY hb DESC, sid",
+			)
+			.all() as SessionRow[]
+	).filter((row) => isLiveSession(row, now));
 
 function readTranscriptModel(path: string | null | undefined): string | null {
 	if (!path || !existsSync(path)) return null;

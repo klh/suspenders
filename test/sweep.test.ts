@@ -5,7 +5,14 @@
 // targets only hb-fresh RUNNING sessions (honest count — the 102-row bug).
 // Isolated temp HOME + repo, spawns the real CLI (consult-kb recipe).
 import { describe, test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
+import {
+	mkdtempSync,
+	rmSync,
+	mkdirSync,
+	realpathSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
@@ -20,7 +27,10 @@ const DB = join(HOME, ".cache", "claude-governor", "governor.db");
 // NOTE git walks UP through a scaffolded .git to the parent checkout, so
 // the identity is the PARENT repo's .git; seeds must match it exactly
 function projectOf(dir: string): string {
-	const r = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--git-common-dir"], { stdout: "pipe", stderr: "pipe" });
+	const r = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--git-common-dir"], {
+		stdout: "pipe",
+		stderr: "pipe",
+	});
 	if (r.exitCode === 0) {
 		const d = new TextDecoder().decode(r.stdout).trim();
 		// resolve, not join: git prints an ABSOLUTE gitdir when the repo root is
@@ -34,8 +44,17 @@ const TS = Date.now();
 const STALE = TS - 3_600_000; // 1h — beyond the 20min hb window
 
 function run(args: string[]) {
-	const p = Bun.spawnSync(["bun", coord, ...args], { cwd: REPO, env, stdout: "pipe", stderr: "pipe" });
-	return { out: p.stdout.toString(), err: p.stderr.toString(), code: p.exitCode };
+	const p = Bun.spawnSync(["bun", coord, ...args], {
+		cwd: REPO,
+		env,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	return {
+		out: p.stdout.toString(),
+		err: p.stderr.toString(),
+		code: p.exitCode,
+	};
 }
 
 type Seed = { parentSid?: string; hb: number; role?: string };
@@ -49,7 +68,9 @@ function seed(sid: string, s: Seed) {
 
 function stateOf(sid: string): string | undefined {
 	const db = new Database(DB, { readonly: true });
-	const r = db.query("SELECT state FROM sessions WHERE sid = ?").get(sid) as { state: string } | undefined;
+	const r = db.query("SELECT state FROM sessions WHERE sid = ?").get(sid) as
+		| { state: string }
+		| undefined;
 	db.close();
 	return r?.state;
 }
@@ -87,7 +108,9 @@ describe("liveness sweep", () => {
 		seed("wait-sess-dddd0004", { hb: STALE });
 		const db = new Database(DB);
 		db.run("CREATE TABLE IF NOT EXISTS decisions (state TEXT, answer_to TEXT)"); // the board owns this table
-		db.query("INSERT INTO decisions (state, answer_to) VALUES ('OPEN', 'wait-sess-dddd0004')").run();
+		db.query(
+			"INSERT INTO decisions (state, answer_to) VALUES ('OPEN', 'wait-sess-dddd0004')",
+		).run();
 		db.close();
 		run(["bootstrap", "--as", "boot-sess-00000003"]);
 		expect(stateOf("wait-sess-dddd0004")).toBe("RUNNING");
@@ -119,7 +142,9 @@ describe("liveness sweep", () => {
 		expect(stateOf("lane-young-aaaa0007")).toBe("RUNNING");
 		// artificially age both past the 24h lane gate and re-sweep
 		const db = new Database(DB);
-		db.query("UPDATE sessions SET hb = ?, started_at = ? WHERE sid IN ('lane-old-ffff0006', 'lane-young-aaaa0007')").run(TS - 25 * 3_600_000, TS - 25 * 3_600_000);
+		db.query(
+			"UPDATE sessions SET hb = ?, started_at = ? WHERE sid IN ('lane-old-ffff0006', 'lane-young-aaaa0007')",
+		).run(TS - 25 * 3_600_000, TS - 25 * 3_600_000);
 		db.close();
 		run(["bootstrap", "--as", "boot-sess-00000007"]);
 		expect(stateOf("lane-old-ffff0006")).toBe("CLOSED");
@@ -132,19 +157,59 @@ describe("broadcast targeting", () => {
 		seed("fresh-sess-aaaa0008", { hb: TS });
 		seed("stale-sess-bbbb0009", { hb: STALE });
 		const dbw = new Database(DB);
-		dbw.query(
-			"INSERT OR REPLACE INTO sessions (sid, project, started_at, hb, state) VALUES (?, ?, ?, ?, 'CLOSED')",
-		).run("closed-sess-cccc0010", PROJ, STALE, STALE);
+		dbw
+			.query(
+				"INSERT OR REPLACE INTO sessions (sid, project, started_at, hb, state) VALUES (?, ?, ?, ?, 'CLOSED')",
+			)
+			.run("closed-sess-cccc0010", PROJ, STALE, STALE);
 		dbw.close();
-		const r = run(["broadcast", "--note", "sweep test notice", "--as", "boot-sess-00000006"]);
+		const r = run([
+			"broadcast",
+			"--note",
+			"sweep test notice",
+			"--as",
+			"boot-sess-00000006",
+		]);
 		expect(r.code).toBe(0);
 		expect(r.out).toContain("live session(s)");
 		const db = new Database(DB, { readonly: true });
 		const n = (sid: string) =>
-			(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'BROADCAST' AND target = ?").get(sid) as { n: number }).n;
+			(
+				db
+					.query(
+						"SELECT COUNT(*) AS n FROM events WHERE kind = 'BROADCAST' AND target = ?",
+					)
+					.get(sid) as { n: number }
+			).n;
 		expect(n("fresh-sess-aaaa0008")).toBe(1);
 		expect(n("stale-sess-bbbb0009")).toBe(0);
 		expect(n("closed-sess-cccc0010")).toBe(0);
+		db.close();
+	});
+
+	// W299: a long-running coordinator's hb only bumps at bootstrap, so it
+	// goes "stale" by this same clock while still genuinely alive — must
+	// still receive broadcasts, matching sweepStaleSessions' own exemption.
+	test("a stale-hb top-level coordinator still receives broadcasts", () => {
+		seed("coord-sess-dddd0011", { hb: STALE, role: "coordinator" });
+		const r = run([
+			"broadcast",
+			"--note",
+			"coordinator reachability check",
+			"--as",
+			"boot-sess-00000007",
+		]);
+		expect(r.code).toBe(0);
+		const db = new Database(DB, { readonly: true });
+		const n = (sid: string) =>
+			(
+				db
+					.query(
+						"SELECT COUNT(*) AS n FROM events WHERE kind = 'BROADCAST' AND target = ?",
+					)
+					.get(sid) as { n: number }
+			).n;
+		expect(n("coord-sess-dddd0011")).toBe(1);
 		db.close();
 	});
 });

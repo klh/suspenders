@@ -155,6 +155,33 @@ describe("coord targets", () => {
 			"lane-copilot-22222222",
 		]);
 	});
+
+	// W299: top-level sessions only get hb bumped at bootstrap
+	// (lesson.zombie-session-hygiene), so a long-running coordinator's hb
+	// goes stale while it's genuinely still alive — sweepStaleSessions
+	// already never reaps role='coordinator' rows for exactly this reason;
+	// targets/message/broadcast must agree, or a live supervisor becomes
+	// unreachable by every addressing surface.
+	test("a stale-hb top-level coordinator is still a live target", () => {
+		seedSessions();
+		const db = new Database(DB);
+		const now = Date.now();
+		db.query(
+			"INSERT INTO sessions (sid, project, role, parent_sid, worktree, started_at, hb, state, capabilities, transcript_path, actor, tags) VALUES (?, ?, 'coordinator', NULL, ?, ?, ?, 'RUNNING', '', NULL, 'dev:carol', ?)",
+		).run(
+			"lane-coordinator-44444444",
+			PROJECT,
+			join(REPO, ".worktrees", "COORD"),
+			now - 8 * 24 * 3_600_000,
+			now - 8 * 24 * 3_600_000,
+			JSON.stringify({ name: "supervisor" }),
+		);
+		db.close();
+		const r = run(["targets"]);
+		expect(r.code).toBe(0);
+		expect(r.out).toContain("lane-coordinator-44444444");
+		expect(r.out).toContain("supervisor");
+	});
 });
 
 describe("coord message", () => {

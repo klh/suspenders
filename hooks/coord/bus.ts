@@ -1,6 +1,7 @@
 // hooks/coord/bus.ts — bus lifecycle: emit/broadcast/poll/wait + lane state, inbox, pause/resume (W157 command modules).
 // Handler bodies moved verbatim from bin/coord.ts's if/else chain —
 // one-tab indent preserved, output byte-compatible.
+import { statSync } from "node:fs";
 import {
 	die,
 	arg,
@@ -14,6 +15,34 @@ import {
 } from "./shared.ts";
 
 export const LIVE_HEARTBEAT_WINDOW_MS = 30 * 60_000;
+// Mirrors govdb.ts's sweepStaleSessions liveTranscript window: a transcript
+// (or lane log, for non-Claude dialects) written this recently means the
+// process is genuinely still running.
+const TRANSCRIPT_LIVE_WINDOW_MS = 15 * 60_000;
+
+export interface LivenessRow {
+	hb: number;
+	parent_sid: string | null;
+	role: string | null;
+	transcript_path: string | null;
+}
+
+// isLiveSession: the ONE "is this RUNNING row actually still alive" check,
+// shared by broadcast/targets/message so the three never disagree.
+export function isLiveSession(row: LivenessRow, now = Date.now()): boolean {
+	if (row.hb > now - LIVE_HEARTBEAT_WINDOW_MS) return true;
+	if (row.parent_sid !== null) return false;
+	if (row.transcript_path) {
+		try {
+			return (
+				statSync(row.transcript_path).mtimeMs > now - TRANSCRIPT_LIVE_WINDOW_MS
+			);
+		} catch {
+			// transcript missing/unreadable — fall through to the role check
+		}
+	}
+	return row.role === "coordinator";
+}
 
 export function emitEvent(opts: {
 	kind: string;
@@ -50,9 +79,13 @@ export function broadcastNote(
 	now = Date.now(),
 ): { id: string; targets: number } {
 	const bid = `b${now}`;
-	const targets = db
-		.query("SELECT sid FROM sessions WHERE state = 'RUNNING' AND hb > ?")
-		.all(now - LIVE_HEARTBEAT_WINDOW_MS) as { sid: string }[];
+	const targets = (
+		db
+			.query(
+				"SELECT sid, hb, parent_sid, role, transcript_path FROM sessions WHERE state = 'RUNNING'",
+			)
+			.all() as (LivenessRow & { sid: string })[]
+	).filter((row) => isLiveSession(row, now));
 	const ins = db.query(
 		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'BROADCAST', NULL, ?, ?)",
 	);
