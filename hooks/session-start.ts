@@ -12,6 +12,13 @@ import {
 	CAPABILITIES,
 	sweepStaleSessions,
 } from "./lib/govdb.ts";
+import {
+	canonicalRepo,
+	liveStates,
+	launchctlTable,
+	supervisorFactLine,
+	supervisorRows,
+} from "./lib/supervisor.ts";
 
 type In = { session_id?: string; source?: string; transcript_path?: string };
 
@@ -292,4 +299,21 @@ outer: for (const dir of [".", "docs", "docs/design"]) {
 		} catch {}
 	}
 }
+// supervisor plane (W266.1): the live supervision FACT + fix command, one
+// `launchctl list` probe. Silent when the plane is absent (no rows) or
+// launchd is unreachable — bootstrap output must not grow on machines that
+// never use the supervisor. Fail-open like the broadcast block: a missing
+// plane never breaks a session bootstrap.
+try {
+	const rows = supervisorRows(db);
+	if (rows.length) {
+		const repo = canonicalRepo(process.cwd());
+		const probe = launchctlTable();
+		const line = supervisorFactLine(
+			liveStates(rows, probe.table, repo, probe.ok),
+			COORD,
+		);
+		if (line) out.push(line);
+	}
+} catch {}
 console.log(out.join("\n"));

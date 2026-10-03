@@ -938,6 +938,16 @@ export function openGovernorDb(): Database {
 	}
 	// v10 (W166) — knowledge.db split; see migrateKnowledgeSplit above.
 	if (uv < 10) migrateKnowledgeSplit(db);
+	// v11 (W266.1) — the supervision plane: one row per ensured launchd agent.
+	// repo = realpath of the repo's COMMON git dir (the projectIdentity
+	// derivation), so any worktree of one repo converges onto the same row;
+	// plist records where the rendered agent was installed.
+	if (uv < 11) {
+		db.run(
+			"CREATE TABLE IF NOT EXISTS supervisors (label TEXT PRIMARY KEY, repo TEXT NOT NULL, plist TEXT NOT NULL, service TEXT NOT NULL, ts INTEGER NOT NULL)",
+		);
+		db.run("PRAGMA user_version = 11");
+	}
 	migrateJSON(db);
 	return db;
 }
