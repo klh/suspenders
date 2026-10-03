@@ -199,7 +199,8 @@ var starting = {}; // 'proj\u0000id' -> start POST in flight (rebuild-proof)
 var execPick = {}; // 'proj\u0000id' -> chosen executor (survives card rebuilds)
 var execOpts = [
   { value: 'claude', label: 'claude' },
-  { value: 'codex', label: 'codex' }
+  { value: 'codex', label: 'codex' },
+  { value: 'copilot', label: 'copilot' }
 ];
 function pollExecutors(){
   fetch('/api/executors', { signal: AbortSignal.timeout(8000) })
@@ -214,7 +215,7 @@ function pollExecutors(){
       if (opts.length >= 2) execOpts = opts;
       renderKanban(); // repaint cards with the live belt targets
     })
-    .catch(function(){}); // dropdown falls back to claude/codex only
+    .catch(function(){}); // dropdown falls back to claude/codex/copilot only
 }
 function startItem(id, proj, btn, agent){
   var k = proj + '\u0000' + id;

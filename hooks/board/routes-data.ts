@@ -149,6 +149,15 @@ export async function handleData(
 					model: "codex",
 					locality: "remote",
 				},
+				{
+					// W223.1 — fourth lane executor; fleet-loop.ts/
+					// routes-actions.ts already dispatch it with the right
+					// non-interactive flags (-p --allow-all-tools --allow-all-paths).
+					value: "copilot",
+					label: "copilot",
+					model: "copilot",
+					locality: "remote",
+				},
 				...llms,
 			],
 		});

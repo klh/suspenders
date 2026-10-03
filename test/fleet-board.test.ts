@@ -1328,6 +1328,30 @@ describe("W55 per-item diff + review comments", () => {
 		expect(notReady.status).toBe(409);
 		expect(notReady.json.error).toContain("only READY items");
 	});
+	// W223.1 — copilot as a fourth lane executor: /api/start used to collapse
+	// any unrecognized agent (including "copilot") down to "claude" before
+	// ever reaching the binary check, so a copilot dispatch silently tried to
+	// spawn claude instead. Environment-agnostic: whichever branch fires
+	// (binary missing vs. binary found), it must never be claude's.
+	test("/api/start no longer collapses agent:copilot into claude", async () => {
+		const db = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		db.run("PRAGMA busy_timeout = 4500");
+		db.query(
+			"INSERT INTO work_items (project, id, title, state, owner_sid, created_by, created_at, updated_at) VALUES (?, 'WSTART2', 'copilot dispatch probe', 'READY', NULL, 'test', ?, ?)",
+		).run(GREPO, Date.now(), Date.now());
+		db.close();
+		const r = await post("/api/start", {
+			project: GREPO,
+			id: "WSTART2",
+			agent: "copilot",
+		});
+		const err = typeof r.json.error === "string" ? r.json.error : "";
+		if (r.status === 409 && err.includes("binary not found")) {
+			expect(err).toContain("copilot binary not found");
+		} else {
+			expect(err).not.toContain("claude binary");
+		}
+	});
 });
 
 // W76 — live lane tail (lane log + transcript fallback) and message-to-lane

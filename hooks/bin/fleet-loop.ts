@@ -754,14 +754,22 @@ if (MODE === "dispatch") {
 				// unsandboxed, a codex lane's commits never touch the main
 				// object db until the coordinator merges.
 				["exec", "--sandbox", "danger-full-access", prompt]
-			: [
-					"-p",
-					prompt,
-					"--allowedTools",
-					"Bash(git:*) Bash(bun:*) Bash(qlty:*) Bash(rg:*) Bash(eza:*) Bash(ls:*) Bash(mkdir:*) Bash(sd:*) Bash(sed:*) Bash(diff) Edit Write",
-					"--permission-mode",
-					"acceptEdits",
-				];
+			: AGENT === "copilot"
+				? // W223.1 — copilot's own non-interactive flags (verified via
+					// `copilot --help`): -p/--prompt exits after one turn;
+					// --allow-all-tools is REQUIRED for non-interactive mode
+					// (copilot otherwise blocks on a confirmation prompt it can
+					// never receive headless); --allow-all-paths matches the
+					// other dialects' unsandboxed worktree access.
+					["-p", prompt, "--allow-all-tools", "--allow-all-paths"]
+				: [
+						"-p",
+						prompt,
+						"--allowedTools",
+						"Bash(git:*) Bash(bun:*) Bash(qlty:*) Bash(rg:*) Bash(eza:*) Bash(ls:*) Bash(mkdir:*) Bash(sd:*) Bash(sed:*) Bash(diff) Edit Write",
+						"--permission-mode",
+						"acceptEdits",
+					];
 	// both agents spawn through sh -c exec: the intermediary survives parent
 	// exit (codex dies under direct detached Bun spawn — the dns-sd lesson
 	// again) and < /dev/null gives codex the stdin EOF it blocks on. The lane

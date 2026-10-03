@@ -325,8 +325,15 @@ export async function handleActions(
 		const project = String(parsed.body?.project ?? "");
 		const id = String(parsed.body?.id ?? "");
 		const raw = String(parsed.body?.agent ?? "claude");
-		const agent =
-			raw === "codex" ? "codex" : raw.startsWith("llm:") ? raw : "claude";
+		// W223.1 — codex/copilot/grok/cline all dispatch through fleet-loop's
+		// own --agent branching (fleet-loop.ts); only llm:* and the claude
+		// default need special-casing here.
+		const DISPATCHABLE_AGENTS = ["codex", "copilot", "grok", "cline"];
+		const agent = DISPATCHABLE_AGENTS.includes(raw)
+			? raw
+			: raw.startsWith("llm:")
+				? raw
+				: "claude";
 		if (!project || !id)
 			return json({ ok: false, error: "missing project or id" }, 400);
 		if (DEMO)
