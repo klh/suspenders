@@ -127,36 +127,42 @@ export function knowledgeSearch(
 			})),
 		);
 	} catch {} // pre-v6 db opened raw — skip honestly
-	// 2. facts (key+value) — first search index for facts; ranked, no gate
+	// 2. facts (key+value) — first search index for facts; ranked, no gate.
+	// W205: facts carry NO domain column (install-wide coordination state) —
+	// under a declared domain filter the store exits fail-closed: it cannot
+	// prove membership, and serving it would defeat the declared scope.
 	try {
-		out.push(
-			...db
-				.query(
-					`SELECT f.key, f.ts,
+		if (!dom)
+			out.push(
+				...db
+					.query(
+						`SELECT f.key, f.ts,
 	snippet(facts_fts, 0, '[', ']', '…', 12) AS snip
 	FROM facts_fts
 	JOIN facts f ON f.rowid = facts_fts.rowid
 	WHERE facts_fts MATCH ?
 	ORDER BY rank LIMIT ?`,
-				)
-				.all(match, limit)
-				.map((r: unknown): KnowledgeHit => {
-					const o = r as {
-						key: string;
-						ts: number;
-						snip?: string;
-					};
-					return {
-						kind: "fact" as const,
-						id: 0,
-						ts: o.ts,
-						snippet: o.snip ?? "",
-						key: o.key,
-					};
-				}),
-		);
+					)
+					.all(match, limit)
+					.map((r: unknown): KnowledgeHit => {
+						const o = r as {
+							key: string;
+							ts: number;
+							snip?: string;
+						};
+						return {
+							kind: "fact" as const,
+							id: 0,
+							ts: o.ts,
+							snippet: o.snip ?? "",
+							key: o.key,
+						};
+					}),
+			);
 	} catch {} // facts_fts absent — skip honestly
-	// 3. consult_kb — answered consults (problem → solution) joined in
+	// 3. consult_kb — answered consults (problem → solution) joined in.
+	// W205: consults carry `project` (their domain) — a declared domain
+	// filter binds this store too; other projects' consults exit the result.
 	try {
 		out.push(
 			...db
@@ -166,9 +172,10 @@ export function knowledgeSearch(
 	FROM consult_kb_fts
 	JOIN consult_kb k ON k.id = consult_kb_fts.rowid
 	WHERE consult_kb_fts MATCH ?
+		AND (? IS NULL OR k.project = ?)
 	ORDER BY rank LIMIT ?`,
 				)
-				.all(match, limit)
+				.all(match, dom, dom, limit)
 				.map((r: unknown): KnowledgeHit => {
 					const o = r as {
 						id: number;
