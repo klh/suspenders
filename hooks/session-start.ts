@@ -12,6 +12,7 @@ import {
 	CAPABILITIES,
 	sweepStaleSessions,
 } from "./lib/govdb.ts";
+import { checkpointPath } from "./lib/checkpoint.ts";
 
 type In = { session_id?: string; source?: string; transcript_path?: string };
 
@@ -55,6 +56,7 @@ const cli = (name: string): string => {
 };
 const WORK = cli("work.ts");
 const COORD = cli("coord.ts");
+const CKPT = cli("checkpoint.ts");
 
 const RULES =
 	`RULES: Work Graph (bun ${WORK}) is authoritative — ` +
@@ -73,7 +75,10 @@ const RULES =
 	"Decisions: a decision held only in your context is invisible to the " +
 	"fleet and the owner — emit it (coord emit NEED_DECISION --to " +
 	'<coordinator-or-own-sid> --note "question + options" --as <sid>) ' +
-	"the moment you hold one; the fleet board surfaces it for the human.";
+	"the moment you hold one; the fleet board surfaces it for the human. " +
+	`Compaction wipes working detail — bank it as you go (bun ${CKPT} set ` +
+	`--as <sid> --note "…") and after a compaction your first action is ` +
+	"reading the checkpoint the bootstrap names.";
 
 // top-level sessions are full agent runtimes — advertise the complete
 // capability set so capability-gated work stays takeable by them (lanes
@@ -130,6 +135,19 @@ const out = [
 		? `SUBAGENT LANE ${lane.slice(0, 24)}  project=${pname(project)}`
 		: `SESSION ${sid.slice(0, 8)}  project=${pname(project)}`,
 ];
+
+// W253 compact checkpoint: a pre-compact roll (hooks/pre-compact.ts) or an
+// explicit `checkpoint set` banks working state to a rolling file; after a
+// compaction the summary loses operational detail, so the FIRST action the
+// recovered session takes is reading the checkpoint back.
+const ckpt = checkpointPath(project, lane);
+if (existsSync(ckpt)) {
+	out.unshift(
+		src === "compact"
+			? `CHECKPOINT ${ckpt} — pre-compact working state banked; FIRST ACTION: read this file before anything else (the compaction summary lost operational detail).`
+			: `CHECKPOINT ${ckpt} — checkpoint from earlier in this session; read it first to restore working state.`,
+	);
+}
 
 // automagic hygiene: every bootstrap sweeps stale sessions fleet-wide
 const sweptN = sweepStaleSessions(db);
