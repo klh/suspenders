@@ -644,6 +644,11 @@ if (MODE === "dispatch") {
 		// SUSPENDERS_SID the primary identity channel for the codex adapter
 		// (ppid-walk into lanes.json stays the fallback, lib/fleetlane.ts).
 		env.SUSPENDERS_SID = sid;
+	} else if (AGENT === "copilot" || AGENT === "grok" || AGENT === "cline") {
+		// W296: same identity-channel parity as codex above, minus the
+		// seatbelt-driven private git store workaround — these dialects use
+		// normal worktrees, so only the sid needs to ride the lane env.
+		env.SUSPENDERS_SID = sid;
 	}
 	const prompt = `Read ${briefFile} and execute it fully.`;
 	// the agent binary resolves at dispatch time — a bare name ENOENTs under
@@ -653,13 +658,25 @@ if (MODE === "dispatch") {
 		console.error(`${AGENT} binary not found on PATH`);
 		process.exit(1);
 	}
-	// W73 gate wiring: idempotent merge-not-clobber into ~/.codex/hooks.json
-	// right before the lane starts, after the binary check (a missing binary
-	// must fail dispatch with its own error, not a wiring one). A failed wire
-	// aborts — never a silent gate-less lane (W68 degradation rule).
-	if (AGENT === "codex") {
+	// W73/W296 gate wiring: idempotent merge-not-clobber into each CLI's own
+	// hook config, right before the lane starts, after the binary check (a
+	// missing binary must fail dispatch with its own error, not a wiring
+	// one). A failed wire aborts — never a silent gate-less lane (W68
+	// degradation rule). Every dialect's wire.ts targets a GLOBAL config
+	// file (not per-worktree), so this is safe to re-run on every dispatch.
+	const WIRE_BY_AGENT: Record<string, string> = {
+		codex: "codex",
+		copilot: "copilot",
+		grok: "grok",
+		cline: "cline",
+	};
+	const wireDialect = WIRE_BY_AGENT[AGENT];
+	if (wireDialect) {
 		const wire = Bun.spawnSync(
-			[process.execPath, `${import.meta.dir}/gate-wire-codex.ts`],
+			[
+				process.execPath,
+				`${import.meta.dir}/../dialects/${wireDialect}/wire.ts`,
+			],
 			{
 				cwd: REPO,
 				stdout: "pipe",
@@ -668,7 +685,7 @@ if (MODE === "dispatch") {
 		);
 		if (wire.exitCode !== 0) {
 			console.error(
-				`codex gate wiring failed: ${new TextDecoder().decode(wire.stderr ?? new Uint8Array()).trim()}`,
+				`${wireDialect} gate wiring failed: ${new TextDecoder().decode(wire.stderr ?? new Uint8Array()).trim()}`,
 			);
 			process.exit(1);
 		}

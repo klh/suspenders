@@ -18,7 +18,7 @@ import {
 	buildDecision,
 	resolveCodexSid,
 	normalizeCodex,
-} from "../hooks/lib/codex.ts";
+} from "../hooks/dialects/codex/lib.ts";
 
 const HOME = mkdtempSync(join(tmpdir(), "suspenders-w73-"));
 const REPO = mkdtempSync(join(process.cwd(), ".tmp-w73-repo-"));
@@ -28,7 +28,14 @@ const env = (): Record<string, string> => ({
 	HOME,
 });
 const GATE = join(import.meta.dir, "..", "hooks", "gate.ts");
-const WIRE = join(import.meta.dir, "..", "hooks", "bin", "gate-wire-codex.ts");
+const WIRE = join(
+	import.meta.dir,
+	"..",
+	"hooks",
+	"dialects",
+	"codex",
+	"wire.ts",
+);
 
 afterAll(() => {
 	rmSync(HOME, { recursive: true, force: true });

@@ -4,20 +4,22 @@
 // then hands the SAME gates the Claude path runs. Gates keep zero codex
 // knowledge; degradation (unresolved identity, file-less patches) is
 // drift-journaled, never silent and never a block on infrastructure.
-import { allow, context, setDialect } from "../lib/hookio.ts";
-import { writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { allow, context, setDialect } from "../../lib/hookio.ts";
 import {
 	buildDecision,
 	normalizeCodex,
 	resolveCodexSid,
 	drift,
-} from "../lib/codex.ts";
-import { lanesFileFor } from "../lib/fleetlane.ts";
-import { bashGate } from "./bash.ts";
-import { filesGate } from "./files.ts";
-import { preFilesChain } from "./chain.ts";
-import { stopGate } from "./stop.ts";
+} from "./lib.ts";
+import {
+	transcriptPathFor,
+	spawnSessionStart,
+	spawnSessionEnd,
+} from "../../lib/session-bridge.ts";
+import { bashGate } from "../../gates/bash.ts";
+import { filesGate } from "../../gates/files.ts";
+import { preFilesChain } from "../../gates/chain.ts";
+import { stopGate } from "../../gates/stop.ts";
 
 // wiring-time event per mode (spec: dialect bound by argv, not sniffed)
 const EVENT = {
@@ -28,14 +30,6 @@ const EVENT = {
 	stop: "Stop",
 } as const;
 type Mode = keyof typeof EVENT;
-
-// Bun's spawnSync drops the `input` option — stdin rides a temp file
-// (the gates.test.ts lesson, reused here and in the adapter tests).
-const payloadFile = (json: string): string => {
-	const f = `${tmpdir()}/gate-codex-payload-${process.pid}-${Date.now()}.json`;
-	writeFileSync(f, json);
-	return f;
-};
 
 export async function codexGate(
 	modeArg: string,
@@ -98,10 +92,7 @@ export async function codexGate(
 // is the lane log — the zombie sweep's transcript-liveness rule stays
 // meaningful for non-claude transcripts (lesson.zombie-session-hygiene).
 async function sessionGate(sid: string, cwd: string): Promise<never> {
-	const lanesFile = lanesFileFor(cwd);
-	const transcript = lanesFile
-		? `${lanesFile.slice(0, lanesFile.lastIndexOf("/"))}/lane-${sid}.log`
-		: "";
+	const transcript = transcriptPathFor(cwd, sid);
 	if (!sid) {
 		drift(
 			"session start without resolvable sid — no governor.db registration",
@@ -109,23 +100,11 @@ async function sessionGate(sid: string, cwd: string): Promise<never> {
 		);
 		allow();
 	}
-	const pf = payloadFile(
-		JSON.stringify({
-			session_id: sid,
-			transcript_path: transcript,
-			source: "startup",
-		}),
-	);
-	const proc = Bun.spawnSync(
-		[process.execPath, `${import.meta.dir}/../session-start.ts`],
-		{
-			stdin: Bun.file(pf),
-			stdout: "pipe",
-			stderr: "pipe",
-		},
-	);
-	rmSync(pf, { force: true });
-	const out = new TextDecoder().decode(proc.stdout ?? new Uint8Array()).trim();
+	const out = spawnSessionStart({
+		session_id: sid,
+		transcript_path: transcript,
+		source: "startup",
+	});
 	if (out) context(out, "SessionStart");
 	allow();
 }
@@ -133,12 +112,6 @@ async function sessionGate(sid: string, cwd: string): Promise<never> {
 // session-end: codex HAS the event (binary-verified) — parity accounting.
 async function sessionEndGate(sid: string): Promise<never> {
 	if (!sid) allow();
-	const pf = payloadFile(JSON.stringify({ session_id: sid }));
-	Bun.spawnSync([process.execPath, `${import.meta.dir}/../session-end.ts`], {
-		stdin: Bun.file(pf),
-		stdout: "ignore",
-		stderr: "ignore",
-	});
-	rmSync(pf, { force: true });
+	spawnSessionEnd(sid);
 	allow();
 }

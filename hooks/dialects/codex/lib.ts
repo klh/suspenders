@@ -24,8 +24,13 @@
 //   - Codex edits via apply_patch, not Edit/Write — unverified payload
 //     shape, so the normalizer also parses patch text; file-less edits
 //     ride command-level inspection (the spec's fallback posture).
-import type { HookInput } from "./hookio.ts";
-import { resolveFleetLane } from "./fleetlane.ts";
+import type { HookInput } from "../../lib/hookio.ts";
+import { resolveFleetLane } from "../../lib/fleetlane.ts";
+import type {
+	CliDialect,
+	NormalizedSession,
+	ToolMode,
+} from "../../lib/dialect.ts";
 
 // ---- decision builders (pure — the output-translation table) ----
 
@@ -221,3 +226,45 @@ export function drift(
 		// a dead journal never blocks a lane (fail-open doctrine)
 	}
 }
+
+// ---- CliDialect conformance wrapper (W296) ----
+// gates/codex.ts does NOT use this object — its production dispatch calls
+// the functions above directly, unchanged, to keep the binary-verified
+// codex behavior byte-for-byte stable. This wrapper exists ONLY so
+// test/dialect-conformance.ts can run the same mechanical suite against
+// codex and copilot: one generic harness, every dialect proven to the same
+// bar, without forcing codex's already-shipped dispatch through a new
+// indirection layer it doesn't need.
+const toolModeEvent: Record<ToolMode, string> = {
+	"pre-bash": "PreToolUse",
+	"pre-files": "PreToolUse",
+	"pre-read": "PreToolUse",
+	"post-files": "PostToolUse",
+	stop: "Stop",
+};
+
+export const codexDialect: CliDialect = {
+	name: "codex",
+	resolveSid: (cwd: string) => resolveCodexSid(cwd),
+	normalizeSession: (raw: unknown): NormalizedSession => {
+		const r = (raw ?? {}) as Record<string, unknown>;
+		return {
+			sessionId: typeof r.session_id === "string" ? r.session_id : "",
+			cwd: typeof r.cwd === "string" ? r.cwd : "",
+			source: "startup",
+		};
+	},
+	normalizeSessionEnd: (raw: unknown): string => {
+		const r = (raw ?? {}) as Record<string, unknown>;
+		return typeof r.session_id === "string" ? r.session_id : "";
+	},
+	normalizeToolEvent: (raw: unknown, mode: ToolMode): HookInput => {
+		const r = raw as Record<string, unknown>;
+		return normalizeCodex(
+			r,
+			typeof r.tool_name === "string" ? r.tool_name : "",
+			toolModeEvent[mode],
+		).hook;
+	},
+	buildDecision,
+};

@@ -13,22 +13,67 @@
 //   bun ~/.claude/bin/coord.ts diff [--since <seq|event-id>] [--last N] [--table t] [--json]
 //        (row-image delta log: what changed in sessions/claims/locks/facts/
 //         work_items between two points — events/cursors are the bus's own trail)
+//   bun ~/.claude/bin/coord.ts targets [--filter text] [--json]
+//   bun ~/.claude/bin/coord.ts message <target-label-or-sid-or-substring> "text" [--as sid]
+//   bun ~/.claude/bin/coord.ts message --all "text" [--as sid]
 //
 // event kinds (doctrine): checkpoint | landed | interface_changed | test_red |
 
 import { die, setRest } from "../coord/shared.ts";
-import { cmdEmit, cmdBroadcast, cmdPoll, cmdWait, cmdState, cmdInbox, cmdPause, cmdPaused, cmdResume, cmdResumed, cmdResumeSession } from "../coord/bus.ts";
-import { cmdFact, cmdCapsule, cmdLeaseRelease, cmdKb, cmdGc } from "../coord/facts.ts";
-import { cmdConsult, cmdConsultReply, cmdConsults, cmdWhoKnows } from "../coord/consult.ts";
-import { cmdKnowledge, cmdKnowledgeEnqueue, cmdKnowledgePromote, cmdKnowledgeRetire, cmdKnowledgeNote, cmdKnowledgeVerify, cmdKnowledgeCurate } from "../coord/knowledge.ts";
-import { cmdBootstrap, cmdFleet, cmdMetrics, cmdDoctorSession, cmdDiff } from "../coord/fleet.ts";
-
+import {
+	cmdEmit,
+	cmdBroadcast,
+	cmdPoll,
+	cmdWait,
+	cmdState,
+	cmdInbox,
+	cmdPause,
+	cmdPaused,
+	cmdResume,
+	cmdResumed,
+	cmdResumeSession,
+} from "../coord/bus.ts";
+import { cmdTargets, cmdMessage } from "../coord/addressing.ts";
+import {
+	cmdFact,
+	cmdCapsule,
+	cmdLeaseRelease,
+	cmdKb,
+	cmdGc,
+} from "../coord/facts.ts";
+import {
+	cmdConsult,
+	cmdConsultReply,
+	cmdConsults,
+	cmdWhoKnows,
+} from "../coord/consult.ts";
+import {
+	cmdKnowledge,
+	cmdKnowledgeEnqueue,
+	cmdKnowledgePromote,
+	cmdKnowledgeRetire,
+	cmdKnowledgeNote,
+	cmdKnowledgeVerify,
+	cmdKnowledgeCurate,
+} from "../coord/knowledge.ts";
+import {
+	cmdBootstrap,
+	cmdFleet,
+	cmdMetrics,
+	cmdDoctorSession,
+	cmdDiff,
+} from "../coord/fleet.ts";
 
 const [cmd, ...rest] = process.argv.slice(2);
 // --help anywhere wins before any parsing that could create state
-if (rest.includes("--help") || rest.includes("-h")) {
+if (
+	cmd === "--help" ||
+	cmd === "-h" ||
+	rest.includes("--help") ||
+	rest.includes("-h")
+) {
 	console.log(
-		"coord — control plane. emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | knowledge | knowledge-enqueue | knowledge-promote | knowledge-retire | knowledge-note | knowledge-verify | knowledge-curate | lease-release|knowledge-verify | knowledge-curate | lease-release | gc | fleet | metrics | diff",
+		"coord — control plane. emit | broadcast | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | knowledge | knowledge-enqueue | knowledge-promote | knowledge-retire | knowledge-note | knowledge-verify | knowledge-curate | lease-release | gc | fleet | metrics | diff | targets | message",
 	);
 	process.exit(0);
 }
@@ -39,42 +84,45 @@ if (rest.includes("--help") || rest.includes("-h")) {
 setRest(rest);
 
 const cmds: Record<string, (rest: string[]) => Promise<void>> = {
-	"emit": cmdEmit,
-	"broadcast": cmdBroadcast,
-	"poll": cmdPoll,
-	"wait": cmdWait,
-	"state": cmdState,
-	"inbox": cmdInbox,
-	"pause": cmdPause,
-	"paused": cmdPaused,
-	"resume": cmdResume,
-	"resumed": cmdResumed,
+	emit: cmdEmit,
+	broadcast: cmdBroadcast,
+	poll: cmdPoll,
+	wait: cmdWait,
+	state: cmdState,
+	inbox: cmdInbox,
+	pause: cmdPause,
+	paused: cmdPaused,
+	resume: cmdResume,
+	resumed: cmdResumed,
 	"resume-session": cmdResumeSession,
-	"fact": cmdFact,
-	"capsule": cmdCapsule,
+	fact: cmdFact,
+	capsule: cmdCapsule,
 	"lease-release": cmdLeaseRelease,
-	"kb": cmdKb,
-	"gc": cmdGc,
-	"consult": cmdConsult,
+	kb: cmdKb,
+	gc: cmdGc,
+	consult: cmdConsult,
 	"consult-reply": cmdConsultReply,
-	"consults": cmdConsults,
+	consults: cmdConsults,
 	"who-knows": cmdWhoKnows,
-	"knowledge": cmdKnowledge,
+	knowledge: cmdKnowledge,
 	"knowledge-enqueue": cmdKnowledgeEnqueue,
 	"knowledge-promote": cmdKnowledgePromote,
 	"knowledge-retire": cmdKnowledgeRetire,
 	"knowledge-note": cmdKnowledgeNote,
 	"knowledge-verify": cmdKnowledgeVerify,
 	"knowledge-curate": cmdKnowledgeCurate,
-	"bootstrap": cmdBootstrap,
-	"fleet": cmdFleet,
-	"metrics": cmdMetrics,
+	bootstrap: cmdBootstrap,
+	fleet: cmdFleet,
+	metrics: cmdMetrics,
 	"doctor-session": cmdDoctorSession,
-	"diff": cmdDiff,
+	diff: cmdDiff,
+	targets: cmdTargets,
+	message: cmdMessage,
 };
 
 const fn = cmds[cmd ?? ""];
 if (fn) await fn(rest);
-else die(
-		"unknown command — try emit | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | knowledge | knowledge-enqueue | knowledge-promote | knowledge-retire | knowledge-note | knowledge-verify | knowledge-curate | lease-release|knowledge-verify | knowledge-curate | lease-release | gc | fleet | metrics | diff",
+else
+	die(
+		"unknown command — try emit | broadcast | poll | wait | fact | bootstrap | state | inbox | capsule | pause | paused | resume | resumed | resume-session | doctor-session | who-knows | consult | consult-reply | consults | kb | knowledge | knowledge-enqueue | knowledge-promote | knowledge-retire | knowledge-note | knowledge-verify | knowledge-curate | lease-release | gc | fleet | metrics | diff | targets | message",
 	);

@@ -13,6 +13,63 @@ import {
 	projectIdentity,
 } from "./shared.ts";
 
+export const LIVE_HEARTBEAT_WINDOW_MS = 30 * 60_000;
+
+export function emitEvent(opts: {
+	kind: string;
+	scope?: string | null;
+	sha?: string | null;
+	note?: string | null;
+	source: string;
+	to?: string | null;
+	extra?: Record<string, string>;
+}): number {
+	const payload = JSON.stringify({
+		project: projectIdentity(),
+		...(opts.sha ? { sha: opts.sha } : {}),
+		...(opts.note ? { note: opts.note } : {}),
+		...(opts.extra ?? {}),
+	});
+	db.query(
+		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, ?, ?, ?, ?)",
+	).run(
+		Date.now(),
+		opts.source,
+		opts.kind,
+		opts.scope ?? null,
+		payload,
+		opts.to ?? null,
+	);
+	return (db.query("SELECT last_insert_rowid() AS id").get() as { id: number })
+		.id;
+}
+
+export function broadcastNote(
+	note: string,
+	source: string,
+	now = Date.now(),
+): { id: string; targets: number } {
+	const bid = `b${now}`;
+	const targets = db
+		.query("SELECT sid FROM sessions WHERE state = 'RUNNING' AND hb > ?")
+		.all(now - LIVE_HEARTBEAT_WINDOW_MS) as { sid: string }[];
+	const ins = db.query(
+		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'BROADCAST', NULL, ?, ?)",
+	);
+	for (const target of targets)
+		ins.run(now, source, JSON.stringify({ id: bid, note }), target.sid);
+	const upsert = db.query(
+		"INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts",
+	);
+	upsert.run(`broadcast.${bid}`, note, now);
+	upsert.run(
+		"broadcast.latest",
+		JSON.stringify({ id: bid, ts: now, note }),
+		now,
+	);
+	return { id: bid, targets: targets.length };
+}
+
 export async function cmdEmit(rest: string[]): Promise<void> {
 	const kind = rest[0];
 	if (!kind)
@@ -32,50 +89,26 @@ export async function cmdEmit(rest: string[]): Promise<void> {
 		if (m && !["scope", "sha", "note", "as", "to"].includes(m[1]))
 			extra[m[1]] = m[2];
 	}
-	// project attribution: the bus is shared across projects — consumers filter
-	// work.*/sha-bearing events by this (a sha only resolves in its own repo)
-	const payload = JSON.stringify({
-		project: projectIdentity(),
-		...(sha ? { sha } : {}),
-		...(note ? { note } : {}),
-		...extra,
-	});
-	db.query(
-		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, ?, ?, ?, ?)",
-	).run(Date.now(), source, kind, scope, payload, to);
+	const id = emitEvent({ kind, scope, sha, note, source, to, extra });
 	console.log(
-		`${green("✓")} ${dim(`event queued #${(db.query("SELECT last_insert_rowid() AS id").get() as { id: number }).id} → ${to ? `@${to.slice(0, 8)}` : "bus"}`)}`,
+		`${green("✓")} ${dim(`event queued #${id} → ${to ? `@${to.slice(0, 8)}` : "bus"}`)}`,
 	);
 }
 
-export async function cmdBroadcast(rest: string[]): Promise<void> {
+export async function cmdBroadcast(_rest: string[]): Promise<void> {
 	// fleet-wide rules notice: live lanes receive it in their inbox on the
 	// next poll; future sessions get it injected once at SessionStart
 	// (facts broadcast.latest + broadcast.seen.<sid> watermark)
 	const note = arg("--note");
 	if (!note) die('usage: broadcast --note "..." [--as sid]');
 	const source = arg("--as") ?? "owner";
-	const ts = Date.now();
-	const bid = `b${ts}`;
-	const targets = db
-		.query("SELECT sid FROM sessions WHERE state = 'RUNNING' AND hb > ?")
-		.all(Date.now() - 30 * 60_000) as { sid: string }[]; // include swept-but-alive lanes
-	const insB = db.query(
-		"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, 'BROADCAST', NULL, ?, ?)",
-	);
-	for (const t of targets)
-		insB.run(ts, source, JSON.stringify({ id: bid, note }), t.sid);
-	const upF = db.query(
-		"INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts",
-	);
-	upF.run(`broadcast.${bid}`, note, ts);
-	upF.run("broadcast.latest", JSON.stringify({ id: bid, ts, note }), ts);
+	const sent = broadcastNote(note, source);
 	console.log(
-		`${green("✓")} broadcast ${bid} → ${targets.length} live session(s) (inbox; they poll) — everyone else gets it at SessionStart`,
+		`${green("✓")} broadcast ${sent.id} → ${sent.targets} live session(s) (inbox; they poll) — everyone else gets it at SessionStart`,
 	);
 }
 
-export async function cmdPoll(rest: string[]): Promise<void> {
+export async function cmdPoll(_rest: string[]): Promise<void> {
 	const as = arg("--as");
 	const scope = arg("--scope");
 	const kinds = arg("--kinds")?.split(",").filter(Boolean) ?? [];
@@ -136,7 +169,7 @@ export async function cmdPoll(rest: string[]): Promise<void> {
 	if (!rows.length) console.log(dim("(no new events)"));
 }
 
-export async function cmdWait(rest: string[]): Promise<void> {
+export async function cmdWait(_rest: string[]): Promise<void> {
 	// adaptive long-poll: 250ms while events flow, backing off to 2s when
 	// idle; resets to fast the moment anything arrives. Near-instant local
 	// coordination without a broker daemon.
@@ -202,7 +235,7 @@ export async function cmdWait(rest: string[]): Promise<void> {
 	}
 }
 
-export async function cmdState(rest: string[]): Promise<void> {
+export async function cmdState(_rest: string[]): Promise<void> {
 	// between-rounds check for a lane: canonical state + inbox + current HEAD
 	const as = arg("--as") ?? die("usage: state --as <sid>");
 	const st = db
@@ -306,7 +339,7 @@ export async function cmdPause(rest: string[]): Promise<void> {
 	console.log(`${amber("⏸")} ${dim(`pause_requested → @${sid.slice(0, 8)}`)}`);
 }
 
-export async function cmdPaused(rest: string[]): Promise<void> {
+export async function cmdPaused(_rest: string[]): Promise<void> {
 	// the LANE's own transition: PAUSE_REQUESTED → PAUSED. Requires proof of a
 	// safe boundary: checkpoint SHA (--sha) AND a written capsule. A model
 	// cannot skip the restart context by accident.
@@ -410,7 +443,7 @@ export async function cmdResume(rest: string[]): Promise<void> {
 	);
 }
 
-export async function cmdResumed(rest: string[]): Promise<void> {
+export async function cmdResumed(_rest: string[]): Promise<void> {
 	// the worker's confirmation: RESUME_READY → RUNNING (worktree reconciled,
 	// targeted tests green)
 	const as = arg("--as") ?? die("usage: resumed --as <sid>");
@@ -427,7 +460,7 @@ export async function cmdResumed(rest: string[]): Promise<void> {
 	);
 }
 
-export async function cmdResumeSession(rest: string[]): Promise<void> {
+export async function cmdResumeSession(_rest: string[]): Promise<void> {
 	// ownership rebind for `claude -c` continuations: the runtime hands the
 	// resumed session a fresh id — move ownership forward atomically so the
 	// session wakes owning what it owned before (never re-derive from Markdown)

@@ -14,7 +14,7 @@ point-in-time research lives in coord facts (`lesson.*` / `finding.*`).
 | fleet-loop      | launchd `com.suspenders.fleet-loop`: `watch --repo <repo> --dispatch-cmd "bun scripts/dispatch-next.ts" --target N --every 120`. Curfews are plist edits (strip `--dispatch-cmd`) + bootout/bootstrap.                                                                                                                                                   |
 | dispatch-next   | Takes READY work → worktree + branch (`suspenders/Wxxx`) → brief. Briefs are delivered INTO the worktree (`.klh-brief.md`; lanes are sandboxed — see `lesson.lane-brief-delivery`). Per-executor env insertion is data-driven: `scripts/lib/insertion.ts` (recipes + UNION_VARS, no per-executor branches).                                              |
 | board + console | Lit web components + CSS tokens (never innerHTML). Surfaces: work graph, service ladder, forks/decisions, usage. Served via Caddy at `*.local` (nginx cutover done).                                                                                                                                                                                     |
-| gates           | On-write qlty/biome gate (`hooks/gates/files.ts`), content gate (parse-checks Write/Edit payloads — corrupt emissions denied pre-write), 1500-line hard limit on .ts, gitleaks pre-push, push-guard lane resolution. Codex lanes ride the dialect adapter (`hooks/gate-wire-codex.ts`, shipped W73) at the contract boundary — no gate rewrites per CLI. |
+| gates           | On-write qlty/biome gate (`hooks/gates/files.ts`), content gate (parse-checks Write/Edit payloads — corrupt emissions denied pre-write), 1500-line hard limit on .ts, gitleaks pre-push, push-guard lane resolution. Non-native CLIs ride a `CliDialect` adapter under `hooks/dialects/<cli>/{lib,gate,wire}.ts` (codex shipped W73; copilot/grok/cline shipped W296) at the contract boundary — no gate rewrites per CLI. See `docs/cli-dialect-pattern.md`. |
 
 ## Lanes and executors
 
@@ -22,9 +22,12 @@ Headless lanes run in git worktrees on `suspenders/Wxxx` branches; integration
 is orchestrator-driven (test → merge → push → `work done <id> --sha`).
 Executors: claude, codex (adapter above), copilot (`--allow-all-tools`,
 `COPILOT_MODEL` env is honored; premium credits are cheap — the 2026-10-02
-campaign cost ~4 credits), glm via the local wire. Full porting/install for
-codex lives in speedy (`bun install-codex.ts`, docs/codex-setup.md there);
-user-level copilot instructions in `~/.copilot/instructions.md`.
+campaign cost ~4 credits), grok-cli, cline, glm via the local wire. Full
+porting/install for codex lives in speedy (`bun install-codex.ts`,
+docs/codex-setup.md there); user-level copilot instructions in
+`~/.copilot/instructions.md`. Cross-CLI session discovery/naming/broadcast:
+`docs/cross-cli-addressing.md`. Per-surface hook capability research:
+`docs/cli-surface-survey.md`.
 
 ## UI surfaces (current)
 

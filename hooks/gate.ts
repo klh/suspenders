@@ -49,8 +49,33 @@ switch (event) {
 		// W73 codex adapter — dialect bound by argv (`gate.ts codex <mode>`):
 		// payload normalization + decision translation + fleet sid resolution
 		// live in gates/codex.ts + lib/codex.ts; gates keep zero codex knowledge.
-		const { codexGate } = await import("./gates/codex.ts");
+		const { codexGate } = await import("./dialects/codex/gate.ts");
 		await codexGate(process.argv[3] ?? "", hook as Record<string, unknown>);
+	}
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: copilotGate never resolves — await parks the case
+	case "copilot": {
+		// W296 copilot adapter — dialect bound by argv (`gate.ts copilot <mode>`):
+		// modes are matcher-routed (pre-bash/pre-files/pre-read/post-files/
+		// session/session-end/stop), mirroring Claude's own settings.example.json
+		// wiring rather than codex's content-sniffed pre-tool/post-tool pair.
+		const { copilotGate } = await import("./dialects/copilot/gate.ts");
+		await copilotGate(process.argv[3] ?? "", hook as Record<string, unknown>);
+	}
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: grokGate never resolves - await parks the case
+	case "grok": {
+		// W296 grok-cli adapter - dialect bound by argv (`gate.ts grok <mode>`):
+		// payload normalization + decision translation + fleet sid resolution
+		// live in gates/grok.ts + lib/grok.ts; gates keep zero grok knowledge.
+		const { grokGate } = await import("./dialects/grok/gate.ts");
+		await grokGate(process.argv[3] ?? "", hook as Record<string, unknown>);
+	}
+	// biome-ignore lint/suspicious/noFallthroughSwitchClause: clineGate never resolves — await parks the case
+	case "cline": {
+		// W296 cline adapter — dialect bound by argv (`gate.ts cline <mode>`):
+		// payload normalization + decision translation + fleet sid resolution
+		// live in gates/cline.ts + lib/cline.ts; gates keep zero cline knowledge.
+		const { clineGate } = await import("./dialects/cline/gate.ts");
+		await clineGate(process.argv[3] ?? "", hook as Record<string, unknown>);
 	}
 	// biome-ignore lint/suspicious/noFallthroughSwitchClause: context()/exit is `: never` — the case always exits
 	case "session": {

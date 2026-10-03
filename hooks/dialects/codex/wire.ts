@@ -17,7 +17,7 @@ const HOME = process.env.HOME ?? "";
 const FILE = process.env.SUSPENDERS_CODEX_HOOKS ?? `${HOME}/.codex/hooks.json`;
 const MARK = "gate.ts codex ";
 const BUN = process.execPath;
-const GATE = `${import.meta.dir}/../gate.ts`;
+const GATE = `${import.meta.dir}/../../gate.ts`;
 
 // event → gate.ts codex <mode>: the adapter's one switch (gates/codex.ts)
 const WIRING: Array<[string, string]> = [
