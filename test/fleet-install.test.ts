@@ -24,7 +24,12 @@ describe("fleet-install CLI (W298)", () => {
 	test("--agent '*' --dry-run wires only supported+detected targets, touches nothing", async () => {
 		const { code, out } = await run(["--agent", "*", "--dry-run"]);
 		expect(code).toBe(0);
-		expect(out).toContain("would be wired, nothing touched");
+		// On a machine/CI runner with zero supported targets detected (a bare
+		// $HOME), "*" legitimately resolves to nothing to wire — only assert
+		// the "something would be wired" message when something was selected.
+		if (!out.includes("Nothing selected — no wiring performed")) {
+			expect(out).toContain("would be wired, nothing touched");
+		}
 		expect(out).not.toContain("wired 7 copilot hook entries"); // wire.ts never ran
 	});
 
