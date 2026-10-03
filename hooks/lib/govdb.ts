@@ -966,6 +966,16 @@ export function openKnowledgeDb(): Database {
 	}
 	db.run("PRAGMA synchronous=NORMAL");
 	db.run("PRAGMA mmap_size=1073741824");
+	// W208 curation engine: retire proposals from the recency-decay sweep,
+	// disposed by a human (approve = the row retires, dismiss = cooldown).
+	// Self-healing CREATE on every open (the openGovernorDb doctrine); the
+	// partial unique index keeps at most ONE open proposal per knowledge row.
+	db.run(
+		"CREATE TABLE IF NOT EXISTS knowledge_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, knowledge_id INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'retire', score REAL NOT NULL, age_days INTEGER NOT NULL, confidence REAL NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', decided_by TEXT, decided_at INTEGER)",
+	);
+	db.run(
+		"CREATE UNIQUE INDEX IF NOT EXISTS knowledge_proposals_one_open ON knowledge_proposals (knowledge_id) WHERE state = 'open'",
+	);
 	return db;
 }
 

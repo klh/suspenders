@@ -28,7 +28,17 @@ import {
 	loadRootDocs,
 	docForRef,
 	substitutionCheck,
+	type SubstitutionDoc,
 } from "./knowledge.ts";
+import {
+	planDecayProposals,
+	type DecayPlan,
+	type ProposalDraft,
+	type CurateRow,
+	type OpenProposal,
+	type Dismissal,
+	type DecayOpts,
+} from "./knowledge-curate.ts";
 import { openGovernorDb, openKnowledgeDb } from "./govdb.ts";
 import { resolveBelt } from "./belt-locate.ts";
 
@@ -83,6 +93,30 @@ export interface KnowledgeSearchFilters {
 	area?: string | null;
 	originKind?: string | null;
 	originSystem?: string | null;
+}
+
+// W208: one knowledge_proposals row joined with its knowledge row — the
+// human dispose surface reads these.
+export interface KnowledgeProposalView {
+	id: number;
+	knowledgeId: number;
+	state: string;
+	score: number;
+	ageDays: number;
+	reason: string;
+	ts: number;
+	decidedBy: string | null;
+	decidedAt: number | null;
+	topic: string;
+	fact: string;
+}
+
+// W208: one decay sweep's outcome — proposed are the drafts written open.
+export interface DecaySweep {
+	checked: number;
+	proposed: ProposalDraft[];
+	refreshed: number;
+	stale: number;
 }
 
 export interface KnowledgeStore {
@@ -142,6 +176,16 @@ export interface KnowledgeStore {
 	// W166 (design §4): FTS5 segment merge after every job that wrote rows —
 	// measured 70 ms per run, ~5% read-latency recovery after churn.
 	optimize(): Promise<void>;
+	// W208 curation engine: recency decay → propose → human dispose. The sweep
+	// only proposes (one open proposal per row; recovered rows auto-close
+	// 'stale'); disposeProposal is the only path to a row mutation.
+	proposeDecay(opts?: DecayOpts): Promise<DecaySweep>;
+	listProposals(state?: string): Promise<KnowledgeProposalView[]>;
+	disposeProposal(
+		id: number,
+		decision: "approve" | "dismiss",
+		opts?: { by?: string; note?: string; supersededBy?: number | null },
+	): Promise<{ ok: boolean; retired: boolean }>;
 }
 
 export interface DistillClient {
@@ -395,6 +439,20 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 			.run(JSON.stringify(list), id);
 	}
 
+	// one knowledge-plane bus event (the curateRecord INSERT shape; scope
+	// fixed to 'knowledge' — source names the actor: worker or human)
+	private emitCurate(
+		kind: string,
+		by: string,
+		payload: Record<string, unknown>,
+	): void {
+		this.bus()
+			.query(
+				"INSERT INTO events (ts, source, kind, scope, payload, target) VALUES (?, ?, ?, 'knowledge', ?, NULL)",
+			)
+			.run(Date.now(), by, kind, JSON.stringify(payload));
+	}
+
 	// flag notes + one plane event (curateScan part 2; `by` names the curator)
 	private curateRecord(
 		opts: { repoRoot: string; by?: string },
@@ -545,6 +603,131 @@ export class SqliteKnowledgeStore implements KnowledgeStore {
 		return { queueMarked, rowsBackfilled };
 	}
 
+	// W208 decay sweep: score every non-retired row through the pure planner
+	// (../lib/knowledge-curate.ts) and write the result — insert open
+	// proposals, refresh scores that moved, auto-close recovered rows
+	// ('stale'). The writes live in proposeWrite.
+	async proposeDecay(opts: DecayOpts = {}): Promise<DecaySweep> {
+		const rows = this.db
+			.query(
+				"SELECT id, topic, confidence, state, ts, updated_at FROM knowledge WHERE state != 'retired'",
+			)
+			.all() as CurateRow[];
+		const open = this.db
+			.query(
+				"SELECT id, knowledge_id, score FROM knowledge_proposals WHERE state = 'open'",
+			)
+			.all() as OpenProposal[];
+		const dismissals = this.db
+			.query(
+				"SELECT knowledge_id, MAX(decided_at) AS decided_at FROM knowledge_proposals WHERE state = 'dismissed' AND decided_at IS NOT NULL GROUP BY knowledge_id",
+			)
+			.all() as Dismissal[];
+		return this.proposeWrite(
+			planDecayProposals(rows, open, dismissals, opts),
+			opts.by,
+		);
+	}
+	// proposeDecay part 2 — the writes. Notes ride appendNote: NO updated_at
+	// bump (a proposal is evidence, not freshness — the curate() doctrine).
+	private proposeWrite(plan: DecayPlan, by?: string): DecaySweep {
+		const now = Date.now();
+		for (const p of plan.refresh)
+			this.db
+				.query(
+					"UPDATE knowledge_proposals SET score = ?, ts = ?, reason = ? WHERE id = ? AND state = 'open'",
+				)
+				.run(p.score, now, p.reason, p.proposalId);
+		for (const pid of plan.stale)
+			this.db
+				.query(
+					"UPDATE knowledge_proposals SET state = 'stale', decided_at = ? WHERE id = ? AND state = 'open'",
+				)
+				.run(now, pid);
+		for (const p of plan.propose) {
+			this.db
+				.query(
+					"INSERT INTO knowledge_proposals (ts, knowledge_id, kind, score, age_days, confidence, reason, state) VALUES (?, ?, 'retire', ?, ?, ?, ?, 'open')",
+				)
+				.run(now, p.knowledgeId, p.score, p.ageDays, p.confidence, p.reason);
+			this.appendNote(
+				p.knowledgeId,
+				by ?? "decay-sweep",
+				`decay proposal: ${p.reason} — dispose pending (W208)`,
+			);
+		}
+		if (plan.propose.length || plan.stale.length)
+			this.emitCurate("knowledge.propose", by ?? "decay-sweep", {
+				proposed: plan.propose.map((p) => p.knowledgeId),
+				refreshed: plan.refresh.length,
+				stale: plan.stale,
+			});
+		return {
+			checked: plan.checked,
+			proposed: plan.propose,
+			refreshed: plan.refresh.length,
+			stale: plan.stale.length,
+		};
+	}
+	// W208 read side of the human dispose surface: proposals joined with
+	// their knowledge rows, worst score first; state='all' skips the filter.
+	async listProposals(state = "open"): Promise<KnowledgeProposalView[]> {
+		const where = state === "all" ? "1=1" : "p.state = ?";
+		const params = state === "all" ? [] : [state];
+		return this.db
+			.query(
+				`SELECT p.id, p.knowledge_id AS knowledgeId, p.state, p.score, p.age_days AS ageDays, p.reason, p.ts, p.decided_by AS decidedBy, p.decided_at AS decidedAt, k.topic, k.fact FROM knowledge_proposals p JOIN knowledge k ON k.id = p.knowledge_id WHERE ${where} ORDER BY p.score, p.id`,
+			)
+			.all(...params) as KnowledgeProposalView[];
+	}
+	// W208 write side of the human dispose: the ONLY path from proposal to
+	// row mutation. approve retires the knowledge row (guarded against
+	// double-retire); dismiss records the verdict — its decided_at starts
+	// the re-propose cooldown. The state='open' guard makes a double
+	// dispose an honest no-op.
+	async disposeProposal(
+		id: number,
+		decision: "approve" | "dismiss",
+		opts: { by?: string; note?: string; supersededBy?: number | null } = {},
+	): Promise<{ ok: boolean; retired: boolean }> {
+		const row = this.db
+			.query(
+				"SELECT knowledge_id FROM knowledge_proposals WHERE id = ? AND state = 'open'",
+			)
+			.get(id) as { knowledge_id: number } | undefined;
+		if (!row) return { ok: false, retired: false };
+		const by = opts.by ?? "human";
+		this.db
+			.query(
+				"UPDATE knowledge_proposals SET state = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+			)
+			.run(
+				decision === "approve" ? "approved" : "dismissed",
+				by,
+				Date.now(),
+				id,
+			);
+		let retired = false;
+		if (decision === "approve")
+			retired =
+				this.db
+					.query(
+						"UPDATE knowledge SET state = 'retired', superseded_by = COALESCE(?, superseded_by) WHERE id = ? AND state != 'retired'",
+					)
+					.run(opts.supersededBy ?? null, row.knowledge_id).changes > 0;
+		this.appendNote(
+			row.knowledge_id,
+			by,
+			`disposed: ${decision}${opts.note ? ` — ${opts.note}` : ""}${retired ? " (row retired)" : ""} (W208)`,
+		);
+		this.emitCurate("knowledge.dispose", by, {
+			proposal: id,
+			knowledge: row.knowledge_id,
+			decision,
+			retired,
+		});
+		return { ok: true, retired };
+	}
 	// W166: merge FTS5 segments — keeps the index bounded from row one.
 	async optimize(): Promise<void> {
 		this.db
