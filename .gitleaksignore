@@ -1,0 +1,10 @@
+# gitleaks suppressions — documented, reviewed, reversible. Each fingerprint
+# is a TEST FIXTURE for the prompt-condenser's secret-redaction (W270): the
+# fake token exists in the input precisely so the test can assert it is
+# redacted in every surfaced field. Not credentials. Rewriting main's history
+# is an owner call; these fingerprints make the hooked push gate pass without
+# touching history. (W266.1, 2026-10-03 — lane push was fleet-blocked.)
+224eec380a292ff421d4abfc02060ee11345b1b4:test/fleet-board-flows.test.ts:generic-api-key:393
+224eec380a292ff421d4abfc02060ee11345b1b4:test/fleet-board-flows.test.ts:generic-api-key:414
+224eec380a292ff421d4abfc02060ee11345b1b4:test/fleet-board-flows.test.ts:generic-api-key:421
+224eec380a292ff421d4abfc02060ee11345b1b4:test/prompt-transform.test.ts:generic-api-key:227
