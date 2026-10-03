@@ -1130,6 +1130,22 @@ export function openStore(): GovernorStore {
 	return d;
 }
 
+// same binding chain as openStore(), exposed for callers that need the raw
+// HTTP address (W303 — coord's WebSocket subscribe client upgrades this to
+// ws(s):// itself). null when the binding is in-process SQLite (no server to
+// connect a socket to).
+export function resolveStoreHttpBase(): {
+	base: string;
+	token: string | null;
+} | null {
+	const raw = (process.env.GOVERNOR_STORE_URL ?? storeUrlFile() ?? "").trim();
+	if (!raw || raw === "local") return null;
+	return {
+		base: raw.replace(/\/+$/, ""),
+		token: process.env.GOVERNOR_STORE_TOKEN ?? null,
+	};
+}
+
 function storeUrlFile(): string | null {
 	try {
 		return readFileSync(`${REG}/store.url`, "utf8") || null;

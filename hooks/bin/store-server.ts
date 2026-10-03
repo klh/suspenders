@@ -43,6 +43,54 @@ const txDb = openGovernorDb() as unknown as GovernorStore;
 let tx: { id: string; last: number } | null = null;
 const TX_IDLE_MS = 10_000;
 
+// W303 — WS push for coord subscribe: real-time replacement for the
+// relaunch-a-long-poll pattern. Sockets are tracked here (not Bun pub/sub
+// topics) because the per-socket filter mirrors cmdWait's exactly (target
+// sid/null, scope-covers, kinds) and needs the same predicate, not a topic
+// string match.
+interface SubFilter {
+	as: string;
+	scope: string | null;
+	kinds: string[];
+}
+type Sock = Bun.ServerWebSocket<SubFilter>;
+const sockets = new Set<Sock>();
+const EVENTS_INSERT_RE = /^\s*INSERT\s+INTO\s+events\b/i;
+
+function scopeCoversLocal(a: string, b: string): boolean {
+	return a === b || b.startsWith(`${a}/`) || a.startsWith(`${b}/`);
+}
+
+// best-effort: reads the just-inserted row back off the non-tx connection,
+// so an insert made inside an open tx (not committed yet) is a silent no-op
+// here rather than a premature broadcast of a row that might still roll back.
+function maybeBroadcastInsert(sql: string, rowid: number): void {
+	if (!EVENTS_INSERT_RE.test(sql) || !sockets.size) return;
+	const row = db
+		.query(
+			"SELECT id, ts, source, kind, scope, payload, target FROM events WHERE id = ?",
+		)
+		.get(rowid) as
+		| {
+				id: number;
+				ts: number;
+				source: string;
+				kind: string;
+				scope: string | null;
+				payload: string | null;
+				target: string | null;
+		  }
+		| undefined;
+	if (!row) return;
+	for (const ws of sockets) {
+		const f = ws.data;
+		if (row.target !== null && row.target !== f.as) continue;
+		if (f.scope && row.scope && !scopeCoversLocal(f.scope, row.scope)) continue;
+		if (f.kinds.length && !f.kinds.includes(row.kind)) continue;
+		ws.send(JSON.stringify(row));
+	}
+}
+
 let chain: Promise<unknown> = Promise.resolve();
 const serial = <T>(fn: () => T): Promise<T> => {
 	const p = chain.then(fn);
@@ -60,17 +108,34 @@ const exec = (
 	if (mode === "get") return { row: st.get(...params) ?? null };
 	if (mode === "all") return { rows: st.all(...params) };
 	const r = st.run(...params);
-	return {
-		changes: r.changes,
-		lastInsertRowid: Number(r.lastInsertRowid),
-	};
+	const lastInsertRowid = Number(r.lastInsertRowid);
+	maybeBroadcastInsert(sql, lastInsertRowid);
+	return { changes: r.changes, lastInsertRowid };
 };
+
+// set right after Bun.serve() returns below; fetch closes over this instead
+// of the (req, server) param, which servicemon's wrapped() fetch drops.
+let server: ReturnType<typeof Bun.serve> | null = null;
 
 const base = {
 	hostname: "127.0.0.1",
 	port: PORT,
 	async fetch(req) {
 		const url = new URL(req.url);
+		if (url.pathname === "/subscribe") {
+			if (TOKEN && url.searchParams.get("token") !== TOKEN)
+				return new Response("forbidden", { status: 403 });
+			const as = url.searchParams.get("as");
+			if (!as || !server) return new Response("as required", { status: 400 });
+			const data: SubFilter = {
+				as,
+				scope: url.searchParams.get("scope"),
+				kinds: (url.searchParams.get("kinds") ?? "").split(",").filter(Boolean),
+			};
+			return server.upgrade(req, { data })
+				? undefined
+				: new Response("upgrade failed", { status: 500 });
+		}
 		if (url.pathname === "/health")
 			return Response.json({
 				ok: true,
@@ -174,11 +239,20 @@ const base = {
 			);
 		});
 	},
+	websocket: {
+		open(ws: Sock) {
+			sockets.add(ws);
+		},
+		message() {}, // push-only channel; clients don't send anything
+		close(ws: Sock) {
+			sockets.delete(ws);
+		},
+	},
 };
 
 // W125 — the observability wrap: /status + /metrics ride the SAME fetch via
 // lib/servicemon.ts; the route body above stays untouched.
-Bun.serve(sm.wrapped(base));
+server = Bun.serve(sm.wrapped(base));
 
 console.log(
 	`governor store on 127.0.0.1:${PORT} (${TOKEN ? "token" : "open, loopback-only"})`,

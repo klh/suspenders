@@ -298,12 +298,14 @@ export function servicemon(opts: ServicemonOptions): Servicemon {
 
 	const handle = async (
 		req: Request,
-		inner: (req: Request) => Response | Promise<Response>,
-	): Promise<Response> => {
+		inner: (
+			req: Request,
+		) => Response | Promise<Response | undefined> | undefined,
+	): Promise<Response | undefined> => {
 		const t0 = performance.now();
 		const path = new URL(req.url).pathname;
 		const route = routeOf(path);
-		let resp: Response;
+		let resp: Response | undefined;
 		let threw = false;
 		if (path === "/status" || path === "/metrics") {
 			if (path === "/metrics" && opts.onMetrics) {
@@ -323,8 +325,11 @@ export function servicemon(opts: ServicemonOptions): Servicemon {
 		}
 		httpRequests.inc({ route });
 		httpDuration.observe({ route }, (performance.now() - t0) / 1000);
+		// resp is undefined when inner() upgraded the request to a WebSocket
+		// (Bun's contract: no Response once server.upgrade() succeeds) — not an
+		// error, nothing to score here.
 		// the synthetic note must not overwrite a real exception's message
-		if (!threw && resp.status >= 500)
+		if (!threw && resp && resp.status >= 500)
 			noteError(`${req.method} ${route} -> ${resp.status}`);
 		return resp;
 	};
@@ -332,11 +337,12 @@ export function servicemon(opts: ServicemonOptions): Servicemon {
 	return {
 		fetch:
 			(inner) =>
-			(req: Request): Promise<Response> =>
+			(req: Request): Promise<Response | undefined> =>
 				handle(req, inner),
 		wrapped: (o: Bun.ServeOptions): Bun.ServeOptions => ({
 			...o,
-			fetch: (req: Request): Promise<Response> => handle(req, o.fetch),
+			fetch: (req: Request): Promise<Response | undefined> =>
+				handle(req, o.fetch),
 		}),
 		counter,
 		histogram,

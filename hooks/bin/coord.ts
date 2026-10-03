@@ -7,6 +7,10 @@
 //   bun ~/.claude/bin/coord.ts poll [--as sid] [--scope s] [--kinds a,b] [--limit n]
 //   bun ~/.claude/bin/coord.ts wait --as sid [--scope s] [--kinds a,b] [--max-seconds 30]
 //        (adaptive long-poll: 250ms fast path, backs off to 2s when idle)
+//   bun ~/.claude/bin/coord.ts subscribe --as sid [--scope s] [--kinds a,b]
+//        (W303: live WebSocket push on the store server — the real "always
+//         on" subscribe, no polling, no relaunching, ever. Falls back to
+//         wait --forever when no HTTP store is bound.)
 //   bun ~/.claude/bin/coord.ts metrics [project] [--days N]
 //   bun ~/.claude/bin/coord.ts fact set <key> <value> [--source s]
 //   bun ~/.claude/bin/coord.ts fact get <key> / fact list
@@ -25,6 +29,7 @@ import {
 	cmdBroadcast,
 	cmdPoll,
 	cmdWait,
+	cmdSubscribe,
 	cmdState,
 	cmdInbox,
 	cmdPause,
@@ -88,6 +93,7 @@ const cmds: Record<string, (rest: string[]) => Promise<void>> = {
 	broadcast: cmdBroadcast,
 	poll: cmdPoll,
 	wait: cmdWait,
+	subscribe: cmdSubscribe,
 	state: cmdState,
 	inbox: cmdInbox,
 	pause: cmdPause,

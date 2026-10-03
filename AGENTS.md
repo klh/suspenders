@@ -34,7 +34,15 @@ honest attempts, tree restored).
 
 ## Consult/Broadcast Narration
 
-Any CLI polling `coord inbox`/`coord wait` narrates terse, not verbose:
+Any CLI watching `coord inbox`/`coord subscribe` narrates terse, not
+verbose — as your own plain response text, never as a shell `echo`/tool
+call (that's a visible tool-invocation block in the transcript, not
+narration). The templates below are the ENTIRE narration — no parenthetical
+asides, no explanations, no extra sentence tacked on. `coord subscribe` is
+one persistent WebSocket (W303, store-server.ts `/subscribe`) — it never
+exits and needs no relaunching; prefer it over `coord wait`'s poll/relaunch
+loop. If it ever does reconnect (transient drop), that's pure mechanics:
+zero narration, ever.
 
 - Not addressed to you and not a consult (routine BROADCAST, work.landed,
   knowledge.settled, etc.) — say nothing, just advance past it.

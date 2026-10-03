@@ -74,12 +74,18 @@ const RULES =
 	"fleet and the owner — emit it (coord emit NEED_DECISION --to " +
 	'<coordinator-or-own-sid> --note "question + options" --as <sid>) ' +
 	"the moment you hold one; the fleet board surfaces it for the human. " +
-	"Narration: terse, not verbose — routine untargeted events (BROADCAST, " +
-	"work.landed, knowledge.settled) get no commentary; a consult addressed " +
-	"to you is `consult: [C##] <asker> asks ...` / `consult: [C##] " +
-	"replying ...`; a fleet-wide consult is `consult: fleet asks, ...` / " +
-	"`consult: fleet, no knowledge, didn't reply` or `...details " +
-	"forwarded` — see AGENTS.md.";
+	"Narration: terse, not verbose, as your own plain response text — " +
+	"NEVER a shell echo/tool call (that renders as a visible tool-" +
+	"invocation block, not narration). The templates are the ENTIRE " +
+	"narration — no parenthetical asides, no extra sentence tacked on. " +
+	"Use coord subscribe --as <sid> (W303, live WebSocket push) over " +
+	"coord wait's poll/relaunch loop — one persistent connection, never " +
+	"exits, no relaunching, ever. " +
+	"Routine untargeted events (BROADCAST, work.landed, knowledge.settled) " +
+	"get no commentary; a consult addressed to you is `consult: [C##] " +
+	"<asker> asks ...` / `consult: [C##] replying ...`; a fleet-wide " +
+	"consult is `consult: fleet asks, ...` / `consult: fleet, no " +
+	"knowledge, didn't reply` or `...details forwarded` — see AGENTS.md.";
 
 // top-level sessions are full agent runtimes — advertise the complete
 // capability set so capability-gated work stays takeable by them (lanes

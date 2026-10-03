@@ -2,6 +2,7 @@
 // Handler bodies moved verbatim from bin/coord.ts's if/else chain —
 // one-tab indent preserved, output byte-compatible.
 import { statSync } from "node:fs";
+import { resolveStoreHttpBase } from "../lib/govdb.ts";
 import {
 	die,
 	arg,
@@ -202,15 +203,34 @@ export async function cmdPoll(_rest: string[]): Promise<void> {
 	if (!rows.length) console.log(dim("(no new events)"));
 }
 
-export async function cmdWait(_rest: string[]): Promise<void> {
+// shared by cmdWait (poll) and cmdSubscribe (WS push) — one row-rendering so
+// the two paths can never visually drift apart.
+export function formatEventLine(r: Ev): string {
+	const { sha, note, ...restP } = r.payload
+		? (JSON.parse(r.payload) as Record<string, string>)
+		: {};
+	const extra = Object.entries(restP)
+		.map(([k, v]) => `${dim(`${k}=`)}${v}`)
+		.join(" ");
+	return `  ${dim(`#${r.id}`)} ${r.source.slice(0, 8)} ${cyan(r.kind)}${r.scope ? ` ${r.scope}` : ""}${sha ? green(`@${sha.slice(0, 8)}`) : ""}${Object.keys(restP).length ? `  ${extra}` : ""}${note ? dim(` — ${note}`) : ""}`;
+}
+
+export async function cmdWait(rest: string[]): Promise<void> {
 	// adaptive long-poll: 250ms while events flow, backing off to 2s when
 	// idle; resets to fast the moment anything arrives. Near-instant local
 	// coordination without a broker daemon.
+	// --forever: a true persistent subscribe — never exits after a match,
+	// loops internally so one process stays the live watcher for a whole
+	// session instead of the caller having to notice it exited and relaunch
+	// it (that relaunch is pure noise, not narration-worthy; W303).
 	const as =
 		arg("--as") ??
-		die("usage: wait --as <sid> [--scope s] [--kinds a,b] [--max-seconds 30]");
+		die(
+			"usage: wait --as <sid> [--scope s] [--kinds a,b] [--max-seconds 30] [--forever]",
+		);
 	const scope = arg("--scope");
 	const kinds = arg("--kinds")?.split(",").filter(Boolean) ?? [];
+	const forever = rest.includes("--forever");
 	const deadline = Date.now() + Number(arg("--max-seconds") ?? 30) * 1000;
 	let interval = 250;
 	for (;;) {
@@ -236,15 +256,7 @@ export async function cmdWait(_rest: string[]): Promise<void> {
 		if (kinds.length) rows = rows.filter((r) => kinds.includes(r.kind));
 		if (rows.length) {
 			for (const r of rows) {
-				const { sha, note, ...restP } = r.payload
-					? (JSON.parse(r.payload) as Record<string, string>)
-					: {};
-				const extra = Object.entries(restP)
-					.map(([k, v]) => `${dim(`${k}=`)}${v}`)
-					.join(" ");
-				console.log(
-					`  ${dim(`#${r.id}`)} ${r.source.slice(0, 8)} ${cyan(r.kind)}${r.scope ? ` ${r.scope}` : ""}${sha ? green(`@${sha.slice(0, 8)}`) : ""}${Object.keys(restP).length ? `  ${extra}` : ""}${note ? dim(` — ${note}`) : ""}`,
-				);
+				console.log(formatEventLine(r));
 			}
 			const shownMax = Math.max(...rows.map((r) => r.id));
 			if (cur)
@@ -257,15 +269,58 @@ export async function cmdWait(_rest: string[]): Promise<void> {
 					as,
 					shownMax,
 				);
-			process.exit(0);
+			if (!forever) process.exit(0);
+			interval = 250; // a hit resets the backoff same as the non-forever path
+			continue;
 		}
-		if (Date.now() > deadline) {
+		if (!forever && Date.now() > deadline) {
 			console.log("(timeout, no events)");
 			process.exit(0);
 		}
 		await new Promise((r) => setTimeout(r, interval));
 		interval = Math.min(interval * 2, 2000); // back off while idle; resets by activity above
 	}
+}
+
+// W303 — real persistent push, replacing relaunch-a-poll: one WebSocket to
+// the store server's /subscribe route, printed as events arrive. The open
+// socket keeps the process alive on its own — no sleep loop, no exit, no
+// relaunch, ever. Falls back to cmdWait --forever when no HTTP store is
+// bound (GOVERNOR_STORE_URL=local dev mode has no server to connect to).
+export async function cmdSubscribe(rest: string[]): Promise<void> {
+	const as =
+		arg("--as") ?? die("usage: subscribe --as <sid> [--scope s] [--kinds a,b]");
+	const scope = arg("--scope");
+	const kinds = arg("--kinds") ?? "";
+	const bound = resolveStoreHttpBase();
+	if (!bound) {
+		console.log(
+			"(no HTTP store bound — falling back to poll; set GOVERNOR_STORE_URL for live push)",
+		);
+		return cmdWait([...rest, "--forever"]);
+	}
+	const wsBase = bound.base.replace(/^http/, "ws");
+	const params = new URLSearchParams({ as });
+	if (scope) params.set("scope", scope);
+	if (kinds) params.set("kinds", kinds);
+	if (bound.token) params.set("token", bound.token);
+	let backoff = 500;
+	const connect = (): void => {
+		const ws = new WebSocket(`${wsBase}/subscribe?${params}`);
+		ws.addEventListener("open", () => {
+			backoff = 500; // a clean connect resets the reconnect backoff
+		});
+		ws.addEventListener("message", (e) => {
+			console.log(formatEventLine(JSON.parse(String(e.data)) as Ev));
+		});
+		ws.addEventListener("close", () => {
+			setTimeout(connect, backoff);
+			backoff = Math.min(backoff * 2, 10_000);
+		});
+		ws.addEventListener("error", () => ws.close());
+	};
+	connect();
+	await new Promise<void>(() => {}); // live for the process's whole life
 }
 
 export async function cmdState(_rest: string[]): Promise<void> {
