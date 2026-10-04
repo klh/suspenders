@@ -94,13 +94,17 @@ const served = sm.wrapped(base);
 const inner = served.fetch as (req: Request) => Promise<Response>;
 Bun.serve({
 	...served,
-	async fetch(req: Request): Promise<Response> {
+	async fetch(req: Request, server): Promise<Response> {
 		const denied = hostGuard(req, {
 			bind: BIND,
 			write: isWriteMethod(req.method),
 		});
 		if (denied) return denied;
-		return withWriteCookie(await inner(req));
+		return withWriteCookie(
+			await inner(req),
+			req,
+			server.requestIP(req)?.address ?? null,
+		);
 	},
 });
 console.log(

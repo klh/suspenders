@@ -12,6 +12,7 @@
 //    No token → 403, never 500.
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { dirname } from "node:path";
 
 export const WRITE_TOKEN_HEADER = "x-klh-write-token";
@@ -153,15 +154,49 @@ export function tokenOk(req: Request): boolean {
 export const isWriteMethod = (m: string): boolean =>
 	!["GET", "HEAD", "OPTIONS"].includes(m.toUpperCase());
 
+// C1 fix: this machine's own interface IPs, so a browser that resolved
+// suspenders.local to the LAN IP (192.168.1.210) still counts as "us" —
+// computed lazily and cached; interfaces don't change mid-process.
+let ownIPs: Set<string> | undefined;
+function localInterfaceIPs(): Set<string> {
+	if (ownIPs) return ownIPs;
+	ownIPs = new Set<string>();
+	for (const addrs of Object.values(networkInterfaces()))
+		for (const a of addrs ?? []) ownIPs.add(a.address);
+	return ownIPs;
+}
+
+// C1 (fresh opus-5.5-max audit, 2026-10-04): the host allowlist legitimately
+// includes suspenders.local — Caddy's LAN-facing name — so "Host passed the
+// allowlist" is NOT "this client is local": any LAN host reaching the board
+// through Caddy satisfied the old check and got handed the write cookie.
+// Gate on the real network-layer origin instead.
+export function isLocalClient(req: Request, directIP: string | null): boolean {
+	const xff = req.headers.get("x-forwarded-for");
+	const last = xff
+		? (xff
+				.split(",")
+				.map((s) => s.trim())
+				.filter(Boolean)
+				.pop() ?? null)
+		: null;
+	const ip = (last ?? directIP)?.replace(/^::ffff:/, "") ?? null;
+	if (!ip) return false;
+	return LOOPBACK.includes(ip) || localInterfaceIPs().has(ip);
+}
+
 // the board's own HTML pages carry the token as an HttpOnly SameSite=Strict
 // cookie so its forms and same-origin fetches authenticate without JS ever
 // seeing the secret; non-HTML responses pass through untouched (streamed)
 export function withWriteCookie(
 	res: Response,
+	req: Request,
+	directIP: string | null,
 	token: string | null = writeToken(),
 ): Response {
 	const ct = res.headers.get("content-type") ?? "";
-	if (!token || !ct.startsWith("text/html")) return res;
+	if (!token || !ct.startsWith("text/html") || !isLocalClient(req, directIP))
+		return res;
 	const headers = new Headers(res.headers);
 	headers.append(
 		"set-cookie",

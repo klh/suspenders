@@ -123,14 +123,45 @@ describe("write token file", () => {
 	test("unwritable location → null (caller answers 403, never 500)", () => {
 		expect(ensureWriteToken("/dev/null/nope/write-token")).toBeNull();
 	});
-	test("cookie only on HTML responses", () => {
+	test("cookie only on HTML responses, and only for a local client", () => {
+		const localReq = new Request("http://suspenders.local/", {
+			headers: { "x-forwarded-for": "127.0.0.1" },
+		});
 		const html = withWriteCookie(
 			new Response("<p>", { headers: { "content-type": "text/html" } }),
+			localReq,
+			"127.0.0.1",
 			TOKEN,
 		);
 		expect(html.headers.get("set-cookie")).toContain("HttpOnly");
-		const js = withWriteCookie(Response.json({}), TOKEN);
+		const js = withWriteCookie(Response.json({}), localReq, "127.0.0.1", TOKEN);
 		expect(js.headers.get("set-cookie")).toBeNull();
+	});
+	test("C1: a LAN client reaching the board via Caddy gets NO cookie", () => {
+		// Caddy's reverse_proxy sets/appends the true peer IP as the last
+		// X-Forwarded-For entry — a LAN host (not loopback, not our own
+		// interface) must not be handed the write-auth cookie just because
+		// suspenders.local passed the host allowlist.
+		const lanReq = new Request("http://suspenders.local/", {
+			headers: { "x-forwarded-for": "192.168.1.77" },
+		});
+		const res = withWriteCookie(
+			new Response("<p>", { headers: { "content-type": "text/html" } }),
+			lanReq,
+			"127.0.0.1", // Caddy itself connects to the board over loopback
+			TOKEN,
+		);
+		expect(res.headers.get("set-cookie")).toBeNull();
+	});
+	test("C1: a direct loopback client (no proxy) still gets the cookie", () => {
+		const directReq = new Request("http://127.0.0.1:7799/", { headers: {} });
+		const res = withWriteCookie(
+			new Response("<p>", { headers: { "content-type": "text/html" } }),
+			directReq,
+			"127.0.0.1",
+			TOKEN,
+		);
+		expect(res.headers.get("set-cookie")).toContain("HttpOnly");
 	});
 });
 
