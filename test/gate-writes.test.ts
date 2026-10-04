@@ -10,6 +10,12 @@ import {
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+// GATE_WRITES_JOURNAL is captured at files.ts module load; other suites
+// mutate process.env.HOME at their own load (query-bust pattern), so the
+// expected home must be captured at THIS file's load — the same evaluation
+// instant — never at test time.
+const HOME_AT_LOAD = process.env.HOME;
+
 const tmp = mkdtempSync(join(process.cwd(), ".gate-writes-test-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -33,7 +39,7 @@ function entries(): Entry[] {
 describe("gate-write journal (W58)", () => {
 	test("GATE_WRITES_JOURNAL is the ~/.cache paper trail", () => {
 		expect(GATE_WRITES_JOURNAL).toBe(
-			`${process.env.HOME}/.cache/claude-governor/gate-writes.jsonl`,
+			`${HOME_AT_LOAD}/.cache/claude-governor/gate-writes.jsonl`,
 		);
 	});
 

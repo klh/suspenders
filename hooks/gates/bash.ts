@@ -233,6 +233,17 @@ export function bashGate(hook: HookInput): never {
 					"secrets-gate: --no-verify in an agent command is denied by policy. If you are the USER, run the git command in your own terminal.",
 				);
 			const repoDir = gitRepoDir(w, segCwd);
+			// gitleaks resolves .gitleaksignore from its CWD, not the repo
+			// root — from a work-tree subdir the repo's ignore policy (the
+			// synthetic-fixture fingerprints) silently stops applying and
+			// every push false-denies. Scan from the toplevel of THAT
+			// segment's repo: same history, correct policy. A repoDir with
+			// no toplevel (bare --git-dir=, not a repo) keeps repoDir — the
+			// inRepo gate below skips non-repos either way.
+			const top = run("git", ["rev-parse", "--show-toplevel"], {
+				cwd: repoDir,
+			});
+			const scanDir = top.ok && top.out.trim() ? top.out.trim() : repoDir;
 			const inRepo = run("git", ["rev-parse", "--is-inside-work-tree"], {
 				cwd: repoDir,
 			}).ok;
@@ -240,7 +251,7 @@ export function bashGate(hook: HookInput): never {
 				gitSub(w) === "commit" &&
 				inRepo &&
 				!run("gitleaks", ["protect", "--staged", "--redact", "--no-banner"], {
-					cwd: repoDir,
+					cwd: scanDir,
 				}).ok
 			)
 				deny(
@@ -250,7 +261,7 @@ export function bashGate(hook: HookInput): never {
 				gitSub(w) === "push" &&
 				inRepo &&
 				!run("gitleaks", ["git", ".", "--redact", "--no-banner"], {
-					cwd: repoDir,
+					cwd: scanDir,
 				}).ok
 			)
 				deny(

@@ -26,6 +26,19 @@ const { harvestUsage, modelGroup } = await import(
 // restore: REG was already captured at govdb module load; leaving the temp
 // HOME set leaks into later-loading suites (the gate-writes interference)
 process.env.HOME = REAL_HOME;
+// the attribution fallback reads ~/.claude/local-llm/suspenders-board.json at
+// CALL time (boardSettingsPath → process.env.HOME): under the real home an
+// operator default_actor leaks into the rollup. Harvest under the temp home —
+// no settings file there, so the fallback stays the honest "unassigned".
+const withHome = <T>(home: string, fn: () => T): T => {
+	const prev = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		return fn();
+	} finally {
+		process.env.HOME = prev;
+	}
+};
 
 afterAll(() => {
 	rmSync(HOME, { recursive: true, force: true });
@@ -141,7 +154,7 @@ describe("harvestUsage", () => {
 		]);
 		w("sid-b.jsonl", [al("gpt-5.2", 7, 3, "2026-10-01T11:15:00Z")]);
 
-		const s1 = harvestUsage(db, { root: ROOT });
+		const s1 = withHome(HOME, () => harvestUsage(db, { root: ROOT }));
 		expect(s1.requests).toBe(3);
 		expect(s1.inTok).toBe(117);
 		expect(s1.outTok).toBe(58);
@@ -174,7 +187,7 @@ describe("harvestUsage", () => {
 		});
 
 		// idempotent: unchanged transcripts → skipped, rollups untouched
-		const s2 = harvestUsage(db, { root: ROOT });
+		const s2 = withHome(HOME, () => harvestUsage(db, { root: ROOT }));
 		expect(s2.skipped).toBe(2);
 		expect(s2.harvested).toBe(0);
 		expect(s2.requests).toBe(0);
@@ -184,7 +197,7 @@ describe("harvestUsage", () => {
 			join(ROOT, "proj", "sid-a.jsonl"),
 			`${al("luna-pro", 4, 2, "2026-10-01T12:05:00Z")}\n`,
 		);
-		const s3 = harvestUsage(db, { root: ROOT });
+		const s3 = withHome(HOME, () => harvestUsage(db, { root: ROOT }));
 		expect(s3.harvested).toBe(1);
 		expect(s3.requests).toBe(1);
 		expect(rowOf(db, "glm-5.3-flash")).toMatchObject({ in_tok: 100 });

@@ -4,18 +4,32 @@
 import { afterAll, describe, expect, test } from "bun:test";
 
 import { Database } from "bun:sqlite";
-import {
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	realpathSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { isDecisionKind } from "../hooks/lib/govdb.ts";
-import { boardFixture } from "./helpers/board-fixture.ts";
-const { HOME, REPO, GREPO, env, bin, PORT, BASE, run, q, sleep, getData, myProject, getDecisions, post, rawPost, fork, addWork, waitUp, demoProc, setDemoProc } = await boardFixture(7847, afterAll);
+import { boardFixture, freePort } from "./helpers/board-fixture.ts";
+const {
+	HOME,
+	REPO,
+	GREPO,
+	env,
+	bin,
+	PORT,
+	BASE,
+	run,
+	q,
+	sleep,
+	getData,
+	myProject,
+	getDecisions,
+	post,
+	rawPost,
+	fork,
+	addWork,
+	waitUp,
+	demoProc,
+	setDemoProc,
+} = await boardFixture(await freePort(), afterAll);
 
 describe("served page", () => {
 	test("inline script parses as JS (catches template corruption)", async () => {
@@ -388,7 +402,7 @@ describe("endpoint hardening", () => {
 			expect(isDecisionKind(k)).toBe(false);
 	});
 
-	test("advise entry accepts need-decision (pre-seeded advice fact → idempotent exit, no LLM call)", () => {
+	test("advise entry accepts need-decision (kind gate passes; LLM unreachable → graceful unavailable, seeded fact intact)", () => {
 		run("coord.ts", [
 			"emit",
 			"need-decision",
@@ -405,15 +419,28 @@ describe("endpoint hardening", () => {
 				"SELECT id FROM events WHERE kind = 'need-decision' AND json_extract(payload, '$.note') = 'entry gate'",
 			)
 			.get() as { id: number };
-		// advise.ts checks the fact BEFORE any fetch — seeding it proves the
-		// kind gate passed without ever reaching the (dead) LLM URL
 		db.query(
 			"INSERT OR REPLACE INTO facts (key, value, source, version, ts) VALUES (?, ?, 'advise', 1, ?)",
 		).run(`advice.${ev.id}`, JSON.stringify({ rec: "seeded" }), Date.now());
 		db.close();
-		const r = run("advise.ts", [String(ev.id)]);
-		expect(r.code).toBe(0);
-		expect(r.out).toContain("already advised");
+		// W217: advise re-advises ad-nauseam — the pre-seeded fact no longer
+		// short-circuits (a stale fact must never wedge the card). Belt is
+		// pinned dead: resolveBelt would otherwise reach the real belt.local
+		// on this LAN and answer the fork for real.
+		const r = run("advise.ts", [String(ev.id)], {
+			SUSPENDERS_BELT_URL: "http://127.0.0.1:1",
+		});
+		expect(r.code).toBe(0); // no LLM reachable = graceful skip, fork open
+		const after = new Database(`${HOME}/.cache/claude-governor/governor.db`);
+		const fact = after
+			.query("SELECT value FROM facts WHERE key = ?")
+			.get(`advice.${ev.id}`) as { value: string };
+		const errFact = after
+			.query("SELECT value FROM facts WHERE key = ?")
+			.get(`advice.${ev.id}.error`) as { value: string } | null;
+		after.close();
+		expect(fact.value).toContain("seeded"); // failure never touches the slot
+		expect(errFact?.value ?? "").toContain("unavailable");
 	});
 
 	test("answer validation: id, to, note and token are all required", async () => {
@@ -593,7 +620,10 @@ describe("board api v3 (docs/board-api.md)", () => {
 			expect(t.project).toBe(proj);
 			expect(Object.keys(t).sort()).toEqual([
 				"age_s",
+				"executor",
 				"id",
+				"locality",
+				"model",
 				"open_decisions",
 				"owner_label",
 				"owner_sid",
@@ -879,14 +909,25 @@ describe("board api v3 (docs/board-api.md)", () => {
 	});
 });
 
+// module-scope TLA — describe bodies run during collection and cannot
+// await; a free port per run dodges stale --demo zombies
+const DEMO_PORT = await freePort();
+
 describe("demo mode (--demo)", () => {
-	const DEMO_PORT = 7848;
 	const DEMO_BASE = `http://127.0.0.1:${DEMO_PORT}`;
 	const demoProj = `${HOME}/.cache/claude-governor/demo`;
-	setDemoProc(Bun.spawn(
-		["bun", join(bin, "fleet-board.ts"), "--demo", "--port", String(DEMO_PORT)],
-		{ cwd: REPO, env, stdout: "pipe", stderr: "pipe" },
-	));
+	setDemoProc(
+		Bun.spawn(
+			[
+				"bun",
+				join(bin, "fleet-board.ts"),
+				"--demo",
+				"--port",
+				String(DEMO_PORT),
+			],
+			{ cwd: REPO, env, stdout: "pipe", stderr: "pipe" },
+		),
+	);
 
 	test("seeds sessions, claim labels, 4 mixed items, 2 OPEN + 2 ANSWERED forks, a dozen events", async () => {
 		await waitUp(DEMO_BASE);
@@ -948,16 +989,18 @@ describe("demo mode (--demo)", () => {
 	test("re-seed on restart is a no-op — no duplicate partition", async () => {
 		demoProc?.kill();
 		await demoProc?.exited;
-		setDemoProc(Bun.spawn(
-			[
-				"bun",
-				join(bin, "fleet-board.ts"),
-				"--demo",
-				"--port",
-				String(DEMO_PORT),
-			],
-			{ cwd: REPO, env, stdout: "pipe", stderr: "pipe" },
-		));
+		setDemoProc(
+			Bun.spawn(
+				[
+					"bun",
+					join(bin, "fleet-board.ts"),
+					"--demo",
+					"--port",
+					String(DEMO_PORT),
+				],
+				{ cwd: REPO, env, stdout: "pipe", stderr: "pipe" },
+			),
+		);
 		await waitUp(DEMO_BASE);
 		const feed = await (await fetch(`${DEMO_BASE}/api/tasks`)).json();
 		expect(feed.tasks.filter((t: Row) => t.project === demoProj).length).toBe(
