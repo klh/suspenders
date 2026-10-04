@@ -52,7 +52,7 @@ class KlhServiceRow extends LitElement {
 			color: var(--klh-accent, #d8900f);
 		}
 		.bad {
-			color: var(--klh-bad, #c96a4f);
+			color: var(--klh-danger-ink, #c96a4f);
 		}
 		.name {
 			font-weight: 600;
@@ -70,7 +70,7 @@ class KlhServiceRow extends LitElement {
 			padding: 2px 9px;
 			border: 1px solid var(--klh-edge, rgba(255, 255, 255, 0.22));
 			border-radius: 2px;
-			background: var(--klh-base, #141413);
+			background: var(--klh-bg, #141413);
 			color: var(--klh-ink, #e8e6e1);
 		}
 		button:hover,
@@ -118,7 +118,7 @@ class KlhServiceRow extends LitElement {
 		}
 		code {
 			flex: 1;
-			background: var(--klh-base, #141413);
+			background: var(--klh-bg, #141413);
 			border: 1px solid var(--klh-edge, rgba(255, 255, 255, 0.12));
 			border-radius: 2px;
 			padding: 3px 7px;
@@ -130,7 +130,7 @@ class KlhServiceRow extends LitElement {
 		output {
 			display: block;
 			margin-top: 4px;
-			color: var(--klh-bad, #c96a4f);
+			color: var(--klh-danger-ink, #c96a4f);
 		}
 	`;
 

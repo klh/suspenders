@@ -1,6 +1,11 @@
-// hooks/lib/theme.ts — W269: the klh dark/light theme layer, one source of
-// truth for every suspenders GUI (board SPA, console pages, /usage) and the
-// copy-verbatim reference for belt / klh-local dashboards (docs/theme-tokens.md).
+// hooks/lib/theme.ts — W269/W291: the klh theme layer (colour roles, scale
+// tokens, settings gear, fleet strip), one source of truth for every klh GUI:
+// the suspenders board SPA, console pages and /usage, plus the belt.local and
+// bar.local dashboards. Canonical home: klh/suspenders hooks/lib/theme.ts.
+// klh/belt and klh/local vendor it byte-identical as bin/klh-theme.ts (no
+// imports, no deps, so their pages still work offline). To change it: edit
+// the canonical file, bump KLH_THEME_VERSION (test/theme.test.ts pins the
+// hash), then re-copy it into both repos (docs/theme-tokens.md).
 //
 // Contract: `data-theme="dark|light"` on <html> swaps a CSS custom-property
 // token set — components never carry their own colors, only var(--klh-*).
@@ -10,6 +15,10 @@
 
 export type Theme = "dark" | "light";
 export type ThemePref = Theme | "system";
+
+// Bumped on every change to this file; the vendored copies carry it too, so
+// "same version" means "same bytes" (each consumer's drift test checks it).
+export const KLH_THEME_VERSION = "1.1.0";
 
 export const THEME_KEY = "klh-theme";
 export const THEME_PREFS: readonly ThemePref[] = ["light", "dark", "system"];
@@ -57,6 +66,29 @@ export const TOKENS: Readonly<Record<string, readonly [string, string]>> = {
 	"--klh-chart-axis": ["#898781", "#6b675f"],
 };
 
+// Scale tokens (W291) hold the same value in both themes: font stacks, the
+// type ramp, spacing steps and radii. Mono is the instrument face (belt, bar,
+// the fleet strip, data cells); sans is the board/console prose face.
+export const SCALE: Readonly<Record<string, string>> = {
+	"--klh-font-mono": "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
+	"--klh-font-sans":
+		'-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif',
+	"--klh-text-xs": "10px",
+	"--klh-text-sm": "11px",
+	"--klh-text-md": "12.5px",
+	"--klh-text-lg": "13px",
+	"--klh-text-xl": "14px",
+	"--klh-space-1": "2px",
+	"--klh-space-2": "4px",
+	"--klh-space-3": "8px",
+	"--klh-space-4": "12px",
+	"--klh-space-5": "16px",
+	"--klh-space-6": "20px",
+	"--klh-space-7": "28px",
+	"--klh-radius": "2px",
+	"--klh-radius-lg": "3px",
+};
+
 export const isPref = (v: unknown): v is ThemePref =>
 	v === "light" || v === "dark" || v === "system";
 
@@ -65,9 +97,14 @@ const block = (i: 0 | 1): string =>
 		.map(([k, v]) => `${k}:${v[i]};`)
 		.join("");
 
-// Dark is the no-JS default (the historical look); the media block covers a
-// light-preferring browser before/without the pre-paint script.
-export const THEME_CSS = `:root,:root[data-theme="dark"]{color-scheme:dark;${block(0)}}:root[data-theme="light"]{color-scheme:light;${block(1)}}@media (prefers-color-scheme: light){:root:not([data-theme]){color-scheme:light;${block(1)}}}`;
+const scale = Object.entries(SCALE)
+	.map(([k, v]) => `${k}:${v};`)
+	.join("");
+
+// Scale first (theme-independent). Dark is the no-JS default (the historical
+// look); the media block covers a light-preferring browser before/without the
+// pre-paint script.
+export const THEME_CSS = `:root{${scale}}:root,:root[data-theme="dark"]{color-scheme:dark;${block(0)}}:root[data-theme="light"]{color-scheme:light;${block(1)}}@media (prefers-color-scheme: light){:root:not([data-theme]){color-scheme:light;${block(1)}}}`;
 
 // Pre-paint: resolves the stored pref BEFORE first render and exposes
 // window.klhTheme {pref, resolve, apply, set}. Fires `klh-themechange` on
@@ -83,13 +120,14 @@ if(mq){var on=function(){if(pref()==="system")apply();};if(mq.addEventListener)m
 if(window.addEventListener)window.addEventListener("storage",function(e){if(e.key===K)apply();});
 window.klhTheme={pref:pref,resolve:resolve,apply:apply,set:set};})();`;
 
-// Everything a page needs in <head>: tokens + pre-paint, in that order.
-export const THEME_HEAD = `<style id="klh-theme-tokens">${THEME_CSS}</style><script>${THEME_PREPAINT_JS}</script>`;
+// Everything a page needs in <head>: tokens + pre-paint, in that order. The
+// data-klh-theme stamp shows which theme version a live page wears.
+export const THEME_HEAD = `<style id="klh-theme-tokens" data-klh-theme="${KLH_THEME_VERSION}">${THEME_CSS}</style><script>${THEME_PREPAINT_JS}</script>`;
 
 // ─── settings region (gear → panel) ───────────────────────────────────────
 // Native <details> disclosure: no framework, keyboard-reachable for free.
-// Other klh GUIs copy this markup + THEME_SETTINGS_JS + THEME_SETTINGS_CSS
-// verbatim and add their own fieldsets below the theme one.
+// Every klh GUI mounts settingsBlock() + THEME_SETTINGS_CSS/_JS at the right
+// end of its own top bar and adds its own fieldsets below the theme one.
 const GEAR =
 	'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>';
 
@@ -121,3 +159,69 @@ for(var i=0;i<radios.length;i++)radios[i].addEventListener("change",function(e){
 document.addEventListener("klh-themechange",sync);sync();
 document.addEventListener("click",function(e){if(box.open&&e.target instanceof Node&&!box.contains(e.target))box.open=false;});
 document.addEventListener("keydown",function(e){if(box.open&&e.key==="Escape"){box.open=false;var s=box.querySelector("summary");if(s)s.focus();}});})();`;
+
+// ─── fleet strip (W291) ───────────────────────────────────────────────────
+// One hairline row of plain links, identical on every klh dashboard, so a
+// human moving between belt.local, suspenders.local and bar.local sees one
+// product family. Each site keeps its own server and port; this only links
+// them. The page's own site is aria-current and never probed. The others are
+// probed every 5s while the tab is visible (any HTTP answer = reachable) and,
+// while unreachable, dim and point at their repo instead.
+export type FleetSite = "belt" | "suspenders" | "local";
+
+export interface FleetLink {
+	readonly id: FleetSite;
+	readonly href: string;
+	readonly repo: string;
+	readonly title: string;
+}
+
+export const FLEET_SITES: readonly FleetLink[] = [
+	{
+		id: "belt",
+		href: "https://belt.local",
+		repo: "https://github.com/klh/belt",
+		title: "belt: local LLM fleet (belt.local, :7791)",
+	},
+	{
+		id: "suspenders",
+		href: "https://suspenders.local",
+		repo: "https://github.com/klh/suspenders",
+		title: "suspenders: fleet board + console (suspenders.local, :7799)",
+	},
+	{
+		id: "local",
+		href: "https://bar.local",
+		repo: "https://github.com/klh/local",
+		title: "local: .local services bar (bar.local, :7792)",
+	},
+];
+
+const fleetLink = (s: FleetLink, current: FleetSite | ""): string =>
+	s.id === current
+		? `<a href="${s.href}" aria-current="page" title="${s.title}">${s.id}</a>`
+		: `<a href="${s.href}" data-repo="${s.repo}" title="${s.title}">${s.id}</a>`;
+
+export const fleetNav = (current: FleetSite | ""): string =>
+	`<nav class="klh-fleetnav" id="klh-fleetnav" aria-label="klh fleet"><span class="klh-fleetnav-brand">klh<i>·</i>fleet</span>${FLEET_SITES.map((s) => fleetLink(s, current)).join("")}</nav>`;
+
+export const FLEET_NAV_CSS = `.klh-fleetnav{display:flex;align-items:baseline;flex-wrap:wrap;gap:var(--klh-space-1) var(--klh-space-4);padding:var(--klh-space-2) 0;margin:0 0 var(--klh-space-3);border-bottom:1px solid var(--klh-edge-faint);font:var(--klh-text-sm)/1.6 var(--klh-font-mono);letter-spacing:.04em;}
+.klh-fleetnav-brand{color:var(--klh-ink-3);font-size:var(--klh-text-xs);text-transform:uppercase;letter-spacing:.14em;}
+.klh-fleetnav-brand i{font-style:normal;color:var(--klh-accent);}
+.klh-fleetnav a{color:var(--klh-dim);text-decoration:none;border-bottom:1px solid transparent;}
+.klh-fleetnav a:hover{color:var(--klh-ink);}
+.klh-fleetnav a:focus-visible{outline:2px solid var(--klh-accent);outline-offset:2px;}
+.klh-fleetnav a[aria-current]{color:var(--klh-ink);border-bottom-color:var(--klh-accent);}
+.klh-fleetnav a.down{opacity:.4;}`;
+
+// Probes the sibling sites (no-cors: an opaque answer still proves the host
+// is reachable). Only toggles a class, href and title on the server-rendered
+// links: no DOM construction, no innerHTML.
+export const FLEET_NAV_JS = `(function(){var nav=document.getElementById("klh-fleetnav");if(!nav||!window.fetch)return;
+var links=nav.querySelectorAll("a[data-repo]"),site=[],tip=[];
+for(var i=0;i<links.length;i++){site[i]=links[i].href;tip[i]=links[i].title;}
+function mark(i,up){var a=links[i];a.classList.toggle("down",!up);a.href=up?site[i]:a.getAttribute("data-repo");a.title=up?tip[i]:tip[i]+" | unreachable, opens the repo";}
+function check(i){window.fetch(new URL("/ping",site[i]).href,{method:"HEAD",mode:"no-cors",cache:"no-store"}).then(function(){mark(i,true);},function(){mark(i,false);});}
+function probe(){if(document.hidden)return;for(var j=0;j<links.length;j++)check(j);}
+probe();setInterval(probe,5000);
+document.addEventListener("visibilitychange",probe);})();`;

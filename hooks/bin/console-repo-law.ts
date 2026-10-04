@@ -115,7 +115,7 @@ export function repoLawState(
 }
 
 // ─── pages ─────────────────────────────────────────────────────────────────
-const PAGE_CSS = `.lawtbl{width:100%;border-collapse:collapse;font-size:12px}.lawtbl td,.lawtbl th{padding:5px 8px;border-bottom:1px solid #2c2c2a;text-align:left}.lawtbl th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#98958e}.lawtbl textarea{width:100%;min-height:160px;background:#141413;color:#e8e6e1;border:1px solid rgba(255,255,255,.14);border-radius:2px;padding:8px;font:12px ui-monospace,Menlo,monospace}.chip{display:inline-block;border:1px solid rgba(255,255,255,.14);border-radius:2px;padding:1px 7px;font-size:11px;color:#c3c2b7}.chip.dotfile{color:#a5c78a;border-color:#5c7a35}.chip.mirror{color:#c3c2b7}.chip.config{color:#d8900f;border-color:#d8900f}.chip.defaults{color:#98958e}`;
+const PAGE_CSS = `.lawtbl{width:100%;border-collapse:collapse;font-size:12px}.lawtbl td,.lawtbl th{padding:5px 8px;border-bottom:1px solid #2c2c2a;text-align:left}.lawtbl th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#98958e}.lawtbl textarea{width:100%;min-height:160px;background:#141413;color:#e8e6e1;border:1px solid rgba(255,255,255,.14);border-radius:2px;padding:8px;font:12px var(--klh-font-mono)}.chip{display:inline-block;border:1px solid rgba(255,255,255,.14);border-radius:2px;padding:1px 7px;font-size:11px;color:#c3c2b7}.chip.dotfile{color:#a5c78a;border-color:#5c7a35}.chip.mirror{color:#c3c2b7}.chip.config{color:#d8900f;border-color:#d8900f}.chip.defaults{color:#98958e}`;
 
 export const REPO_LAWS_CSS = PAGE_CSS;
 

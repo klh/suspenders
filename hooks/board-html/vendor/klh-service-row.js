@@ -1,4 +1,4 @@
-import{r,e,s}from"./lit-shared.js";var c=(o)=>o.state??(o.up?"up":"down"),l=(o)=>{let t=c(o),a=o.recovery,i=t!=="up"&&a!==null;return{badge:t==="up"?"UP":t==="degraded"?"DEGRADED":"DOWN",tone:t==="up"?"ok":t==="degraded"?"warn":"bad",where:a?.probe.kind==="launchd"?"launchd":a?.probe.kind==="http"?`:${a.probe.port}${a.probe.path}`:`:${o.port}`,showRecovery:i,open:t==="down",saw:o.detail,what:a?.what??"",causes:i&&a?a.causes:[],steps:i&&a?a.recovery:[]}};class n{probe;busy=!1;err=null;constructor(o){this.probe=o}async reprobe(o){if(this.busy)return this.probe;this.busy=!0,this.err=null;try{let t=await o(`/api/services/probe?id=${encodeURIComponent(this.probe.id)}`),a=await t.json();if(!t.ok||!a.ok||!a.service)throw Error(a.error??`HTTP ${t.status}`);this.probe=a.service}catch(t){this.err=t instanceof Error?t.message:String(t)}finally{this.busy=!1}return this.probe}}var d=15000;class p extends s{static properties={probe:{type:Object},busy:{state:!0},err:{state:!0},copied:{state:!0}};static styles=r`
+import{r,e,s}from"./lit-shared.js";var c=(o)=>o.state??(o.up?"up":"down"),l=(o)=>{let t=c(o),i=o.recovery,a=t!=="up"&&i!==null;return{badge:t==="up"?"UP":t==="degraded"?"DEGRADED":"DOWN",tone:t==="up"?"ok":t==="degraded"?"warn":"bad",where:i?.probe.kind==="launchd"?"launchd":i?.probe.kind==="http"?`:${i.probe.port}${i.probe.path}`:`:${o.port}`,showRecovery:a,open:t==="down",saw:o.detail,what:i?.what??"",causes:a&&i?i.causes:[],steps:a&&i?i.recovery:[]}};class n{probe;busy=!1;err=null;constructor(o){this.probe=o}async reprobe(o){if(this.busy)return this.probe;this.busy=!0,this.err=null;try{let t=await o(`/api/services/probe?id=${encodeURIComponent(this.probe.id)}`),i=await t.json();if(!t.ok||!i.ok||!i.service)throw Error(i.error??`HTTP ${t.status}`);this.probe=i.service}catch(t){this.err=t instanceof Error?t.message:String(t)}finally{this.busy=!1}return this.probe}}var d=15000;class p extends s{static properties={probe:{type:Object},busy:{state:!0},err:{state:!0},copied:{state:!0}};static styles=r`
 		:host {
 			display: block;
 			background: var(--klh-surface, #1c1b19);
@@ -27,7 +27,7 @@ import{r,e,s}from"./lit-shared.js";var c=(o)=>o.state??(o.up?"up":"down"),l=(o)=
 			color: var(--klh-accent, #d8900f);
 		}
 		.bad {
-			color: var(--klh-bad, #c96a4f);
+			color: var(--klh-danger-ink, #c96a4f);
 		}
 		.name {
 			font-weight: 600;
@@ -45,7 +45,7 @@ import{r,e,s}from"./lit-shared.js";var c=(o)=>o.state??(o.up?"up":"down"),l=(o)=
 			padding: 2px 9px;
 			border: 1px solid var(--klh-edge, rgba(255, 255, 255, 0.22));
 			border-radius: 2px;
-			background: var(--klh-base, #141413);
+			background: var(--klh-bg, #141413);
 			color: var(--klh-ink, #e8e6e1);
 		}
 		button:hover,
@@ -93,7 +93,7 @@ import{r,e,s}from"./lit-shared.js";var c=(o)=>o.state??(o.up?"up":"down"),l=(o)=
 		}
 		code {
 			flex: 1;
-			background: var(--klh-base, #141413);
+			background: var(--klh-bg, #141413);
 			border: 1px solid var(--klh-edge, rgba(255, 255, 255, 0.12));
 			border-radius: 2px;
 			padding: 3px 7px;
@@ -105,9 +105,9 @@ import{r,e,s}from"./lit-shared.js";var c=(o)=>o.state??(o.up?"up":"down"),l=(o)=
 		output {
 			display: block;
 			margin-top: 4px;
-			color: var(--klh-bad, #c96a4f);
+			color: var(--klh-danger-ink, #c96a4f);
 		}
-	`;ctl=null;timer=null;constructor(){super();this.probe=null,this.busy=!1,this.err=null,this.copied=-1}connectedCallback(){super.connectedCallback(),this.timer=setInterval(()=>{if(this.probe&&this.probe.state!=="up"&&!document.hidden)this.reprobe()},d)}disconnectedCallback(){if(super.disconnectedCallback(),this.timer)clearInterval(this.timer);this.timer=null}controller(){if(!this.probe)return null;if(!this.ctl||this.ctl.probe.id!==this.probe.id)this.ctl=new n(this.probe);return this.ctl.probe=this.probe,this.ctl}async reprobe(){let o=this.controller();if(!o||this.busy)return;this.busy=!0,this.probe=await o.reprobe((t)=>fetch(t,{cache:"no-store"})),this.err=o.err,this.busy=!1}async copy(o,t){try{await navigator.clipboard.writeText(t)}catch{let a=document.createElement("textarea");a.value=t,a.setAttribute("readonly",""),a.style.position="fixed",a.style.opacity="0",this.renderRoot.appendChild(a),a.select(),document.execCommand("copy"),a.remove()}this.copied=o,setTimeout(()=>{if(this.copied===o)this.copied=-1},1500)}when(o){let t=new Date(o);return Number.isNaN(t.getTime())?"":t.toLocaleTimeString()}render(){let o=this.probe;if(!o)return e``;let t=l(o);return e`
+	`;ctl=null;timer=null;constructor(){super();this.probe=null,this.busy=!1,this.err=null,this.copied=-1}connectedCallback(){super.connectedCallback(),this.timer=setInterval(()=>{if(this.probe&&this.probe.state!=="up"&&!document.hidden)this.reprobe()},d)}disconnectedCallback(){if(super.disconnectedCallback(),this.timer)clearInterval(this.timer);this.timer=null}controller(){if(!this.probe)return null;if(!this.ctl||this.ctl.probe.id!==this.probe.id)this.ctl=new n(this.probe);return this.ctl.probe=this.probe,this.ctl}async reprobe(){let o=this.controller();if(!o||this.busy)return;this.busy=!0,this.probe=await o.reprobe((t)=>fetch(t,{cache:"no-store"})),this.err=o.err,this.busy=!1}async copy(o,t){try{await navigator.clipboard.writeText(t)}catch{let i=document.createElement("textarea");i.value=t,i.setAttribute("readonly",""),i.style.position="fixed",i.style.opacity="0",this.renderRoot.appendChild(i),i.select(),document.execCommand("copy"),i.remove()}this.copied=o,setTimeout(()=>{if(this.copied===o)this.copied=-1},1500)}when(o){let t=new Date(o);return Number.isNaN(t.getTime())?"":t.toLocaleTimeString()}render(){let o=this.probe;if(!o)return e``;let t=l(o);return e`
 			<div class="head">
 				<span class="badge ${t.tone}">${t.badge}</span>
 				<span class="name">${o.name}</span>
@@ -136,16 +136,16 @@ import{r,e,s}from"./lit-shared.js";var c=(o)=>o.state??(o.up?"up":"down"),l=(o)=
 				</ul>
 				<h4>recover — run in order, then re-probe</h4>
 				<ol>
-					${o.steps.map((t,a)=>e`<li>
+					${o.steps.map((t,i)=>e`<li>
 							<div class="dim">${t.label}</div>
 							<div class="step">
 								<code>${t.cmd}</code>
 								<button
 									type="button"
 									aria-label="copy: ${t.cmd}"
-									@click=${()=>this.copy(a,t.cmd)}
+									@click=${()=>this.copy(i,t.cmd)}
 								>
-									${this.copied===a?"copied":"copy"}
+									${this.copied===i?"copied":"copy"}
 								</button>
 							</div>
 						</li>`)}

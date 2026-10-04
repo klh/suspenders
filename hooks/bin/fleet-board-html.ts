@@ -45,8 +45,8 @@ ${THEME_HEAD}
 * { box-sizing: border-box; }
 :focus-visible { outline:2px solid var(--klh-accent); outline-offset:2px; }
 [hidden] { display:none !important; }
-body { background:var(--klh-bg); color:var(--klh-ink); font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; margin:0; padding:16px 20px 28px; }
-.mono { font-family:ui-monospace,Menlo,monospace; }
+body { background:var(--klh-bg); color:var(--klh-ink); font:13px/1.45 var(--klh-font-sans); margin:0; padding:16px 20px 28px; }
+.mono { font-family:var(--klh-font-mono); }
 .dim { color:var(--klh-dim); }
 .state { font-size:12px; padding:4px 0; }
 header { display:flex; align-items:baseline; gap:14px; margin-bottom:10px; }
@@ -62,7 +62,7 @@ header .right { margin-left:auto; display:flex; align-items:center; gap:12px; }
 #needsn { background:var(--klh-danger-bg); border:1px solid var(--klh-danger); border-radius:2px; padding:2px 9px; color:var(--klh-danger-ink); font:inherit; font-size:11px; font-weight:600; cursor:pointer; }
 #needsn:empty { display:none; }
 .plabel { font-size:10px; color:var(--klh-dim); text-transform:uppercase; letter-spacing:.06em; }
-select { background:var(--klh-surface); color:var(--klh-ink); border:1px solid var(--klh-edge); border-radius:2px; padding:3px 8px; font:11px ui-monospace,Menlo,monospace; max-width:380px; }
+select { background:var(--klh-surface); color:var(--klh-ink); border:1px solid var(--klh-edge); border-radius:2px; padding:3px 8px; font:11px var(--klh-font-mono); max-width:380px; }
 nav.tabs { display:flex; gap:2px; margin:2px 0 16px; border-bottom:1px solid var(--klh-edge); }
 nav.tabs button { background:none; border:none; border-bottom:2px solid transparent; color:var(--klh-dim); font:inherit; font-size:12px; font-weight:600; letter-spacing:.04em; padding:7px 12px; cursor:pointer; }
 nav.tabs button:hover { color:var(--klh-ink); }
@@ -141,13 +141,13 @@ button.dismiss { background:none; border:none; padding:0; color:var(--klh-dim); 
 .taskbar { display:flex; align-items:center; gap:10px; margin:0 0 10px; }
 .taskbar select {
   background:var(--klh-surface-hi); color:var(--klh-ink-2); border:1px solid var(--klh-edge); border-radius:4px;
-  font:12px ui-monospace, Menlo, monospace; padding:3px 6px;
+  font:12px var(--klh-font-mono); padding:3px 6px;
 }
 #tasksTbl .num { text-align:right; font-variant-numeric:tabular-nums; color:var(--klh-dim); }
 /* W57 orchestrate box — LLM proposes a plan + parallel children from a goal; the human registers it as a plan-gated work split */
 .orch { border:1px solid var(--klh-edge); border-radius:6px; padding:10px 12px; margin:0 0 12px; background:var(--klh-wash); }
 .orchrow { display:flex; gap:8px; align-items:center; }
-#orchGoal { flex:1; background:var(--klh-field); color:var(--klh-ink); border:1px solid var(--klh-edge-mid); border-radius:4px; font:12px ui-monospace, Menlo, monospace; padding:5px 8px; }
+#orchGoal { flex:1; background:var(--klh-field); color:var(--klh-ink); border:1px solid var(--klh-edge-mid); border-radius:4px; font:12px var(--klh-font-mono); padding:5px 8px; }
 #orchGoal:focus { outline:none; border-color:var(--klh-accent); }
 #orchGo { background:none; border:1px solid var(--klh-accent); border-radius:4px; color:var(--klh-accent); font:inherit; font-size:11px; padding:4px 10px; cursor:pointer; }
 #orchGo:disabled { opacity:.45; cursor:default; }
@@ -214,7 +214,7 @@ button.dismiss { background:none; border:none; padding:0; color:var(--klh-dim); 
 .feed { border:1px solid var(--klh-edge); border-radius:2px; padding:10px 12px; font-size:11.5px; margin-bottom:14px; }
 .feed h2 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:var(--klh-dim); margin:0 0 8px; }
 .feed .filters { margin-bottom:6px; display:flex; gap:4px; flex-wrap:wrap; }
-.feed .filters button { background:transparent; color:var(--klh-dim); border:1px solid var(--klh-edge); border-radius:2px; padding:1px 7px; font:9px ui-monospace,Menlo,monospace; text-transform:uppercase; cursor:pointer; }
+.feed .filters button { background:transparent; color:var(--klh-dim); border:1px solid var(--klh-edge); border-radius:2px; padding:1px 7px; font:9px var(--klh-font-mono); text-transform:uppercase; cursor:pointer; }
 .feed .filters button.on { color:var(--klh-accent); border-color:var(--klh-accent); }
 .feed .r { display:flex; gap:8px; padding:2px 0; }
 .feed .r .ts { width:52px; flex:none; text-align:right; color:var(--klh-dim); font-variant-numeric:tabular-nums; }

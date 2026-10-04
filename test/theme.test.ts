@@ -1,14 +1,23 @@
 // theme.test.ts — W269: the klh dark/light theme layer — token swap CSS,
 // pre-paint resolution + persistence (localStorage `klh-theme`, system =
 // prefers-color-scheme), the settings-panel binding, and every page wearing
-// the tokens instead of hardcoded palette colors.
+// the tokens instead of hardcoded palette colors. W291: scale tokens, the
+// shared klh·fleet strip, and the version pin that guards the vendored
+// copies in belt + klh-local.
 import { describe, expect, test } from "bun:test";
 import {
+	FLEET_NAV_CSS,
+	FLEET_NAV_JS,
+	FLEET_SITES,
+	fleetNav,
+	KLH_THEME_VERSION,
+	SCALE,
 	settingsBlock,
 	THEME_CSS,
 	THEME_HEAD,
 	THEME_KEY,
 	THEME_PREPAINT_JS,
+	THEME_SETTINGS_CSS,
 	THEME_SETTINGS_JS,
 	TOKENS,
 } from "../hooks/lib/theme.ts";
@@ -135,6 +144,29 @@ describe("token CSS (W269)", () => {
 	});
 });
 
+// full regex escape: scale values carry quotes, commas and dots
+const rx = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
+
+describe("scale tokens (W291)", () => {
+	test("one theme-independent :root rule, ahead of the colour sets", () => {
+		const head = THEME_CSS.slice(0, THEME_CSS.indexOf("}") + 1);
+		expect(head).toStartWith(":root{--klh-");
+		for (const [k, v] of Object.entries(SCALE)) {
+			expect(k.startsWith("--klh-")).toBe(true);
+			expect(TOKENS[k]).toBeUndefined();
+			expect(head).toContain(`${k}:${v};`);
+			expect(THEME_CSS.split(`${k}:`).length).toBe(2);
+		}
+	});
+	test("docs/theme-tokens.md lists every scale token with its value", async () => {
+		const doc = await Bun.file(
+			new URL("../docs/theme-tokens.md", import.meta.url),
+		).text();
+		for (const [k, v] of Object.entries(SCALE))
+			expect(doc).toMatch(new RegExp(`\`${k}\`\\s*\\|\\s*\`${rx(v)}\``));
+	});
+});
+
 describe("pre-paint resolution + persistence (W269)", () => {
 	test("no stored pref + no media query → system → dark", () => {
 		const b = browser({});
@@ -245,6 +277,133 @@ describe("settings panel binding (W269)", () => {
 	});
 });
 
+describe("fleet strip markup (W291)", () => {
+	test("native nav, one link per site in order, current marked + unprobed", () => {
+		const m = fleetNav("suspenders");
+		expect(m).toStartWith(
+			'<nav class="klh-fleetnav" id="klh-fleetnav" aria-label="klh fleet">',
+		);
+		const links = [...m.matchAll(/<a ([^>]*)>([^<]*)<\/a>/g)];
+		expect(links.map((l) => l[2])).toEqual(["belt", "suspenders", "local"]);
+		expect(links[1][1]).toContain('aria-current="page"');
+		expect(links[1][1]).not.toContain("data-repo");
+		for (const i of [0, 2]) {
+			expect(links[i][1]).not.toContain("aria-current");
+			expect(links[i][1]).toContain(`data-repo="${FLEET_SITES[i].repo}"`);
+		}
+		expect(fleetNav("")).not.toContain("aria-current");
+	});
+	test("sites: https .local hosts, klh repos, ports in the titles", () => {
+		const ports = { belt: ":7791", suspenders: ":7799", local: ":7792" };
+		for (const s of FLEET_SITES) {
+			expect(s.href).toMatch(/^https:\/\/[a-z]+\.local$/);
+			expect(s.repo).toBe(`https://github.com/klh/${s.id}`);
+			expect(s.title).toContain(ports[s.id]);
+		}
+	});
+	test("css is tokens only; no innerHTML / DOM construction anywhere", () => {
+		for (const css of [FLEET_NAV_CSS, THEME_SETTINGS_CSS])
+			expect(css).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);
+		for (const src of [FLEET_NAV_JS, THEME_SETTINGS_JS, THEME_PREPAINT_JS])
+			expect(src).not.toMatch(
+				/innerHTML|outerHTML|document\.write|createElement/,
+			);
+	});
+});
+
+// FLEET_NAV_JS against a fake strip: two sibling links + a scripted fetch
+function fleetStrip(up: (url: string) => boolean, hidden = false) {
+	const link = (href: string, repo: string) => {
+		const cls = new Set<string>();
+		const toggle = (c: string, on: boolean) => {
+			if (on) cls.add(c);
+			else cls.delete(c);
+		};
+		const getAttribute = (k: string) => (k === "data-repo" ? repo : null);
+		return {
+			href,
+			title: `${href} tip`,
+			cls,
+			classList: { toggle },
+			getAttribute,
+		};
+	};
+	const links = [
+		link("https://belt.local/", "https://github.com/klh/belt"),
+		link("https://bar.local/", "https://github.com/klh/local"),
+	];
+	const calls: [string, Record<string, string>][] = [];
+	const on: Record<string, () => void> = {};
+	let every = 0;
+	const document = {
+		hidden,
+		getElementById: (id: string) =>
+			id === "klh-fleetnav" ? { querySelectorAll: () => links } : null,
+		addEventListener: (t: string, f: () => void) => {
+			on[t] = f;
+		},
+	};
+	const fetch = (url: string, init: Record<string, string>) => {
+		calls.push([url, init]);
+		return up(url)
+			? Promise.resolve({})
+			: Promise.reject(new TypeError("down"));
+	};
+	const tick = (_f: () => void, ms: number) => {
+		every = ms;
+	};
+	new Function("window", "document", "setInterval", FLEET_NAV_JS)(
+		{ fetch },
+		document,
+		tick,
+	);
+	const settle = () => new Promise((r) => setTimeout(r, 0));
+	return { links, calls, on, settle, every: () => every };
+}
+
+describe("fleet strip probe (W291)", () => {
+	test("probes each sibling: HEAD /ping, no-cors, every 5s", async () => {
+		const s = fleetStrip(() => true);
+		await s.settle();
+		expect(s.calls.map((c) => c[0])).toEqual([
+			"https://belt.local/ping",
+			"https://bar.local/ping",
+		]);
+		expect(s.calls[0][1]).toEqual({
+			method: "HEAD",
+			mode: "no-cors",
+			cache: "no-store",
+		});
+		expect(s.every()).toBe(5000);
+		expect(s.links.map((l) => l.cls.has("down"))).toEqual([false, false]);
+	});
+	test("unreachable site dims + points at its repo, then recovers", async () => {
+		let barUp = false;
+		const s = fleetStrip((u) => !u.includes("bar.local") || barUp);
+		await s.settle();
+		const bar = s.links[1];
+		expect([bar.cls.has("down"), bar.href]).toEqual([
+			true,
+			"https://github.com/klh/local",
+		]);
+		expect(bar.title).toContain("unreachable");
+		expect(s.links[0].cls.has("down")).toBe(false);
+		barUp = true;
+		s.on.visibilitychange();
+		await s.settle();
+		expect([bar.cls.has("down"), bar.href, bar.title]).toEqual([
+			false,
+			"https://bar.local/",
+			"https://bar.local/ tip",
+		]);
+	});
+	test("hidden tab: no probes until it is visible again", async () => {
+		const s = fleetStrip(() => true, true);
+		await s.settle();
+		expect(s.calls).toEqual([]);
+	});
+});
+
 // strip the token block itself + data: URIs, then no palette literal remains
 const palette =
 	/#(141413|171614|1c1b19|232220|e8e6e1|98958e|d8900f|c96a4f|af2f12)\b|rgba\(255,255,255/i;
@@ -267,5 +426,60 @@ describe("pages wear the theme (W269)", () => {
 		expect(page).toContain('id="klh-settings"');
 		expect(page).toContain('<a aria-current="page" href="/console/settings">');
 		expect(bodyOf(page)).not.toMatch(palette);
+	});
+	test("board + console wear the fleet strip above #cbar, menu names pages", () => {
+		const strip = fleetNav("suspenders");
+		const page = consolePage("Belt", "belt", "<p>x</p>");
+		for (const h of [HTML, page]) {
+			expect(h.split(strip).length).toBe(2);
+			expect(h.indexOf(strip)).toBeLessThan(h.indexOf('id="cbar"'));
+			expect(h).toContain(FLEET_NAV_CSS);
+			expect(h).toContain(FLEET_NAV_JS);
+		}
+		const tabs = [...page.matchAll(/class="cnav"[^>]*>([^<]+)</g)].map(
+			(m) => m[1],
+		);
+		expect(tabs).toEqual(["belt gateway", "fleet board", "local services"]);
+		expect(page).toContain('aria-current="page" href="/console/belt"');
+	});
+});
+
+describe("token names resolve (W291)", () => {
+	// a var(--klh-typo, #hex) silently wears its dark fallback forever —
+	// klh-service-row shipped --klh-base/--klh-bad: black-on-black in light
+	test("every var(--klh-*) under hooks/ names a defined token", async () => {
+		const defined = new Set(
+			[...THEME_CSS.matchAll(/(--klh-[a-z0-9-]+)\s*:/g)].map((m) => m[1]),
+		);
+		const root = `${import.meta.dir}/..`;
+		const stray: string[] = [];
+		for await (const f of new Bun.Glob("hooks/**/*.ts").scan(root)) {
+			const src = await Bun.file(`${root}/${f}`).text();
+			for (const m of src.matchAll(/var\((--klh-[a-z0-9-]+)/g))
+				if (!defined.has(m[1])) stray.push(`${f}: ${m[1]}`);
+		}
+		expect(stray).toEqual([]);
+	});
+});
+
+describe("vendoring pin (W291)", () => {
+	test("THEME_HEAD stamps the version on the token block", () => {
+		expect(THEME_HEAD).toStartWith(
+			`<style id="klh-theme-tokens" data-klh-theme="${KLH_THEME_VERSION}">`,
+		);
+	});
+	// Edited hooks/lib/theme.ts? Bump KLH_THEME_VERSION, paste the new sha256
+	// here, then re-copy the file to belt + local bin/klh-theme.ts
+	// (docs/theme-tokens.md, "Vendoring").
+	test("theme.ts bytes are pinned to KLH_THEME_VERSION", async () => {
+		const src = await Bun.file(
+			new URL("../hooks/lib/theme.ts", import.meta.url),
+		).arrayBuffer();
+		const sha256 = new Bun.CryptoHasher("sha256").update(src).digest("hex");
+		expect({ version: KLH_THEME_VERSION, sha256 }).toEqual({
+			version: "1.1.0",
+			sha256:
+				"5941ab1ba3ce1b25af38cd46ff68a70182dd2be8d55a0ef739f65f87a80b6d99",
+		});
 	});
 });

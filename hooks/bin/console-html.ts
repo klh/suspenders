@@ -3,8 +3,10 @@
 // string builders on the klh theme tokens (hooks/lib/theme.ts — var(--klh-*),
 // dark/light via data-theme), inline SVG, no framework, no external deps.
 //
-// The top bar is the klh-stack shell: wordmark + [belt | suspenders | local]
-// menu, gear → settings panel (theme + console settings link), avatar circle with a keyboard-reachable actor
+// The top bar is the klh-stack shell: the shared klh·fleet strip (theme.ts
+// fleetNav — belt · suspenders · local, the same row belt.local and bar.local
+// wear) above the console bar: wordmark + [belt gateway | fleet board | local
+// services] menu, gear → settings panel (theme + console settings link), avatar circle with a keyboard-reachable actor
 // dropdown. The SPA board interpolates TOPBAR the same way (String.raw
 // interpolates ${}; only escapes are raw), so every page wears one shell.
 //
@@ -19,6 +21,9 @@ import type {
 } from "../lib/board-config.ts";
 import { scrub } from "../lib/servicemon.ts";
 import {
+	FLEET_NAV_CSS,
+	FLEET_NAV_JS,
+	fleetNav,
 	settingsBlock,
 	THEME_HEAD,
 	THEME_SETTINGS_CSS,
@@ -44,6 +49,7 @@ export const esc = (s: string): string =>
 
 const SHELL_CSS = `
 #cbbar { display:none; }
+#klh-fleetnav { margin:0; padding:var(--klh-space-2) var(--klh-space-5); background:var(--klh-panel); }
 #cbar { display:flex; align-items:center; gap:14px; padding:7px 16px; border-bottom:1px solid var(--klh-edge-soft); background:var(--klh-panel); position:sticky; top:0; z-index:50; }
 #cbar .cw { font-size:12px; font-weight:700; letter-spacing:.10em; color:var(--klh-ink); text-decoration:none; white-space:nowrap; }
 #cbar .cwdot { color:var(--klh-accent); }
@@ -53,11 +59,11 @@ const SHELL_CSS = `
 #cbar .cnav[aria-current] { color:var(--klh-ink); border-bottom-color:var(--klh-accent); }
 #cbar .cend { margin-left:auto; display:flex; align-items:center; gap:12px; }
 .cavwrap { position:relative; }
-.cavbtn { width:26px; height:26px; border-radius:50%; border:1px solid var(--klh-edge-strong); background:var(--klh-surface-hi); color:var(--klh-ink); font:600 11px/1 -apple-system,sans-serif; cursor:pointer; padding:0; }
+.cavbtn { width:26px; height:26px; border-radius:50%; border:1px solid var(--klh-edge-strong); background:var(--klh-surface-hi); color:var(--klh-ink); font:600 11px/1 var(--klh-font-sans); cursor:pointer; padding:0; }
 .cavbtn:hover, .cavbtn[aria-expanded="true"] { border-color:var(--klh-accent); color:var(--klh-accent); }
 .cavdrop { position:absolute; right:0; top:32px; width:260px; background:var(--klh-surface); border:1px solid var(--klh-edge); border-radius:3px; padding:10px 12px; box-shadow:0 4px 18px var(--klh-shadow); }
 .cavhead { display:flex; gap:9px; align-items:center; }
-.cavbig { width:30px; height:30px; border-radius:50%; border:1px solid var(--klh-edge-strong); background:var(--klh-surface-hi); color:var(--klh-ink); font:600 13px/30px -apple-system,sans-serif; text-align:center; flex:none; }
+.cavbig { width:30px; height:30px; border-radius:50%; border:1px solid var(--klh-edge-strong); background:var(--klh-surface-hi); color:var(--klh-ink); font:600 13px/30px var(--klh-font-sans); text-align:center; flex:none; }
 .cavname { font-size:12.5px; color:var(--klh-ink); font-weight:600; word-break:break-all; }
 .cavsub { font-size:10.5px; color:var(--klh-dim); }
 .cavsec { margin-top:9px; font-size:10px; color:var(--klh-dim); text-transform:uppercase; letter-spacing:.06em; }
@@ -91,7 +97,7 @@ export const topbar = (
 	const dropInner = me
 		? `<div class="cavhead"><span class="cavbig">${esc(initial(actor))}</span><span><span class="cavname">${esc(actor)}</span><br><span class="cavsub">${tagLine(me.tags)}</span></span></div><div class="cavsec">switch actor (demo preview)</div>${sel()}<div class="cavnote">demo preview — stamps nothing live; live switching is a follow-up item</div>`
 		: `<div class="cavname" id="cavload">loading actor…</div>`;
-	return `<style>${SHELL_CSS}${THEME_SETTINGS_CSS}</style><nav id="cbar" aria-label="klh console"><a class="cw" href="/">klh·console</a><span class="cnavs"><a class="cnav"${cur("belt")} href="/console/belt">belt</a><a class="cnav"${cur("suspenders")} href="/">suspenders</a><a class="cnav"${cur("local")} href="/console/local">local</a></span><span class="cend">${settingsBlock(`<a${cur("settings")} href="/console/settings">all console settings &rarr;</a>`)}<span class="cavwrap"><button type="button" id="cavbtn" class="cavbtn" aria-haspopup="true" aria-expanded="false" aria-label="current actor">${esc(initial(actor))}</button><span id="cavdrop" class="cavdrop" hidden>${dropInner}</span></span></span></nav>`;
+	return `<style>${SHELL_CSS}${THEME_SETTINGS_CSS}${FLEET_NAV_CSS}</style>${fleetNav("suspenders")}<nav id="cbar" aria-label="klh console"><a class="cw" href="/">klh<span class="cwdot">·</span>console</a><span class="cnavs"><a class="cnav"${cur("belt")} href="/console/belt">belt gateway</a><a class="cnav"${cur("suspenders")} href="/">fleet board</a><a class="cnav"${cur("local")} href="/console/local">local services</a></span><span class="cend">${settingsBlock(`<a${cur("settings")} href="/console/settings">all console settings &rarr;</a>`)}<span class="cavwrap"><button type="button" id="cavbtn" class="cavbtn" aria-haspopup="true" aria-expanded="false" aria-label="current actor">${esc(initial(actor))}</button><span id="cavdrop" class="cavdrop" hidden>${dropInner}</span></span></span></nav>`;
 };
 
 // Dropdown behavior: click toggles, outside-click + Escape close (focus
@@ -130,7 +136,8 @@ sec.after(sel);
 var note=document.createElement('div');note.className='cavnote';note.textContent='demo preview — stamps nothing live; live switching is a follow-up item';sel.after(note);
 }).catch(function(){});}
 })();`;
-export const TOPBAR_JS = TOPBAR_JS_A + TOPBAR_JS_B + THEME_SETTINGS_JS;
+export const TOPBAR_JS =
+	TOPBAR_JS_A + TOPBAR_JS_B + THEME_SETTINGS_JS + FLEET_NAV_JS;
 
 // ─── page shell ───────────────────────────────────────────────────────────
 export const consolePage = (
@@ -139,7 +146,7 @@ export const consolePage = (
 	body: string,
 	me?: ConsoleMe,
 ): string =>
-	`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>${THEME_HEAD}<style>body{background:var(--klh-bg);color:var(--klh-ink);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;margin:0;padding:0 20px 28px;}a{color:var(--klh-accent)}.ptitle{font-size:14px;letter-spacing:.08em;margin:16px 0 10px;color:var(--klh-ink)}.panel{background:var(--klh-surface);border:1px solid var(--klh-edge-soft);border-radius:3px;padding:12px 14px;margin:0 0 14px}.panel h2{margin:0 0 8px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--klh-dim)}.dim{color:var(--klh-dim)}.ok{color:var(--klh-ok)}.bad{color:var(--klh-danger-ink)}table.ct{width:100%;border-collapse:collapse;font-size:12px}table.ct td,table.ct th{padding:5px 8px;border-bottom:1px solid var(--klh-rule);text-align:left}table.ct th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--klh-dim)}.num{font-variant-numeric:tabular-nums}.btn{background:var(--klh-accent);color:var(--klh-on-accent);border:1px solid var(--klh-accent);border-radius:2px;padding:5px 14px;font:inherit;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;cursor:pointer}.btn2{background:var(--klh-bg);color:var(--klh-ink);border:1px solid var(--klh-edge-strong);border-radius:2px;padding:5px 12px;font:inherit;font-size:11px;cursor:pointer;text-decoration:none;display:inline-block}input,select,textarea{background:var(--klh-bg);color:var(--klh-ink);border:1px solid var(--klh-edge);border-radius:2px;padding:5px 8px;font:12px ui-monospace,Menlo,monospace}label.k{display:block;font-size:10px;color:var(--klh-dim);text-transform:uppercase;letter-spacing:.06em;margin:8px 0 3px}input.wide{width:100%}.flash{border:1px solid var(--klh-ok);color:var(--klh-ok-hi);background:var(--klh-ok-bg);border-radius:2px;padding:7px 10px;font-size:12px;margin:0 0 14px}.errbox{border:1px solid var(--klh-danger);color:var(--klh-danger-ink);background:var(--klh-danger-bg);border-radius:2px;padding:7px 10px;font-size:12px;margin:0 0 14px;white-space:pre-wrap;word-break:break-word}pre.diff{background:var(--klh-bg);border:1px solid var(--klh-edge);border-radius:2px;padding:10px 12px;font:11px/1.5 ui-monospace,Menlo,monospace;overflow:auto}pre.diff .add{color:var(--klh-ok-hi);display:block}pre.diff .del{color:var(--klh-danger-ink);display:block}.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}@media (max-width:700px){.formgrid{grid-template-columns:1fr}}.cfoot{font-size:10.5px;color:var(--klh-dim);margin-top:4px}</style></head><body>${topbar(active, me)}<main style="max-width:980px;margin:0 auto"><h1 class="ptitle">${esc(title)}</h1>${body}<div class="cfoot">klh console · part of the suspenders fleet board</div></main><script>${TOPBAR_JS}</script></body></html>`;
+	`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>${THEME_HEAD}<style>body{background:var(--klh-bg);color:var(--klh-ink);font:13px/1.45 var(--klh-font-sans);margin:0;padding:0 20px 28px;}a{color:var(--klh-accent)}.ptitle{font-size:14px;letter-spacing:.08em;margin:16px 0 10px;color:var(--klh-ink)}.panel{background:var(--klh-surface);border:1px solid var(--klh-edge-soft);border-radius:3px;padding:12px 14px;margin:0 0 14px}.panel h2{margin:0 0 8px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--klh-dim)}.dim{color:var(--klh-dim)}.ok{color:var(--klh-ok)}.bad{color:var(--klh-danger-ink)}table.ct{width:100%;border-collapse:collapse;font-size:12px}table.ct td,table.ct th{padding:5px 8px;border-bottom:1px solid var(--klh-rule);text-align:left}table.ct th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--klh-dim)}.num{font-variant-numeric:tabular-nums}.btn{background:var(--klh-accent);color:var(--klh-on-accent);border:1px solid var(--klh-accent);border-radius:2px;padding:5px 14px;font:inherit;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;cursor:pointer}.btn2{background:var(--klh-bg);color:var(--klh-ink);border:1px solid var(--klh-edge-strong);border-radius:2px;padding:5px 12px;font:inherit;font-size:11px;cursor:pointer;text-decoration:none;display:inline-block}input,select,textarea{background:var(--klh-bg);color:var(--klh-ink);border:1px solid var(--klh-edge);border-radius:2px;padding:5px 8px;font:12px var(--klh-font-mono)}label.k{display:block;font-size:10px;color:var(--klh-dim);text-transform:uppercase;letter-spacing:.06em;margin:8px 0 3px}input.wide{width:100%}.flash{border:1px solid var(--klh-ok);color:var(--klh-ok-hi);background:var(--klh-ok-bg);border-radius:2px;padding:7px 10px;font-size:12px;margin:0 0 14px}.errbox{border:1px solid var(--klh-danger);color:var(--klh-danger-ink);background:var(--klh-danger-bg);border-radius:2px;padding:7px 10px;font-size:12px;margin:0 0 14px;white-space:pre-wrap;word-break:break-word}pre.diff{background:var(--klh-bg);border:1px solid var(--klh-edge);border-radius:2px;padding:10px 12px;font:11px/1.5 var(--klh-font-mono);overflow:auto}pre.diff .add{color:var(--klh-ok-hi);display:block}pre.diff .del{color:var(--klh-danger-ink);display:block}.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}@media (max-width:700px){.formgrid{grid-template-columns:1fr}}.cfoot{font-size:10.5px;color:var(--klh-dim);margin-top:4px}</style></head><body>${topbar(active, me)}<main style="max-width:980px;margin:0 auto"><h1 class="ptitle">${esc(title)}</h1>${body}<div class="cfoot">klh console · part of the suspenders fleet board</div></main><script>${TOPBAR_JS}</script></body></html>`;
 
 // ─── belt gateway view (/console/belt) ────────────────────────────────────
 // W273: a probe row carries its recovery-map entry (null = unmapped)
@@ -194,7 +201,7 @@ const healthHtml = (h: HealthProbe[]): string => {
 	return `<div class="panel"><h2>Fleet services · ${h.length - dark}/${h.length} up${dark ? ` · ${dark} need recovery` : ""}</h2>${h.map(serviceRowHtml).join("")}</div><script type="module" src="/vendor/klh-service-row.js"></script>`;
 };
 
-const PILL_CSS = `.tiles{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px}.tile{flex:1 1 180px;background:var(--klh-surface);border:1px solid var(--klh-edge-soft);border-radius:3px;padding:10px 14px}.tnum{font-size:16px;font-weight:600}.tkey{font-size:10px;color:var(--klh-dim);text-transform:uppercase;letter-spacing:.06em;margin-top:2px}.tsub{font-size:10.5px;color:var(--klh-dim);margin-top:3px}.srow{padding:4px 0}.rcmd{margin:2px 0 6px;background:var(--klh-surface);border:1px solid var(--klh-edge);border-radius:2px;padding:4px 8px;font:11px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap}.pill{display:inline-block;border:1px solid var(--klh-edge);border-radius:2px;padding:1px 7px;font-size:11px;color:var(--klh-ink-2);margin:1px 3px 1px 0}`;
+const PILL_CSS = `.tiles{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px}.tile{flex:1 1 180px;background:var(--klh-surface);border:1px solid var(--klh-edge-soft);border-radius:3px;padding:10px 14px}.tnum{font-size:16px;font-weight:600}.tkey{font-size:10px;color:var(--klh-dim);text-transform:uppercase;letter-spacing:.06em;margin-top:2px}.tsub{font-size:10.5px;color:var(--klh-dim);margin-top:3px}.srow{padding:4px 0}.rcmd{margin:2px 0 6px;background:var(--klh-surface);border:1px solid var(--klh-edge);border-radius:2px;padding:4px 8px;font:11px/1.5 var(--klh-font-mono);white-space:pre-wrap}.pill{display:inline-block;border:1px solid var(--klh-edge);border-radius:2px;padding:1px 7px;font-size:11px;color:var(--klh-ink-2);margin:1px 3px 1px 0}`;
 
 // ─── belt page body ───────────────────────────────────────────────────────
 const policyCard = (v: BeltView): string => {

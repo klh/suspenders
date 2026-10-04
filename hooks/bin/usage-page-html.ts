@@ -238,7 +238,7 @@ table.umtab td, table.umtab th { padding:2px 10px 2px 0; font-size:11px; text-al
 .uchart { width:100%; }
 /* uPlot chrome on the board dark palette: recessive grid + muted axis ink
    are also set per-axis in usage-charts.ts; these style the live legend */
-.uplot .u-legend { font: 10.5px/1.7 ui-monospace,Menlo,monospace; color:var(--klh-ink-2); text-transform:uppercase; letter-spacing:.04em; }
+.uplot .u-legend { font: 10.5px/1.7 var(--klh-font-mono); color:var(--klh-ink-2); text-transform:uppercase; letter-spacing:.04em; }
 .uplot .u-legend .u-value { font-variant-numeric:tabular-nums; color:var(--klh-ink); }
 .uplot .u-legend .u-series.u-off { opacity:.4; }
 .uplot .u-marker { width:9px; height:9px; border-radius:2px; }
@@ -268,5 +268,5 @@ export function usagePage(
 	const tbl = `<div class="upanel"><h2>ACTORS</h2><table class="uacts"><thead><tr><th>actor</th><th style="width:38%">tokens by model group</th><th class="unum">total</th><th class="unum">req</th></tr></thead><tbody>${actorRows(r)}</tbody></table></div>`;
 	const back = `<div class="uback"><a href="/">&larr; fleet board</a><span class="uwin">${r.days}d window · buckets UTC-hourly · charts read usage_rollup · filter state lives in the URL — copy the address bar to share this exact view</span></div>`;
 	const scripts = `<style>${UPLOT_CSS}</style><script type="application/json" id="usage-data">${chartPayload(r)}</script><script>${TOPBAR_JS}</script><script>${USAGE_CHART_JS}</script>`;
-	return `<!doctype html><html><head><meta charset="utf-8"><title>FLEET USAGE</title>${THEME_HEAD}<style>body{background:var(--klh-bg);color:var(--klh-ink);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;margin:0;padding:0 20px 28px;}a{color:var(--klh-accent)}.utitle{font-size:14px;letter-spacing:.08em;margin:14px 0 10px;color:var(--klh-ink)}${U_CSS}</style></head><body>${topbar("suspenders")}<main style="max-width:1060px;margin:0 auto">${back}${head}${timeline}${hours}${tbl}${aidsHtml(r)}</main><script>${UPILOT_SRC}</script>${scripts}</body></html>`;
+	return `<!doctype html><html><head><meta charset="utf-8"><title>FLEET USAGE</title>${THEME_HEAD}<style>body{background:var(--klh-bg);color:var(--klh-ink);font:13px/1.45 var(--klh-font-sans);margin:0;padding:0 20px 28px;}a{color:var(--klh-accent)}.utitle{font-size:14px;letter-spacing:.08em;margin:14px 0 10px;color:var(--klh-ink)}${U_CSS}</style></head><body>${topbar("suspenders")}<main style="max-width:1060px;margin:0 auto">${back}${head}${timeline}${hours}${tbl}${aidsHtml(r)}</main><script>${UPILOT_SRC}</script>${scripts}</body></html>`;
 }
